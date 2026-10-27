@@ -34,16 +34,16 @@ export class VideoPipeline {
     this.decoderSlot = new DecoderSlot();
     this.noCodecWarned = false;
     // Page lifetime too: reset()/close() flush and stop it rather than
-    // replacing it, so swapping `this.phase` for a fake (tests, or a
-    // future enable/disable toggle) takes effect at every call site.
+    // replacing it, so swapping `this.phase` for a fake (tests) takes
+    // effect at every call site, and its `enabled` preference survives
+    // every Connect.
     // onEvicted is the controller's only path back to us when it drops
     // queued frames with no caller of its own to hand them to (disable,
     // a transit jump, a hidden tab the tick timer catches). A spotter has
-    // nothing to phase-lock: the controller's own constructor resets
-    // itself unconditionally (it has no notion of "mode"), so starving it
-    // of the module here is what actually keeps a spotter session from
-    // ever making a real _webgs_phase_* call -- not just skipping reset()
-    // later in VideoPipeline's own reset()/close().
+    // nothing to phase-lock: the controller resets itself on every
+    // VideoPipeline reset() and has no notion of "mode", so starving it of
+    // the module here is what keeps a spotter session from ever making a
+    // real _webgs_phase_* call.
     const spotterSafeModule = () => (this.getMode() === 'gs' ? getModule() : null);
     this.phase = new PhaseController({ getModule: spotterSafeModule, getLowPower, onEvicted: (es) => this._closeEntries(es) });
     this._heldMeta = new Map();   // held VideoFrame -> { rec, tOutRaw }
@@ -124,15 +124,13 @@ export class VideoPipeline {
   }
 
   reset() {
-    // Spotter mode never starts the loop (see _startPhaseLoop) and the
-    // constructor's spotterSafeModule already keeps the controller from
-    // making a real wasm call either way; skip calling it at all so a
-    // spotter session isn't paying even the cheap JS cost of a reset
-    // nothing ever uses.
-    if (this.getMode() === 'gs') {
-      this._flushPhase();
-      this._closeEntries(this.phase.reset());
-    }
+    // Keyed on whether the loop is running, not on getMode(): at a
+    // Connect's reset() the session still reports the previous session's
+    // mode. The controller's own reset() always runs (pure JS; a spotter's
+    // spotterSafeModule hands it no module, so it makes no wasm call) so
+    // the next GS session starts from a fresh grid, window and counters.
+    if (this._phaseLive) this._flushPhase();
+    this._closeEntries(this.phase.reset());
     this.gate = new Gate();
     this.idr = new IdrRequester();
     this.unwrap = new PtsUnwrap();
@@ -198,7 +196,7 @@ export class VideoPipeline {
             // hidden, late, a refused push, a bad >3-period estimate): an
             // older held frame must not outlive this one by sitting in the
             // queue until the rAF loop draws it later, over this one.
-            this._closeEntries(this.phase.flush());
+            this._closeEntries(this.phase.displaceQueued());
           }
         }
         if (!held) {
@@ -377,7 +375,7 @@ export class VideoPipeline {
 
   // Session left live: release the hardware decoder now, not at the next Connect.
   close() {
-    if (this.getMode() === 'gs') this._flushPhase();
+    if (this._phaseLive) this._flushPhase();
     this.gate.onDecoderError();
     this.submitted.clear();
     this.decoder = this.decoderSlot.replace(null);

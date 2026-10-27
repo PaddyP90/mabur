@@ -1,13 +1,12 @@
-// Page-side pure logic for phase-locking the drone's camera to the
-// browser's refresh (promoted from the wasm-spike throwaway). A continuous
-// rAF loop feeds VsyncGrid the browser's own tick times; LatenessWindow
-// tracks the clean-link delivery floor and the spread the regulator must
-// cover, the same two numbers maburplay's FrameRegulator keeps; slot()
-// turns a frame's pts into a release tick on the fitted grid; HoldQueue
-// defers a decoded frame to its release tick instead of drawing it the
-// instant WebCodecs hands it back, the way the regulator holds a frame for
-// maburplay. No DOM or module calls here -- the video pipeline wires these
-// in separately.
+// Page side of phase-locking the drone's camera to the browser's refresh.
+// A continuous rAF loop feeds VsyncGrid the browser's own tick times;
+// LatenessWindow tracks the clean-link delivery floor and the spread the
+// regulator must cover, the same two numbers maburplay's FrameRegulator
+// keeps; slot() turns a frame's pts into a release tick on the fitted grid;
+// HoldQueue defers a decoded frame to its release tick instead of drawing it
+// the instant WebCodecs hands it back, the way the regulator holds a frame
+// for maburplay. Those four are pure (no DOM, no module calls);
+// PhaseController at the bottom is the glue to the wasm exports.
 
 // Nearest-rank percentile with linear index rounding (not truncation): the
 // fit below needs the true nearest sample, not a biased-low floor.
@@ -20,9 +19,10 @@ function pct(a, p) {
 // Fits a period + phase to the browser's rAF timestamps, snapping a wobbly
 // rAF callback time (observed +-1.9 ms while drawing, on macOS Chrome) back
 // onto the steady grid underneath it. Refit every 30 ticks over the last
-// 240: a least-squares period across steps near the median (so a missed
-// frame's double-length step still counts, weighted by its multiple) and a
-// median-residual phase (robust to the occasional wobbled sample).
+// 240: the period is a ratio estimate, sum(step) / sum(k) over the steps
+// within 30 % of a whole multiple k (1-3) of the median step -- so a missed
+// frame's double-length step still counts, as two periods -- and the phase
+// is the median residual (robust to the occasional wobbled sample).
 export class VsyncGrid {
   constructor() {
     this._hist = [];
@@ -118,8 +118,9 @@ export class LatenessWindow {
 }
 
 // A frame's pts (ms) wants to show no earlier than floor + allow after
-// capture; slot() resolves that want onto the fitted grid's next tick, the
-// margin feeding the C++ PhaseLock exactly as the spike's onFrameInner did.
+// capture; slot() resolves that want onto the fitted grid's next tick. The
+// margin (release - want) is what the C++ PhaseLock steers toward its
+// target: how far ahead of its release tick the frame was ready.
 // null whenever either input is missing: the lateness window hasn't warmed
 // up, or the grid has no period yet.
 export function slot(ptsMs, floor, allow, grid) {
@@ -171,13 +172,22 @@ export class HoldQueue {
 
 const PHASE_STATE_NAMES = { 0: 'wait', 1: 'acq', 2: 'lock', 3: 'oor' };
 
+// The drone's pts is 32-bit us; frame.timestamp is the page's unwrapped
+// timeline, which passes 2^32 after ~71.6 min of drone uptime. The core's
+// source-rate estimate wants the drone's own value back.
+const TWO32 = 4294967296;
+const low32 = (us) => ((us % TWO32) + TWO32) % TWO32;
+
 // Glue between the page classes above and the nine wasm exports: feeds the
 // grid and the lateness window from the decoder's output and the page's
 // own rAF, drives the C++ PhaseLock through its tick/frame/discontinuity
 // calls, and decides whether a decoded frame should wait for its release
 // tick (held in a HoldQueue) or draw right away. getModule() is null until
 // the wasm core attaches (or forever, in spotter mode, where the caller
-// never touches this class at all). onEvicted(entries) is how a flush that
+// never touches this class at all). Every export goes through _mod(): the
+// first time a module it has not reset shows up, it is reset before any
+// other call reaches it -- reset() itself usually runs before the session
+// has a module at all. onEvicted(entries) is how a flush that
 // happens with no caller waiting for a return value (a disable, a transit
 // jump, a hidden tab caught by the tick timer) still reaches the pipeline:
 // it owns every VideoFrame.close() and the bookkeeping that goes with it.
@@ -208,11 +218,13 @@ export class PhaseController {
 
   // New session: re-arms the C++ lock and starts the grid/window/queue
   // over. Doesn't touch `enabled` -- that's a standing preference, not
-  // per-session state. Returns whatever was still queued (normally
-  // nothing -- the caller flushes first -- kept as a ledger rather than
-  // silently dropped).
+  // per-session state. With no module yet, the next one _mod() sees is
+  // reset on first use instead. Returns whatever was still queued
+  // (normally nothing -- the caller flushes first -- kept as a ledger
+  // rather than silently dropped).
   reset() {
     const mod = this.getModule();
+    this._resetMod = mod || null;
     if (mod) mod._webgs_phase_reset();
     const dropped = this.queue ? this.queue.flush() : [];
     this.grid = new VsyncGrid();
@@ -242,8 +254,19 @@ export class PhaseController {
     if (this._timer != null) { clearInterval(this._timer); this._timer = null; }
   }
 
-  _stateName() {
+  // The live module, re-armed exactly once the first time it differs from
+  // the one last reset (a Connect's module appears after reset() ran).
+  _mod() {
     const mod = this.getModule();
+    if (mod && mod !== this._resetMod) {
+      this._resetMod = mod;
+      mod._webgs_phase_reset();
+    }
+    return mod;
+  }
+
+  _stateName() {
+    const mod = this._mod();
     if (!mod) return 'off';
     return PHASE_STATE_NAMES[mod._webgs_phase_state()] ?? 'off';
   }
@@ -271,7 +294,7 @@ export class PhaseController {
     let discontinuity = false;
     if (floorBefore != null && Math.abs(d - floorBefore) > 1000) {
       discontinuity = true;
-      const mod = this.getModule();
+      const mod = this._mod();
       if (mod) mod._webgs_phase_discontinuity(tOut * 1000);
       this.window.reset();
       // These were queued before the jump; onFrame only returns a verdict
@@ -282,10 +305,10 @@ export class PhaseController {
     this.window.add(d);
 
     const s = slot(ptsMs, this.window.floor, this.window.allow, this.grid);
-    const mod = this.getModule();
+    const mod = this._mod();
     // pts always feeds the lock's source-rate estimate; the margin is NaN
     // whenever slot() couldn't resolve one (window/grid not warm yet).
-    if (mod) mod._webgs_phase_frame(ptsUs, s ? s.margin * 1000 : NaN, this.grid.period * 1000, tOut * 1000);
+    if (mod) mod._webgs_phase_frame(low32(ptsUs), s ? s.margin * 1000 : NaN, this.grid.period * 1000, tOut * 1000);
 
     if (discontinuity) return 'now';
     if (!this._enabled || document.hidden || this._stateName() !== 'lock') return 'now';
@@ -312,7 +335,7 @@ export class PhaseController {
   // _startPhaseLoop's own visibilitychange listener is the fast path and
   // usually gets there first.
   tick(nowMs, { lowPower, visible }) {
-    const mod = this.getModule();
+    const mod = this._mod();
     const panelHz = this.grid.period ? 1000 / this.grid.period : 0;
     const lp = lowPower === true ? 1 : lowPower === false ? 0 : 2;
     const vis = this._enabled && visible ? 1 : 0;
@@ -322,13 +345,22 @@ export class PhaseController {
   }
 
   // Queued entries for an explicit caller to close: a session reset or
-  // close, or a 'now' verdict that must not let an older held frame
-  // outlive it. Internal evictions (disable, discontinuity, hidden tab)
-  // go through onEvicted instead -- nothing calls this to receive those.
+  // close, or a hidden tab. Internal evictions (disable, discontinuity,
+  // hidden tab caught by the tick) go through onEvicted instead -- nothing
+  // calls this to receive those.
   flush() { return this.queue.flush(); }
 
+  // The same, for a 'now' verdict that must not let an older held frame
+  // outlive the frame it just drew: those never reach the screen, so they
+  // count as displaced.
+  displaceQueued() {
+    const entries = this.queue.flush();
+    this._displacedTotal += entries.length;
+    return entries;
+  }
+
   snapshot() {
-    const mod = this.getModule();
+    const mod = this._mod();
     return {
       state: this._stateName(),
       errMs: mod ? mod._webgs_phase_err_ms() : NaN,

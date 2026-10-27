@@ -301,7 +301,10 @@ test('a newer "now" frame flushes any older held frame first (no out-of-order dr
       // matter here) while A is still sitting in the queue.
       onFrame() { onFrameCalls++; return onFrameCalls === 1 ? 'hold' : 'now'; },
       onRaf() { return { draw: null, displaced: [] }; },
-      flush() { return onFrameCalls >= 2 ? [{ frame: frameA }] : []; },
+      // The 'now' path takes the queue through displaceQueued() (counted as
+      // displaced), not the uncounted flush() a reset/close uses.
+      flush() { return []; },
+      displaceQueued() { return onFrameCalls >= 2 ? [{ frame: frameA }] : []; },
     };
     t = 10; au(v, IRAP, 1000, hvcc);
     const loopCb = rafCbs[0];   // the continuous phase loop, captured before frameB adds more
@@ -350,6 +353,35 @@ test('visibilitychange to hidden flushes and closes the hold queue at once', () 
     v.close();
     assert.equal(visCbs.length, 0, 'close() removed the listener');
   } finally { document.hidden = false; }
+});
+
+// getMode() is the session's mode, which reads the PREVIOUS session's
+// mode at the next Connect's reset(): the running loop must be torn down
+// on whether it is running, not on what the mode says now.
+test('close() and reset() stop a running phase loop even after the mode changed', () => {
+  globalThis.VideoDecoder = FakeDecoder;
+  for (const how of ['close', 'reset']) {
+    rafCbs = [];
+    visCbs = [];
+    let mode = 'gs';
+    const v = new VideoPipeline({ getCanvas: () => null, getMode: () => mode });
+    const held = { closed: false, close() { this.closed = true; } };
+    let stops = 0;
+    v.phase = {
+      start() {}, stop() { stops++; }, reset() { return []; },
+      onFrame() { return 'hold'; },
+      onRaf() { return { draw: null, displaced: [] }; },
+      flush() { return [{ frame: held }]; },
+      displaceQueued() { return []; },
+    };
+    au(v, IRAP, 1000, hvcc);
+    assert.equal(visCbs.length, 1, `${how}: loop running`);
+    mode = 'spotter';
+    v[how]();
+    assert.equal(visCbs.length, 0, `${how}: listener removed`);
+    assert.ok(stops >= 1, `${how}: tick timer stopped`);
+    assert.equal(held.closed, true, `${how}: held frame closed`);
+  }
 });
 
 test('spotter mode never touches the phase controller (no wasm reset call)', () => {

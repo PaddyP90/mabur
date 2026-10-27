@@ -741,18 +741,22 @@ EMSCRIPTEN_KEEPALIVE void webgs_set_local_rec(int on, const char* name) {
   ++g_lrec.seq;
 }
 
-// webgs_phase_*: the page's phase lock (web_phase.h), driven at ~20 Hz from
-// the page's own rAF/vsync loop -- a release thread the browser has no
-// equivalent of. All main-thread; one WebPhase per module, (re)created by
-// webgs_phase_reset. The other exports are no-ops (state -1, zeros) before
-// that first call.
+// webgs_phase_*: the page's phase lock (web_phase.h). The page calls
+// webgs_phase_tick from a 50 ms timer and webgs_phase_frame once per decoded
+// frame; its rAF loop only fits the vsync grid and releases held frames --
+// the browser has no release thread to run this from. All main-thread; one
+// WebPhase per module, (re)created by webgs_phase_reset. The other exports
+// are no-ops (state -1, zeros) before that first call.
 EMSCRIPTEN_KEEPALIVE void webgs_phase_reset() {
   g_phase = std::make_unique<webgs::WebPhase>();
 }
 EMSCRIPTEN_KEEPALIVE void webgs_phase_frame(double pts_us, double margin_us, double period_us,
                                              double now_us) {
+  // pts_us is the drone's 32-bit pts (the page passes the low 32 bits of
+  // its unwrapped timeline); going through uint64_t keeps a larger value
+  // a defined wrap instead of an out-of-range float-to-uint32 conversion.
   if (g_phase)
-    g_phase->on_frame(static_cast<uint32_t>(pts_us), margin_us, period_us,
+    g_phase->on_frame(static_cast<uint32_t>(static_cast<uint64_t>(pts_us)), margin_us, period_us,
                        static_cast<uint64_t>(now_us));
 }
 EMSCRIPTEN_KEEPALIVE void webgs_phase_discontinuity(double now_us) {

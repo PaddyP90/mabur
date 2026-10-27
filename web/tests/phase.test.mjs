@@ -1,4 +1,4 @@
-// node --test web/tests/phase.test.mjs (promoted from the wasm-spike throwaway)
+// node --test web/tests/phase.test.mjs
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { VsyncGrid, LatenessWindow, slot, HoldQueue, PhaseController } from '../ui/src/lib/phase.js';
@@ -288,4 +288,77 @@ test('controller maps drone_lp', () => {
   assert.equal(calls.filter((x) => x[0] === 'tick').pop()[3], 0);
   c.tick(0, { lowPower: null, visible: true });
   assert.equal(calls.filter((x) => x[0] === 'tick').pop()[3], 2);
+});
+
+// VideoPipeline.reset() runs in connect() before the session has a module,
+// so the controller's own reset() sees null; the module that appears later
+// must still be re-armed, once, before any other export touches it.
+test('a module that appears after reset() is reset once, before any other export', () => {
+  let cur = null;
+  const c = new PhaseController({ getModule: () => cur, onEvicted: () => {} });
+  c.reset();
+  const a = fakeModule();
+  cur = a.mod;
+  c.onFrame({ frame: { close() {} }, ptsUs: 0, tOut: 20 });
+  assert.deepEqual(a.calls[0], ['reset'], 'reset is the first export the new module sees');
+  c.onFrame({ frame: { close() {} }, ptsUs: 16667, tOut: 36.667 });
+  c.tick(40, { lowPower: null, visible: true });
+  c.snapshot();
+  assert.equal(a.calls.filter((x) => x[0] === 'reset').length, 1, 'later calls do not reset again');
+
+  // The next Connect: reset() with no module yet, then a different module.
+  cur = null;
+  c.reset();
+  const b = fakeModule();
+  cur = b.mod;
+  c.tick(100, { lowPower: null, visible: true });
+  assert.deepEqual(b.calls[0], ['reset'], 'the second module is reset before its first tick');
+  c.tick(150, { lowPower: null, visible: true });
+  c.onFrame({ frame: { close() {} }, ptsUs: 0, tOut: 200 });
+  assert.equal(b.calls.filter((x) => x[0] === 'reset').length, 1);
+  assert.equal(a.calls.filter((x) => x[0] === 'reset').length, 1, 'the old module is left alone');
+
+  // A module swapped in with no reset() in between is still reset once.
+  const d = fakeModule();
+  cur = d.mod;
+  c.snapshot();
+  c.tick(250, { lowPower: null, visible: true });
+  assert.deepEqual(d.calls[0], ['reset']);
+  assert.equal(d.calls.filter((x) => x[0] === 'reset').length, 1);
+});
+
+// frame.timestamp is the unwrapped pts, which passes 2^32 us after ~71.6
+// min of drone uptime; the core's SourceRate wants the drone's own 32-bit
+// pts, so the page hands it the low 32 bits.
+test('a pts past 2^32 reaches the core as its low 32 bits', () => {
+  const { mod, calls } = fakeModule();
+  const c = newController(mod);
+  c.onFrame({ frame: { close() {} }, ptsUs: 2 ** 32 + 12345, tOut: 1000 });
+  c.onFrame({ frame: { close() {} }, ptsUs: 3 * 2 ** 32 + 7, tOut: 1016 });
+  const frames = calls.filter((x) => x[0] === 'frame');
+  assert.equal(frames[0][1], 12345);
+  assert.equal(frames[1][1], 7);
+});
+
+// A 'now' verdict closes every frame still held so none can draw later
+// over it: those never reached the screen, so they count as displaced.
+test('frames flushed by a now verdict count as displaced', () => {
+  const { mod } = fakeModule();
+  const c = newController(mod);
+  c.reset();
+  warmPhase(c, 120);
+  mod.state = 2;
+  const mk = (i) => {
+    const tOut = (120 + i) * PERIOD;
+    return { frame: { close() {} }, ptsUs: (tOut - 20) * 1000, tOut };
+  };
+  assert.equal(c.onFrame(mk(0)), 'hold');
+  assert.equal(c.onFrame(mk(1)), 'hold');
+  const before = c.snapshot().displaced;
+  mod.state = 1;
+  assert.equal(c.onFrame(mk(2)), 'now');
+  const es = c.displaceQueued();
+  assert.equal(es.length, 2);
+  assert.equal(c.snapshot().displaced, before + 2);
+  assert.equal(c.flush().length, 0);
 });
