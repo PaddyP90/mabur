@@ -85,9 +85,9 @@
   });
   function clearOsd() { if (osdLayer.screen) { osdLayer.clear(); osd.schedule(); } }
 
-  // Declared before VideoPipeline: its getModule/onWantIdr accessors close
-  // over `session`, and VideoPipeline's constructor calls one of them (via
-  // the phase controller's reset) synchronously, not just on a later tick.
+  // Declared before VideoPipeline: its accessors (getModule, onWantIdr, etc.)
+  // close over `session`, so this must exist before they are captured by the
+  // phase controller.
   const session = new Session({
     createModule: (opts) => window.createWebGs(opts),
     requestDevice: async () => {
