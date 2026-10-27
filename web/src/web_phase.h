@@ -3,8 +3,8 @@
 // web GS core. The page (not a release thread) owns the vblank grid and
 // calls on_frame() for every displayed frame and tick() at ~20 Hz; this
 // class does the same decisions gs/player's housekeeping loop does
-// (docs/phase-lock.md), minus the RCF/UDP wiring, which later tasks add on
-// top of webgs::WebGs.
+// (docs/phase-lock.md). It has no RCF wiring of its own: tick()'s return is
+// what the page hands the core thread to put in the RCF.
 #include <cstdint>
 
 #include "phase_lock.h"
@@ -21,11 +21,18 @@ class WebPhase {
   // Every displayed frame. margin_us is NaN when the page has no grid/
   // window yet; the pts still feeds the source-rate estimate. Margins are
   // ignored while mismatch() holds -- the lock is paused, not fed a number
-  // measured against a panel the source cannot reach.
+  // measured against a panel the source cannot reach -- and while not
+  // steering (the last tick() was not visible).
   void on_frame(uint32_t pts_us, double margin_us, double period_us, uint64_t now_us);
   // The pts timeline restarted (drone reboot): forget the centre, send 0.
   void on_discontinuity(uint64_t now_us);
-  // ~20 Hz from the page. Returns the snr_off to send now.
+  // ~20 Hz from the page. Returns the snr_off to send now. visible=false
+  // (hidden tab, or the page's lock disabled) stops steering: 0 is sent and
+  // the lock is frozen -- no margins, no windows -- since the drone sits at
+  // its trim and an error measured there says nothing about the lock's own
+  // offset; integrating it walks the centre off. The first visible tick
+  // after that restarts the lock from Waiting (centre 0, offset 0).
+  // SourceRate/RateMatch keep running throughout.
   int16_t tick(uint64_t now_us, double panel_hz, maburplay::RateMatch::LowPower lp, bool visible);
 
   maburplay::PhaseLock::State state() const { return lock_.state(); }
@@ -40,6 +47,7 @@ class WebPhase {
   maburplay::PhaseLock lock_;
   maburplay::SourceRate src_;
   maburplay::RateMatch match_;
+  bool steering_ = true;
   bool match_win_started_ = false;
   uint64_t match_win_start_us_ = 0;
   int16_t sent_ = 0;
