@@ -28,6 +28,7 @@
 #include "frame_file_source.h"
 #include "mabur/raw_dvr.h"
 #include "web_gs.h"
+#include "web_phase.h"
 #ifdef WEBGS_LIVE
 #include "body_queue.h"
 #include "link_card.h"
@@ -63,6 +64,21 @@ std::atomic<int> g_rec{-1};   // -1 never pressed, 0 off, 1 on
 // Page -> core IDR requests (webgs_request_idr): a monotonically increasing
 // count; the loop forwards it, and its low byte rides every RCF.
 std::atomic<uint32_t> g_idr_req{0};
+
+// Page -> core phase-lock offset (webgs_phase_tick, web_phase.h): the page's
+// performance.now() and the core thread's now_us() are different clocks, so
+// the page's tick only hands over its RETURN VALUE plus a sequence bump; the
+// live loop re-stamps the value's set_us on its own clock when it sees the
+// seq change (see live_loop), then feeds webgs::snr_off_to_send() into the
+// RCF every iteration so a stalled or closed page fades back to 0.
+std::atomic<int> g_phase_val{0};
+std::atomic<uint32_t> g_phase_seq{0};
+
+#ifdef WEBGS_PAGE
+// One per module, created by webgs_phase_reset; the other webgs_phase_*
+// exports are no-ops before it exists.
+std::unique_ptr<webgs::WebPhase> g_phase;
+#endif
 
 // Browser storage for local recordings: true once the startup OPFS probe
 // passed. Always false natively.
@@ -417,6 +433,11 @@ int live_loop(const LiveOpts& o, const maburgs::Config& cfg, uint8_t ch, int wid
   uint64_t next_stat = now_us() + 1000000;
   int applied_rec = -1;
   uint32_t applied_idr = 0;
+  // The page's phase-lock offset, re-stamped on THIS clock (now_us(), not
+  // the page's performance.now()) whenever webgs_phase_tick bumps the seq.
+  uint32_t phase_seq_seen = 0;
+  int16_t phase_val = 0;
+  uint64_t phase_set_us = 0;   // 0: snr_off_to_send reads this as stale -> 0
   for (int s = 0; o.secs == 0 || s < o.secs;) {
     if (g_stop.load(std::memory_order_acquire)) break;
     if (const int rw = g_rec.load(std::memory_order_acquire); rw != applied_rec && rw >= 0) {
@@ -467,6 +488,12 @@ int live_loop(const LiveOpts& o, const maburgs::Config& cfg, uint8_t ch, int wid
     q.drain(batch, 5);
     for (const auto& m : batch) g.on_rx(m);
     g.tick(now_us());
+    if (const uint32_t sq = g_phase_seq.load(std::memory_order_acquire); sq != phase_seq_seen) {
+      phase_seq_seen = sq;
+      phase_val = static_cast<int16_t>(g_phase_val.load(std::memory_order_acquire));
+      phase_set_us = now_us();
+    }
+    if (g.vrx()) g.vrx()->set_snr_off(webgs::snr_off_to_send(phase_val, phase_set_us, now_us()));
     if (lrec_armed && dvr.state() == mabur::RawDvr::State::Error) seal_local_rec();
     const char* lost = nullptr;
     if (auto* rcard = dynamic_cast<maburgs::RemoteCard*>(cards[0].get())) {
@@ -713,6 +740,45 @@ EMSCRIPTEN_KEEPALIVE void webgs_set_local_rec(int on, const char* name) {
   g_lrec.name = (on && name) ? name : "";
   ++g_lrec.seq;
 }
+
+// webgs_phase_*: the page's phase lock (web_phase.h), driven at ~20 Hz from
+// the page's own rAF/vsync loop -- a release thread the browser has no
+// equivalent of. All main-thread; one WebPhase per module, (re)created by
+// webgs_phase_reset. The other exports are no-ops (state -1, zeros) before
+// that first call.
+EMSCRIPTEN_KEEPALIVE void webgs_phase_reset() {
+  g_phase = std::make_unique<webgs::WebPhase>();
+}
+EMSCRIPTEN_KEEPALIVE void webgs_phase_frame(double pts_us, double margin_us, double period_us,
+                                             double now_us) {
+  if (g_phase)
+    g_phase->on_frame(static_cast<uint32_t>(pts_us), margin_us, period_us,
+                       static_cast<uint64_t>(now_us));
+}
+EMSCRIPTEN_KEEPALIVE void webgs_phase_discontinuity(double now_us) {
+  if (g_phase) g_phase->on_discontinuity(static_cast<uint64_t>(now_us));
+}
+EMSCRIPTEN_KEEPALIVE int webgs_phase_tick(double now_us, double panel_hz, int low_power,
+                                          int visible) {
+  if (!g_phase) return 0;
+  const auto lp = low_power == 1 ? maburplay::RateMatch::LowPower::kYes
+                : low_power == 2 ? maburplay::RateMatch::LowPower::kUnknown
+                                 : maburplay::RateMatch::LowPower::kNo;
+  const int16_t v = g_phase->tick(static_cast<uint64_t>(now_us), panel_hz, lp, visible != 0);
+  // Handed to the core thread as a value + seq bump, not the WebPhase
+  // itself: the core thread stamps its OWN clock on the value (live_loop),
+  // since now_us here is the page's performance.now(), not now_us().
+  g_phase_val.store(v, std::memory_order_relaxed);
+  g_phase_seq.fetch_add(1, std::memory_order_release);
+  return v;
+}
+EMSCRIPTEN_KEEPALIVE int webgs_phase_state() {
+  return g_phase ? static_cast<int>(g_phase->state()) : -1;
+}
+EMSCRIPTEN_KEEPALIVE double webgs_phase_err_ms() { return g_phase ? g_phase->err_ms() : 0.0; }
+EMSCRIPTEN_KEEPALIVE double webgs_phase_centre() { return g_phase ? g_phase->centre_mfps() : 0.0; }
+EMSCRIPTEN_KEEPALIVE int webgs_phase_mismatch() { return g_phase && g_phase->mismatch() ? 1 : 0; }
+EMSCRIPTEN_KEEPALIVE double webgs_phase_src_hz() { return g_phase ? g_phase->src_hz() : 0.0; }
 }
 #endif
 

@@ -245,6 +245,7 @@ TEST(stats_json_has_mode_and_nulls) {
   CHECK(j.find("\"rtt_ms\":null") != std::string::npos);
   CHECK(j.find("\"uplink_pct\":null") != std::string::npos);
   CHECK(j.find("\"uplink\":\"none\"") != std::string::npos);
+  CHECK(j.find("\"drone_lp\":null") != std::string::npos);
   CHECK(j.find('\n') == std::string::npos);
 }
 
@@ -586,6 +587,29 @@ TEST(rec_status_from_telem_in_stats_json) {
   const std::string j = stats_json(g.stats());
   CHECK(j.find("\"rec_state\":2") != std::string::npos);
   CHECK(j.find("\"rec_err\":5") != std::string::npos);
+}
+
+// drone_lp (Telem flags bit7, low_power): true/false while the Telem that
+// set it is <= 3 s old on WebGs's own tick clock, else null -- never left
+// pointing at a drone that went quiet.
+TEST(stats_report_drone_low_power) {
+  Io io;
+  io.on_au = [](Au&&) {};
+  io.send = [](const std::vector<uint8_t>&) {};
+  WebGs g(cfg(), Mode::Gs, 136, 40, {}, 0, io);
+  mabur::rc::Telem t;
+  t.tlm_seq = 1;
+  t.flags = 0x80;
+  g.on_rx(rc_body(mabur::rc::pack_telem(t), 1'000'000));
+  g.tick(1'000'000);
+  CHECK(stats_json(g.stats()).find("\"drone_lp\":true") != std::string::npos);
+  t.tlm_seq = 2;
+  t.flags = 0;
+  g.on_rx(rc_body(mabur::rc::pack_telem(t), 2'000'000));
+  g.tick(2'000'000);
+  CHECK(stats_json(g.stats()).find("\"drone_lp\":false") != std::string::npos);
+  g.tick(2'000'000 + 3'500'000);   // 3.5 s past the last Telem: stale
+  CHECK(stats_json(g.stats()).find("\"drone_lp\":null") != std::string::npos);
 }
 
 TEST(spotter_drone_restart_resets_and_flows) {
