@@ -21,10 +21,11 @@ export function latencyNow(snap, mode) {
 const signed = (v, d = 0) => (has(v) ? (Number(v) >= 0 ? '+' : '') + Number(v).toFixed(d) : D);
 
 // Phase lock stats group (docs/phase-lock.md "Web GS"): phase is
-// PhaseController.snapshot(), or null before the controller has anything to
-// report (disconnected, or the first tick of a session). A spotter never
-// steers (it sends 0, "Wire" in docs/phase-lock.md), so its group collapses
-// to the same single n/a row the NACK group uses.
+// PhaseController.snapshot(), or null when there is no live GS session to
+// report on (dashes). A spotter never steers (it sends 0, "Wire" in
+// docs/phase-lock.md), so its group collapses to the same single n/a row
+// the NACK group uses; a disabled lock to a single `off` row, since the
+// C++ state behind it is not steering anything.
 function phaseGroup(phase, spot) {
   if (spot) return { title: 'Phase lock', rows: [{ k: 'state', v: 'n/a' }] };
   if (!phase) {
@@ -32,6 +33,7 @@ function phaseGroup(phase, spot) {
       { k: 'state', v: D }, { k: 'offset', v: D }, { k: 'rates', v: D }, { k: 'hold', v: D },
     ] };
   }
+  if (!phase.enabled) return { title: 'Phase lock', rows: [{ k: 'state', v: 'off' }] };
   const mismatch = phase.mismatch ? ' · mismatch' : '';
   return {
     title: 'Phase lock',

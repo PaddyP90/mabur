@@ -359,4 +359,7 @@ test('statsView phase lock group', () => {
   // No phase snapshot yet (disconnected, or before the first tick): dashes.
   const off = statsView({ ...base, mode: 'gs', phase: null });
   assert.ok(off.phaseGroup.rows.every((r) => r.v === '–'));
+  // Disabled: the C++ state isn't steering anything, so it isn't shown.
+  const dis = statsView({ ...base, mode: 'gs', phase: { ...phase, enabled: false } });
+  assert.deepEqual(dis.phaseGroup.rows, [{ k: 'state', v: 'off' }]);
 });

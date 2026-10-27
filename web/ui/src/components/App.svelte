@@ -168,7 +168,7 @@
     video.phase.enabled = ui.cfg.phaseLock;
     view = statsView({ connected: live, connecting: sess.state === 'connecting', mode: shownMode, ch: sess.ch, w: live ? sess.w : ui.cfg.width,
       core, page: live ? tele.page : null, sessionCfg: live ? sessionCfg : ui.cfg, cfg: ui.cfg, videoSize: video.videoSize,
-      colour: live ? video.colour : null, phase: video.phase.snapshot() });
+      colour: live ? video.colour : null, phase: live && sess.mode === 'gs' ? video.phase.snapshot() : null });
     const target = effectiveTarget(sessionCfg.dvr, sess.mode);
     const lv = live ? localView(core) : { state: 'unknown', err: null, bytes: 0 };
     rec = live ? combinedRec({ target, vtx: recView(core), local: lv }) : { state: 'unknown', err: null };
