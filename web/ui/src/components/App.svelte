@@ -72,7 +72,11 @@
   }
 
   const video = new VideoPipeline({ getCanvas: () => canvas, getGlCanvas: () => glCanvas, getMode: () => sess.mode,
-    getColortrans: () => ui.cfg.colortrans, onWantIdr: () => session.requestIdr() });
+    getColortrans: () => ui.cfg.colortrans, onWantIdr: () => session.requestIdr(),
+    // Phase lock (docs/phase-lock.md "Web GS"): the live module (null
+    // between/before connects) and the drone's low-power flag off the
+    // latest core stats, straight through to the PhaseController.
+    getModule: () => session.mod, getLowPower: () => tele.core?.drone_lp ?? null });
   const tele = new Telemetry(video);
   // MSP OSD: latest DisplayPort grid, painted on
   // a second canvas over the video. The atlas URL resolves against the page
@@ -159,9 +163,12 @@
     if (osdLayer.isStale(performance.now())) clearOsd();   // 5 s without MSP
     if (live) tele.sample(nowMs, sess.mode);
     core = live ? tele.core : null;
+    // Phase lock: a standing preference, not per-session state (phase.js),
+    // so it's read off the form every tick rather than only on Connect.
+    video.phase.enabled = ui.cfg.phaseLock;
     view = statsView({ connected: live, connecting: sess.state === 'connecting', mode: shownMode, ch: sess.ch, w: live ? sess.w : ui.cfg.width,
       core, page: live ? tele.page : null, sessionCfg: live ? sessionCfg : ui.cfg, cfg: ui.cfg, videoSize: video.videoSize,
-      colour: live ? video.colour : null });
+      colour: live ? video.colour : null, phase: video.phase.snapshot() });
     const target = effectiveTarget(sessionCfg.dvr, sess.mode);
     const lv = live ? localView(core) : { state: 'unknown', err: null, bytes: 0 };
     rec = live ? combinedRec({ target, vtx: recView(core), local: lv }) : { state: 'unknown', err: null };

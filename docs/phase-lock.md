@@ -87,8 +87,21 @@ drone.
 ## Wire
 
 `Rcf::snr_off`: int16 little-endian at RCF head offset 15, milli-fps on the
-drone's trim request, 0 = no steering. `RC_VERSION` 16. The web GS and
-spotters always send 0.
+drone's trim request, 0 = no steering. `RC_VERSION` 16. The web GS steers
+too, in GS mode; spotters send no RCFs at all and so always send 0.
+
+### Web GS
+
+`web/` (GS mode) runs the same loop in the browser instead of against a
+display's vblank: the page measures its own refresh with a least-squares
+fit over rAF timestamps (`VsyncGrid`, `web/ui/src/lib/phase.js`), feeds the
+same `PhaseLock`/`RateMatch` C++ sources through WASM exports
+(`web/src/web_phase.cpp`), and holds a decoded frame to its release tick
+instead of drawing it on arrival (`HoldQueue`). The offset reaches the
+drone the same way as from `maburplay`: through the core's RCF `snr_off`.
+Spotter mode sends no RCFs and runs no phase-lock calls at all. See
+`docs/web-gs.md` ("Phase lock") for the toggle, the hold, and the Stats
+panel group.
 
 ## Deploy
 

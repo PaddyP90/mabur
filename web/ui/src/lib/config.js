@@ -32,6 +32,10 @@ export function defaultConfig() {
     // repair ([link.nack] enable, docs/fec-nack.md). Default on, as the
     // deployed maburgs flies; off is the in-page control arm.
     nack: true,
+    // Page-only (never sent to the core, docs/phase-lock.md "Web GS"): locks
+    // the drone's sensor rate to this browser's refresh (PhaseController,
+    // lib/phase.js). GS mode only; a spotter never steers.
+    phaseLock: true,
   };
 }
 
@@ -77,6 +81,7 @@ export function normalizeConfig(raw) {
     colortrans: typeof raw.colortrans === 'boolean' ? raw.colortrans : d.colortrans,
     dvr: ['web', 'vtx', 'both'].includes(raw.dvr) ? raw.dvr : d.dvr,
     nack: typeof raw.nack === 'boolean' ? raw.nack : d.nack,
+    phaseLock: typeof raw.phaseLock === 'boolean' ? raw.phaseLock : d.phaseLock,
   };
 }
 
@@ -263,6 +268,7 @@ export function describeEdit(key, val) {
   if (key === 'dvr') return `Recording target set to ${{ web: 'mabur web', vtx: 'VTX', both: 'Both' }[val]}`;
   if (key === 'colortrans') return `Colour correction ${val ? 'on' : 'off'}`;
   if (key === 'nack') return `Retransmit (NACK) ${val ? 'on' : 'off'}`;
+  if (key === 'phaseLock') return `Phase lock ${val ? 'on' : 'off'}`;
   const shown = key === 'channels' ? val.join(', ') : key === 'link' ? (val === 'auto' ? 'Auto' : val)
     : key === 'width' ? `${val} MHz` : key === 'staticMcs' && val < 0 ? 'Adaptive' : val;
   return `${EDIT_LABEL[key]} set to ${shown}`;

@@ -17,7 +17,8 @@ const mem = (init = {}) => {
 test('defaults match maburgs.default.toml', () => {
   const c = defaultConfig();
   assert.deepEqual(c, { channels: [40, 64, 112, 144], link: 'auto', width: 40, staticMcs: -1,
-    ladder: [0, 1, 2, 3, 4].map((mcs) => ({ mcs, bw: 40, ob: 0.5, oe: 0.25 })), colortrans: true, dvr: 'web', nack: true });
+    ladder: [0, 1, 2, 3, 4].map((mcs) => ({ mcs, bw: 40, ob: 0.5, oe: 0.25 })), colortrans: true, dvr: 'web', nack: true,
+    phaseLock: true });
   c.ladder[0].mcs = 7;
   assert.equal(defaultConfig().ladder[0].mcs, 0, 'fresh copy each call');
   assert.ok(CHANNELS.includes(136) && CHANNELS.includes(165) && CHANNELS.length === 25);
@@ -292,4 +293,19 @@ test('nack: default on, normalized, described, overlay [link.nack] in GS mode on
   // the overlay's shape stays the one the loader is exercised with.
   const t = toOverlayToml(defaultConfig());
   assert.ok(t.indexOf('[link.nack]') < t.indexOf('[[link.ladder]]'));
+});
+
+// Phase lock (docs/phase-lock.md "Web GS"): page-only, like colortrans --
+// never reaches the overlay the core validates, whatever mode or pin state.
+test('phaseLock: default on, normalized, described, never in the overlay', () => {
+  assert.equal(defaultConfig().phaseLock, true);
+  assert.equal(normalizeConfig({ phaseLock: 'x' }).phaseLock, true);   // non-boolean -> default on
+  assert.equal(normalizeConfig({ phaseLock: false }).phaseLock, false);
+  assert.equal(normalizeConfig({}).phaseLock, true);
+  assert.equal(describeEdit('phaseLock', false), 'Phase lock off');
+  assert.equal(describeEdit('phaseLock', true), 'Phase lock on');
+  assert.ok(!/phase/.test(toOverlayToml(defaultConfig())));
+  assert.ok(!/phase/.test(toOverlayToml(applyEdit(defaultConfig(), 'phaseLock', false))));
+  assert.ok(!/phase/.test(toOverlayToml(applyEdit(defaultConfig(), 'staticMcs', 2))));
+  assert.ok(!/phase/.test(toOverlayToml(defaultConfig(), null, 'spotter')));
 });

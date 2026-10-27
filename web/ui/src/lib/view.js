@@ -18,10 +18,37 @@ export function latencyNow(snap, mode) {
   return parts.reduce((n, e) => n + e.p50, 0);
 }
 
+const signed = (v, d = 0) => (has(v) ? (Number(v) >= 0 ? '+' : '') + Number(v).toFixed(d) : D);
+
+// Phase lock stats group (docs/phase-lock.md "Web GS"): phase is
+// PhaseController.snapshot(), or null before the controller has anything to
+// report (disconnected, or the first tick of a session). A spotter never
+// steers (it sends 0, "Wire" in docs/phase-lock.md), so its group collapses
+// to the same single n/a row the NACK group uses.
+function phaseGroup(phase, spot) {
+  if (spot) return { title: 'Phase lock', rows: [{ k: 'state', v: 'n/a' }] };
+  if (!phase) {
+    return { title: 'Phase lock', rows: [
+      { k: 'state', v: D }, { k: 'offset', v: D }, { k: 'rates', v: D }, { k: 'hold', v: D },
+    ] };
+  }
+  const mismatch = phase.mismatch ? ' · mismatch' : '';
+  return {
+    title: 'Phase lock',
+    rows: [
+      { k: 'state', v: `${phase.state} · err ${fx(phase.errMs, 1)} ms` },
+      { k: 'offset', v: `${signed(phase.offset)} mfps (centre ${signed(phase.centre)})` },
+      { k: 'rates', v: `panel ${fx(phase.panelHz, 3)} Hz · drone ${fx(phase.srcHz, 3)} Hz${mismatch}`,
+        tone: phase.mismatch ? 'low' : '' },
+      { k: 'hold', v: `held ${phase.held} · late ${phase.late} · displaced ${phase.displaced}` },
+    ],
+  };
+}
+
 // ch/w: the session's start channel and width; cfg: the form (the
 // disconnected header line shows its link channel, or "auto"; while
-// connecting it shows ch).
-export function statsView({ connected, connecting = false, mode, ch, w, core, page, sessionCfg, cfg, videoSize, colour }) {
+// connecting it shows ch). phase: PhaseController.snapshot(), or null.
+export function statsView({ connected, connecting = false, mode, ch, w, core, page, sessionCfg, cfg, videoSize, colour, phase = null }) {
   const on = !!connected && !!core;
   const spot = mode === 'spotter';
   const pinned = !spot && sessionCfg.staticMcs >= 0;
@@ -61,6 +88,7 @@ export function statsView({ connected, connecting = false, mode, ch, w, core, pa
     codecLine: (on && videoSize ? `H.265 · ${videoSize.w}×${videoSize.h}` : 'H.265')
       + (colour === 'colortrans' ? ' · colortrans' : colour === 'unavailable' ? ' · colortrans unavailable' : ''),
     latencyCaption: spot ? 'rx→glass latency, last 12 s' : 'Latency, last 12 s',
+    phaseGroup: phaseGroup(phase, spot),
   };
 }
 

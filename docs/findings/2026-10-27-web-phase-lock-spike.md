@@ -1,9 +1,10 @@
 # Can the web GS phase-lock the drone's sensor to the browser's refresh?
 
-**Status:** spike; nothing built. The web GS still sends `snr_off` 0
-(`docs/phase-lock.md` "Wire"; the page itself is `docs/web-gs.md`). The
-throwaway code is eight commits on a local branch, `web-phase-lock-spike`,
-never pushed, and is described below well enough to rebuild. Three runs the
+**Status:** spike; its servo was throwaway. The web GS now steers in
+earnest: `docs/web-gs.md` ("Phase lock") and `docs/phase-lock.md` ("Web
+GS"). The throwaway code described below (eight commits on a local branch,
+`web-phase-lock-spike`, never pushed) was rebuilt as `web/ui/src/lib/phase.js`
+rather than reused verbatim. Three runs the
 same day: desktop Chrome on the bench host, Chrome on an Android phone
 ("Phone"), and Chrome on a MacBook Air ("Mac"). The Mac run also tried a
 page-side hold and measured absolute capture → presentation ("Absolute
