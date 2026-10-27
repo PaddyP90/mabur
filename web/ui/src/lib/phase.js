@@ -5,8 +5,9 @@
 // cover, the same two numbers maburplay's FrameRegulator keeps; slot()
 // turns a frame's pts into a release tick on the fitted grid; HoldQueue
 // defers a decoded frame to its release tick instead of drawing it the
-// instant WebCodecs hands it back, so Task 5 can wire this into the video
-// pipeline the way the regulator holds for maburplay.
+// instant WebCodecs hands it back, the way the regulator holds a frame for
+// maburplay. No DOM or module calls here -- the video pipeline wires these
+// in separately.
 
 // Nearest-rank percentile with linear index rounding (not truncation): the
 // fit below needs the true nearest sample, not a biased-low floor.
