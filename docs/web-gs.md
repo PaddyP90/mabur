@@ -965,9 +965,20 @@ tick times (`VsyncGrid`), tracks the clean-link delivery floor and spread
 the same way `maburplay`'s `LatenessWindow` does, and drives the C++
 `PhaseLock`/`RateMatch` core (`web/src/web_phase.cpp`, built from the same
 sources as `gs/player/src/phase_lock.{h,cpp}` and `rate_match.h`) through
-WASM exports. The offset it computes reaches the drone exactly as it does
-from `maburplay`: through `maburgs`'s RCF `snr_off` (`docs/phase-lock.md`
-"Wire").
+WASM exports. The offset it computes reaches the drone in the RCF
+`snr_off` field (`docs/phase-lock.md` "Wire"), sent by the web GS core's
+own `VrxController` — `maburgs` is not involved. The page hands the core a
+new offset on every 50 ms tick; if none arrives for 3 s (a stalled page, or
+a hidden tab the browser throttles hard) the core sends 0 and the drone runs
+on its trim.
+
+The lock steers only while the tab is visible and the toggle is on. While
+it is not, the page sends 0 and the lock is frozen — no margins fed, no
+windows closed — since an error measured with the drone at its trim says
+nothing about the lock's own offset. When the tab returns or the toggle
+comes back on, the lock restarts from `wait` (centre 0, offset 0) and
+re-acquires; the source-rate estimate and the mismatch check keep running
+throughout.
 
 **The toggle.** The Config form's Display group has a **Phase lock**
 On/Off switch (`cfg.phaseLock`, default on), GS mode only. It is page-only
@@ -976,7 +987,8 @@ form, stays live while connected — `PhaseController.enabled` is "a standing
 preference, not per-session state" (`phase.js`), so flipping it takes
 effect on the next 200 ms tick without a reconnect. Off evicts whatever is
 queued at once and the controller tells the core to stop steering, so the
-drone returns to its trim within one RCF interval.
+drone returns to its trim within one RCF interval; On again restarts the
+lock from `wait`.
 
 **The hold.** A decoded frame whose release tick is in the future is queued
 (`HoldQueue`) rather than drawn on the next animation frame; the rAF loop
@@ -1004,8 +1016,8 @@ decode.
 - **A pts discontinuity** (session reset, chain break) resets the lateness
   window and the C++ lock, and evicts the queue rather than holding across
   the jump.
-- **Disabled**, a decoder error, or a release tick more than 3 periods away
-  (a bad estimate, not a late one).
+- **Disabled**, or a release tick more than 3 periods away (a bad
+  estimate, not a late one).
 
 In every eviction case the controller still owns the frame's
 `VideoFrame.close()` — nothing queued can outlive the moment it stops being
@@ -1013,7 +1025,9 @@ wanted.
 
 **Stats group.** The Stats panel's **Phase lock** group
 (`statsView`'s `phaseGroup`, `web/ui/src/lib/view.js`) reads
-`PhaseController.snapshot()`:
+`PhaseController.snapshot()` while a GS session is live (all dashes
+otherwise). With the toggle off it is a single `state` row reading `off`;
+on, it has:
 
 - **state** — `wait`/`acq`/`lock`/`oor` plus the current error, e.g.
   `lock · err -0.2 ms`.
@@ -1023,7 +1037,9 @@ wanted.
   `panel 59.997 Hz · drone 59.988 Hz`; a rate mismatch appends `· mismatch`
   in caution text.
 - **hold** — cumulative `held`/`late`/`displaced` counts since the current
-  Connect.
+  Connect. `displaced` counts held frames that never reached the screen:
+  superseded by a newer frame due at the same tick, or flushed when a newer
+  frame drew immediately.
 
 **Spotters never steer.** Spotter mode sends no RCFs and runs no
 `PhaseController` calls at all — `VideoPipeline` starves the controller of

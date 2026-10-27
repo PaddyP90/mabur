@@ -93,8 +93,10 @@ too, in GS mode; spotters send no RCFs at all and so always send 0.
 ### Web GS
 
 `web/` (GS mode) runs the same loop in the browser instead of against a
-display's vblank: the page measures its own refresh with a least-squares
-fit over rAF timestamps (`VsyncGrid`, `web/ui/src/lib/phase.js`), feeds the
+display's vblank: the page measures its own refresh from rAF timestamps
+(`VsyncGrid`, `web/ui/src/lib/phase.js`: the period is a ratio estimate,
+the summed steps over the summed whole periods they span, taken over the
+steps near the median), feeds the
 same `PhaseLock`/`RateMatch` C++ sources through WASM exports
 (`web/src/web_phase.cpp`), and holds a decoded frame to its release tick
 instead of drawing it on arrival (`HoldQueue`). The offset reaches the
@@ -110,6 +112,9 @@ page: finish the deploy on both devices (and republish the web page) before
 judging the link, per `docs/deploy.md`. On the GS, the `maburplay` binary
 goes in before its config -- an older binary exits on the new
 `[display]` keys (`phase_lock`, `phase_margin_ms`).
+A `maburd` from before the ±500 mfps range clamps `snr_off` at ±200 mfps,
+so a panel that needs more (phone-class refresh rates) cannot lock until
+the drone is redeployed.
 
 ## Configuration
 
