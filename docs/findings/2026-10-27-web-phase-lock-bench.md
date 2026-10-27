@@ -1,4 +1,4 @@
-# Does the built web GS phase lock hold on desktop Chrome and a phone?
+# Does the built web GS phase lock hold on desktop Chrome, a Mac and a phone?
 
 **Status:** bench of the built feature; the reference pages are
 `docs/web-gs.md` ("Phase lock") and `docs/phase-lock.md` ("Web GS"). The
@@ -22,6 +22,9 @@ hidden tab, rate mismatch), and does the wider range let a phone panel lock?
 - **Page:** the branch's build served from `web/dist` with `web/serve.py`.
 - **Host Chrome:** Chrome 147 on GNOME/Wayland, 3840x2160@60.000, headed,
   scratch profile with the WebUSB grant pre-written, driven over CDP. RTL8812EU.
+- **Mac:** MacBook Air M4, macOS 26.6, Chrome; page through an ssh reverse
+  tunnel as `http://localhost`, CDP through a forward tunnel; the same
+  RTL8812EU on USB-C.
 - **Phone:** vivo X200 Pro (V2413), Android 16, Chrome 155; page served
   through `adb reverse` as `http://localhost`, CDP through `adb forward`, all
   over wireless adb; the same RTL8812EU on OTG; the page in fullscreen
@@ -89,9 +92,24 @@ presentation 22 → 13 ms), as in the spike.
   `visible` while rAF never fires, so the page gets no grid and does not
   steer, until the tab is brought to the front.
 
+## Results — Mac
+
+| check | result |
+|---|---|
+| on battery at 20 % | Chrome drew at 30 Hz (Energy Saver caps frame rates); the page fitted 30.000 Hz, flagged the mismatch and stopped steering — 182 frames displaced in the seconds before the flag (two drone frames per refresh while still holding) |
+| on AC, 120 s | 83 % locked: every acquire in the first ~40 s after the 30 → 60 Hz switch, then 81 s locked straight; \|err\| p50 0.7 ms |
+| on AC, next 60 s | 77 % locked, one 14 s re-acquire (the allowance-step pattern) |
+| late / displaced | 5 of 5998 and 4 of 2706; 4 and 1 |
+| grid under the rAF wobble | raw steps alternated 14.7 / 18.4 ms while frames were drawn in rAF; the fitted grid read 60.0000 Hz throughout |
+
+The fitted grid holds the Mac's ±1.9 ms rAF wobble, which the raw-timestamp
+grid in the spike did not (it displaced up to 25 % of frames there). Chrome's
+battery Energy Saver halves the page's refresh, and the page treats that as
+the rate mismatch it is.
+
 ## What this means
 
-- The built lock holds on both platforms. The phone, the case the ±500
+- The built lock holds on all three. The phone, the case the ±500
   range was added for, held 96 % of a 120 s run. Host Chrome held 84–93 %,
   limited by allowance steps, not by the browser.
 - The exits behave: toggle, hidden tab and rate mismatch each return the
@@ -100,5 +118,6 @@ presentation 22 → 13 ms), as in the spike.
   runs was under 90 %, and the phone's late share was 0.57 % against 0.5 %.
   Both trace to the lateness window's allowance, the same lever maburplay
   has open.
-- Not run: the MacBook (covered by the spike), and the GS redeploy with the
-  new range and reach.
+- The Mac locks and holds with its rAF wobble. A laptop on low battery runs
+  Chrome at 30 Hz and the lock stands down.
+- Not run: the GS redeploy with the new range and reach.
