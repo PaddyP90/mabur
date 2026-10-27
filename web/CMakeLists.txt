@@ -36,7 +36,8 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   # (pthread_setaffinity_np). Undefined mabur symbol at link -> add the
   # common/src or gs/src file that defines it here.
   add_library(webgs_core STATIC
-    src/web_gs.cpp src/osd_screen.cpp src/spotter_follow.cpp
+    src/web_gs.cpp src/osd_screen.cpp src/spotter_follow.cpp src/web_phase.cpp
+    ${MABUR_DIR}/gs/player/src/phase_lock.cpp
     ${MABUR_DIR}/common/src/crc16.cpp ${MABUR_DIR}/common/src/gf256.cpp
     ${MABUR_DIR}/common/src/sbi.cpp ${MABUR_DIR}/common/src/frag.cpp
     ${MABUR_DIR}/common/src/nal.cpp ${MABUR_DIR}/common/src/uep_decoder.cpp
@@ -70,7 +71,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     ${MABUR_DIR}/gs/src/radio_frontend.cpp ${MABUR_DIR}/gs/src/card_scan_usb.cpp
     ${MABUR_DIR}/gs/src/remote_card.cpp ${MABUR_DIR}/gs/src/window_sampler.cpp)
   target_include_directories(webgs_core PUBLIC src ${MABUR_DIR}/common/include
-    ${MABUR_DIR}/gs/src ${MABUR_DIR}/third_party ${DEVOURER_DIR}/src)
+    ${MABUR_DIR}/gs/src ${MABUR_DIR}/gs/player/src ${MABUR_DIR}/third_party ${DEVOURER_DIR}/src)
   target_compile_options(webgs_core PRIVATE -O3)
   target_link_libraries(webgs_core PUBLIC devourer)
 
@@ -125,8 +126,10 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_custom_target(webgs_ui ALL DEPENDS ${WEB_DIST}/index.html)
 else()
   # Included from the root build: native core + tests.
-  add_library(mabur_web_core STATIC src/web_gs.cpp src/osd_screen.cpp src/spotter_follow.cpp)
+  add_library(mabur_web_core STATIC src/web_gs.cpp src/osd_screen.cpp src/spotter_follow.cpp
+    src/web_phase.cpp ${CMAKE_SOURCE_DIR}/gs/player/src/phase_lock.cpp)
   target_include_directories(mabur_web_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/gs/player/src
     PRIVATE ${CMAKE_SOURCE_DIR}/third_party)
   target_link_libraries(mabur_web_core PUBLIC mabur_gs_core mabur_common)
 
