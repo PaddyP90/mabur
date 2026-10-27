@@ -5,6 +5,7 @@ import {
   Gate, PtsUnwrap, PeriodEstimator, HitchMeter, annexbToLengthPrefixed, DecoderSlot, SegWindow,
   capToGlass, pruneSubmitted, trimBefore, isStalePresentSample, IdrRequester,
 } from './logic.mjs';
+import { PhaseController } from './phase.js';
 import { PageMetrics } from './metrics.js';
 import { ColorTransGl } from './colortrans.js';
 
@@ -13,7 +14,11 @@ const now = () => performance.timeOrigin + performance.now();
 export class VideoPipeline {
   // getCanvas: the flat 2D canvas; getGlCanvas: the colortrans WebGL one
   // (a canvas cannot change context type). getColortrans: the live toggle.
-  constructor({ getCanvas, getGlCanvas = () => null, getMode, getColortrans = () => false, onWantIdr = () => {} }) {
+  // getModule/getLowPower feed the phase-lock controller (GS mode only).
+  constructor({
+    getCanvas, getGlCanvas = () => null, getMode, getColortrans = () => false, onWantIdr = () => {},
+    getModule = () => null, getLowPower = () => null,
+  }) {
     this.getCanvas = getCanvas;
     this.getGlCanvas = getGlCanvas;
     this.getMode = getMode;
@@ -28,10 +33,73 @@ export class VideoPipeline {
     // held, so a Connect never leaks the previous session's hardware decoder.
     this.decoderSlot = new DecoderSlot();
     this.noCodecWarned = false;
+    // Page lifetime too: reset()/close() flush and stop it rather than
+    // replacing it, so swapping `this.phase` for a fake (tests, or a
+    // future enable/disable toggle) takes effect at every call site.
+    this.phase = new PhaseController({ getModule, getLowPower });
+    this._heldMeta = new Map();   // held VideoFrame -> { rec, tOutRaw }
+    this._rafHandle = null;
+    this._phaseLive = false;
     this.reset();
   }
 
+  // Stops the continuous rAF loop and the controller's tick interval, and
+  // closes whatever it was still holding -- neither a disconnect nor a
+  // fresh Connect may leak a VideoFrame into the next session.
+  _flushPhase() {
+    this._stopPhaseLoop();
+    for (const e of this.phase.flush()) {
+      this._heldMeta.delete(e.frame);
+      e.frame.close();
+    }
+    this._heldMeta.clear();
+    this._phaseLive = false;
+  }
+
+  // Started lazily on the first onAu in GS mode: a spotter never decodes
+  // its own picture to present, so it has nothing to phase-lock and never
+  // calls this -- no ticks, no rAF loop, no hold.
+  _startPhaseLoop() {
+    this.phase.start();
+    const loop = (ts) => {
+      this._rafHandle = requestAnimationFrame(loop);
+      const { draw, displaced } = this.phase.onRaf(ts);
+      for (const e of displaced) {
+        this._heldMeta.delete(e.frame);
+        e.frame.close();
+      }
+      if (draw) this._presentHeld(draw);
+    };
+    this._rafHandle = requestAnimationFrame(loop);
+  }
+
+  _stopPhaseLoop() {
+    if (this._rafHandle != null) { cancelAnimationFrame(this._rafHandle); this._rafHandle = null; }
+    this.phase.stop();
+  }
+
+  // Draws a frame the controller released at this rAF's tick and takes
+  // its deferred 'present' / 'capture->glass (GS)' samples at that same
+  // tick, instead of the next-rAF sample an immediately drawn frame gets.
+  _presentHeld({ frame, tick }) {
+    const meta = this._heldMeta.get(frame);
+    this._heldMeta.delete(frame);
+    this.draw(frame);
+    frame.close();
+    if (!meta) return;
+    this.segWindow.add('present', tick - meta.tOutRaw);
+    const rec = meta.rec;
+    if (rec && this.getMode() === 'gs') {
+      const tPresentMs = tick + performance.timeOrigin;
+      const cap = capToGlass({ capToCompleteUs: rec.capUs, tEmitMs: rec.tEmitMs,
+        tRecvMs: rec.tRecvMs, tPresentMs });
+      if (cap != null) this.segWindow.add('capture→glass (GS)', cap);
+    }
+  }
+
   reset() {
+    this._flushPhase();
+    this.phase.reset();
     this.gate = new Gate();
     this.idr = new IdrRequester();
     this.unwrap = new PtsUnwrap();
@@ -85,8 +153,20 @@ export class VideoPipeline {
         }
         this.videoSize = { w: frame.displayWidth, h: frame.displayHeight };
         this.hasPicture = true;
-        this.draw(frame);
-        frame.close();
+
+        let held = false;
+        if (this.getMode() === 'gs') {
+          const tOutRaw = performance.now();
+          if (this.phase.onFrame({ frame, ptsUs: frame.timestamp, tOut: tOutRaw }) === 'hold') {
+            held = true;
+            this._heldMeta.set(frame, { rec, tOutRaw });
+          }
+        }
+        if (!held) {
+          this.draw(frame);
+          frame.close();
+        }
+
         this.metrics.addDraw(t);
         const gap = this.hitch.addDraw(t, this.period.periodMs());
         if (gap !== null) {
@@ -94,6 +174,10 @@ export class VideoPipeline {
           trimBefore(this.hitchTimes, t - 60000);
           this.hitchesTotal++;
         }
+        // Held: drawn later at its release tick, with its own 'present' /
+        // 'capture->glass (GS)' samples taken there (_presentHeld) -- not
+        // the next-rAF sample below.
+        if (held) return;
         // Hidden tab: rAF is paused, so a callback queued now fires only when
         // the tab returns and would book a minutes-long "present" sample. No
         // glass while hidden -> no present / capture->glass sample.
@@ -230,6 +314,10 @@ export class VideoPipeline {
 
   // Module.onAu argument order is web/src/web_main.cpp emit_au's.
   onAu(...a) {
+    if (!this._phaseLive && this.getMode() === 'gs') {
+      this._phaseLive = true;
+      this._startPhaseLoop();
+    }
     this.onAuInner(...a);
     this.pollIdr();
   }
@@ -250,6 +338,7 @@ export class VideoPipeline {
 
   // Session left live: release the hardware decoder now, not at the next Connect.
   close() {
+    this._flushPhase();
     this.gate.onDecoderError();
     this.submitted.clear();
     this.decoder = this.decoderSlot.replace(null);

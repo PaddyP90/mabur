@@ -168,3 +168,154 @@ export class HoldQueue {
 
   get length() { return this._q.length; }
 }
+
+const PHASE_STATE_NAMES = { 0: 'wait', 1: 'acq', 2: 'lock', 3: 'oor' };
+
+// Glue between the page classes above and the nine wasm exports: feeds the
+// grid and the lateness window from the decoder's output and the page's
+// own rAF, drives the C++ PhaseLock through its tick/frame/discontinuity
+// calls, and decides whether a decoded frame should wait for its release
+// tick (held in a HoldQueue) or draw right away. getModule() is null until
+// the wasm core attaches (or forever, in spotter mode, where the caller
+// never touches this class at all).
+export class PhaseController {
+  constructor({ getModule, getLowPower = () => null }) {
+    this.getModule = getModule;
+    this.getLowPower = getLowPower;
+    this._enabled = true;
+    this._timer = null;
+    this.reset();
+  }
+
+  get enabled() { return this._enabled; }
+  set enabled(on) { this._enabled = !!on; }
+
+  // New session: re-arms the C++ lock and starts the grid/window/queue
+  // over. Doesn't touch `enabled` -- that's a standing preference, not
+  // per-session state.
+  reset() {
+    const mod = this.getModule();
+    if (mod) mod._webgs_phase_reset();
+    this.grid = new VsyncGrid();
+    this.window = new LatenessWindow();
+    this.queue = new HoldQueue();
+    this._lastRafTick = -Infinity;
+    this._offset = 0;
+    this._held = 0;
+    this._late = 0;
+    this._displacedTotal = 0;
+  }
+
+  start() {
+    this.stop();
+    const h = setInterval(() => {
+      this.tick(performance.now(), { lowPower: this.getLowPower(), visible: !document.hidden });
+    }, 50);
+    // A browser setInterval handle has no .unref; Node's test runner needs
+    // it so a PhaseController nobody explicitly stop()ped doesn't wedge
+    // the process open.
+    if (h && typeof h.unref === 'function') h.unref();
+    this._timer = h;
+  }
+
+  stop() {
+    if (this._timer != null) { clearInterval(this._timer); this._timer = null; }
+  }
+
+  _stateName() {
+    const mod = this.getModule();
+    if (!mod) return 'off';
+    return PHASE_STATE_NAMES[mod._webgs_phase_state()] ?? 'off';
+  }
+
+  // Feeds the grid from the page's continuous rAF loop. Returns the newest
+  // frame due to present at this tick (if any) plus any it displaced; the
+  // caller (VideoPipeline) draws/closes the one and closes the rest.
+  onRaf(ts) {
+    this.grid.add(ts);
+    const tick = this.grid.snap(ts);
+    this._lastRafTick = tick;
+    if (!this.queue.length) return { draw: null, displaced: [] };
+    const { draw, displaced } = this.queue.drain(tick, this.grid.period || 0);
+    if (displaced.length) this._displacedTotal += displaced.length;
+    return { draw: draw ? { frame: draw.frame, tick } : null, displaced };
+  }
+
+  // A decoded frame: feeds the lateness window and the C++ lock, and
+  // decides whether to queue it for its release tick ('hold') or hand it
+  // back for an immediate draw ('now').
+  onFrame({ frame, ptsUs, tOut }) {
+    const ptsMs = ptsUs / 1000;
+    const d = tOut - ptsMs;
+    const floorBefore = this.window.floor;
+    let discontinuity = false;
+    if (floorBefore != null && Math.abs(d - floorBefore) > 1000) {
+      discontinuity = true;
+      const mod = this.getModule();
+      if (mod) mod._webgs_phase_discontinuity(tOut * 1000);
+      this.window.reset();
+      // These were queued before the jump; nothing else is going to see
+      // them (onFrame only returns a verdict for the frame in hand), so
+      // close them here instead of leaking.
+      for (const e of this.queue.flush()) e.frame.close();
+    }
+    this.window.add(d);
+
+    const s = slot(ptsMs, this.window.floor, this.window.allow, this.grid);
+    const mod = this.getModule();
+    // pts always feeds the lock's source-rate estimate; the margin is NaN
+    // whenever slot() couldn't resolve one (window/grid not warm yet).
+    if (mod) mod._webgs_phase_frame(ptsUs, s ? s.margin * 1000 : NaN, this.grid.period * 1000, tOut * 1000);
+
+    if (discontinuity) return 'now';
+    if (!this._enabled || document.hidden || this._stateName() !== 'lock') return 'now';
+    if (mod && mod._webgs_phase_mismatch()) return 'now';
+    if (!s) return 'now';
+    // Late: this release tick's rAF already ran.
+    if (s.release <= this._lastRafTick) { this._late++; return 'now'; }
+    // More than 3 periods ahead is a bad estimate, not a late one.
+    const period = this.grid.period;
+    if (period && (s.release - tOut) > 3 * period) return 'now';
+    if (!this.queue.push({ frame, release: s.release, tOut })) { this._late++; return 'now'; }
+    this._held++;
+    return 'hold';
+  }
+
+  // The 50 ms driver: feeds the C++ lock's tick and tracks its last
+  // offset. A hidden tab will never present a held frame, so its queue is
+  // flushed and closed here -- nothing else will do it before the tab
+  // comes back, maybe minutes later.
+  tick(nowMs, { lowPower, visible }) {
+    const mod = this.getModule();
+    const panelHz = this.grid.period ? 1000 / this.grid.period : 0;
+    const lp = lowPower === true ? 1 : lowPower === false ? 0 : 2;
+    const offset = mod ? mod._webgs_phase_tick(nowMs * 1000, panelHz, lp, visible ? 1 : 0) : 0;
+    this._offset = this._enabled ? offset : 0;
+    if (!visible) {
+      for (const e of this.queue.flush()) e.frame.close();
+    }
+    return this._offset;
+  }
+
+  // Queued entries for the caller to close: a disable, a session reset or
+  // close, anything that needs the hold queue emptied outside of tick()'s
+  // own hidden-tab handling above.
+  flush() { return this.queue.flush(); }
+
+  snapshot() {
+    const mod = this.getModule();
+    return {
+      state: this._stateName(),
+      errMs: mod ? mod._webgs_phase_err_ms() : NaN,
+      offset: this._offset,
+      centre: mod ? mod._webgs_phase_centre() : NaN,
+      panelHz: this.grid.period ? 1000 / this.grid.period : null,
+      srcHz: mod ? mod._webgs_phase_src_hz() : NaN,
+      mismatch: mod ? !!mod._webgs_phase_mismatch() : false,
+      held: this._held,
+      late: this._late,
+      displaced: this._displacedTotal,
+      enabled: this._enabled,
+    };
+  }
+}

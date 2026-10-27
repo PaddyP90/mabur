@@ -4,7 +4,12 @@ import assert from 'node:assert/strict';
 // video.js is browser code; stub the few globals its per-AU path touches.
 globalThis.performance ??= { timeOrigin: 0, now: () => Date.now() };
 globalThis.document ??= { hidden: false };
-globalThis.requestAnimationFrame ??= () => 0;
+// Stores callbacks instead of firing them: tests fire a specific one
+// manually (the continuous phase rAF loop re-registers itself on every
+// call, so the stored reference keeps working across repeated fires).
+let rafCbs = [];
+globalThis.requestAnimationFrame = (cb) => { rafCbs.push(cb); return rafCbs.length; };
+globalThis.cancelAnimationFrame = () => {};
 const made = [];
 class FakeDecoder {
   constructor(init) { this.init = init; this.state = 'unconfigured'; this.chunks = []; made.push(this); }
@@ -184,6 +189,90 @@ test('hasPicture: false until the first decoded frame, survives a freeze, cleare
   assert.equal(v.hasPicture, true, 'a freeze keeps the last frame on screen');
   v.reset();                                 // next Connect
   assert.equal(v.hasPicture, false);
+});
+
+// --- the hold path: a fake PhaseController stands in for the real wasm glue ---
+
+function fakeCanvas() {
+  let drawCount = 0;
+  const canvas = {
+    width: 0, height: 0, style: {},
+    getContext: () => ({ drawImage: () => { drawCount++; } }),
+  };
+  return { canvas, draws: () => drawCount };
+}
+
+test('held frame is drawn in its rAF, present sample = tick - tOut (not the next rAF)', () => {
+  globalThis.VideoDecoder = FakeDecoder;
+  made.length = 0;
+  rafCbs = [];
+  let t = 0;
+  const realNow = performance.now;
+  performance.now = () => t;
+  try {
+    const { canvas, draws } = fakeCanvas();
+    const v = new VideoPipeline({ getCanvas: () => canvas, getMode: () => 'gs' });
+    let onRafResult = { draw: null, displaced: [] };
+    v.phase = {
+      start() {}, stop() {}, reset() {}, flush() { return []; },
+      onFrame() { return 'hold'; },
+      onRaf() { return onRafResult; },
+    };
+    t = 10; au(v, IRAP, 1000, hvcc);
+    assert.equal(rafCbs.length, 1, 'onAu started the continuous rAF loop');
+    const loopCb = rafCbs[0];
+
+    t = 20;
+    const frameStub = { timestamp: 1000, displayWidth: 2, displayHeight: 2, closed: false, close() { this.closed = true; } };
+    made[0].init.output(frameStub);
+    assert.equal(draws(), 0, 'held: not drawn yet');
+
+    onRafResult = { draw: { frame: frameStub, tick: 36.667 }, displaced: [] };
+    loopCb(36.667);
+    assert.equal(draws(), 1, 'drawn once, at the release tick');
+    assert.equal(frameStub.closed, true);
+    const present = v.segWindow.byName.get('present');
+    assert.equal(present.length, 1);
+    assert.ok(Math.abs(present[0].v - (36.667 - 20)) < 1e-9, `present ${present[0].v}`);
+
+    // The following rAF (no draw due) must not draw it again.
+    onRafResult = { draw: null, displaced: [] };
+    loopCb(53.333);
+    assert.equal(draws(), 1);
+  } finally { performance.now = realNow; }
+});
+
+test('displaced frames are closed without being drawn', () => {
+  globalThis.VideoDecoder = FakeDecoder;
+  made.length = 0;
+  rafCbs = [];
+  let t = 0;
+  const realNow = performance.now;
+  performance.now = () => t;
+  try {
+    const { canvas, draws } = fakeCanvas();
+    const v = new VideoPipeline({ getCanvas: () => canvas, getMode: () => 'gs' });
+    let onRafResult = { draw: null, displaced: [] };
+    v.phase = {
+      start() {}, stop() {}, reset() {}, flush() { return []; },
+      onFrame() { return 'hold'; },
+      onRaf() { return onRafResult; },
+    };
+    t = 10; au(v, IRAP, 1000, hvcc);
+    const loopCb = rafCbs[0];
+
+    const frameA = { timestamp: 1000, closed: false, close() { this.closed = true; } };
+    t = 20; made[0].init.output(frameA);
+    au(v, P, 17000);
+    const frameB = { timestamp: 17000, closed: false, close() { this.closed = true; } };
+    t = 21; made[0].init.output(frameB);
+
+    onRafResult = { draw: { frame: frameB, tick: 40 }, displaced: [{ frame: frameA }] };
+    loopCb(40);
+    assert.equal(draws(), 1, 'only the drawn frame hit the canvas');
+    assert.equal(frameB.closed, true, 'drawn frame closed after presenting');
+    assert.equal(frameA.closed, true, 'displaced frame closed without drawing');
+  } finally { performance.now = realNow; }
 });
 
 test('onWantIdr returning false is not counted: the next AU asks again immediately', () => {

@@ -1,7 +1,9 @@
 // node --test web/tests/phase.test.mjs (promoted from the wasm-spike throwaway)
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { VsyncGrid, LatenessWindow, slot, HoldQueue } from '../ui/src/lib/phase.js';
+import { VsyncGrid, LatenessWindow, slot, HoldQueue, PhaseController } from '../ui/src/lib/phase.js';
+
+globalThis.document ??= { hidden: false };
 
 const PERIOD = 16.6667;
 
@@ -134,4 +136,130 @@ test('flush empties the queue and returns every entry', () => {
   const all = q.flush();
   assert.equal(all.length, 2);
   assert.equal(q.length, 0);
+});
+
+// --- PhaseController: glue to the nine wasm exports + the hold decision ---
+
+function fakeModule() {
+  const calls = [];
+  const mod = {
+    state: -1, errMs: 0, centre: 0, mismatch: 0, srcHz: 0, offset: 0,
+    _webgs_phase_reset() { calls.push(['reset']); },
+    _webgs_phase_frame(ptsUs, marginUs, periodUs, nowUs) { calls.push(['frame', ptsUs, marginUs, periodUs, nowUs]); },
+    _webgs_phase_discontinuity(nowUs) { calls.push(['discontinuity', nowUs]); },
+    _webgs_phase_tick(nowUs, panelHz, lowPower, visible) {
+      calls.push(['tick', nowUs, panelHz, lowPower, visible]);
+      return mod.offset;
+    },
+    _webgs_phase_state() { return mod.state; },
+    _webgs_phase_err_ms() { return mod.errMs; },
+    _webgs_phase_centre() { return mod.centre; },
+    _webgs_phase_mismatch() { return mod.mismatch; },
+    _webgs_phase_src_hz() { return mod.srcHz; },
+  };
+  return { mod, calls };
+}
+
+// Warms the grid (ticks, period PERIOD) and the lateness window (120
+// frames at a steady 20 ms transit, floor 20 / allow 1) together, on one
+// shared timeline -- so a frame submitted right after warmup lands on the
+// next grid tick instead of looking "late" against a stale lastRafTick.
+function warmPhase(c, n = 120) {
+  const frame = () => ({ close() {} });
+  for (let i = 0; i < n; i++) {
+    const tick = i * PERIOD;
+    c.onRaf(tick);
+    const tOut = tick;
+    c.onFrame({ frame: frame(), ptsUs: (tOut - 20) * 1000, tOut });
+  }
+}
+
+test('controller holds only when locked', () => {
+  const { mod } = fakeModule();
+  const c = new PhaseController({ getModule: () => mod, getLowPower: () => null });
+  c.reset();
+  warmPhase(c, 120);
+
+  mod.state = 2;   // lock
+  const tOut1 = 120 * PERIOD;
+  const f1 = { close() {} };
+  assert.equal(c.onFrame({ frame: f1, ptsUs: (tOut1 - 20) * 1000, tOut: tOut1 }), 'hold');
+
+  mod.state = 1;   // acq
+  const tOut2 = tOut1 + PERIOD;
+  const f2 = { close() {} };
+  assert.equal(c.onFrame({ frame: f2, ptsUs: (tOut2 - 20) * 1000, tOut: tOut2 }), 'now');
+});
+
+test('disable flushes and stops holding', () => {
+  const { mod } = fakeModule();
+  const c = new PhaseController({ getModule: () => mod, getLowPower: () => null });
+  c.reset();
+  warmPhase(c, 120);
+  mod.state = 2;
+
+  const mk = (i) => {
+    const f = { closed: false, close() { this.closed = true; } };
+    const tOut = (120 + i) * PERIOD;
+    return { f, tOut, ptsUs: (tOut - 20) * 1000 };
+  };
+  const a = mk(0), b = mk(1);
+  assert.equal(c.onFrame({ frame: a.f, ptsUs: a.ptsUs, tOut: a.tOut }), 'hold');
+  assert.equal(c.onFrame({ frame: b.f, ptsUs: b.ptsUs, tOut: b.tOut }), 'hold');
+
+  c.enabled = false;
+  const flushed = c.flush();
+  assert.equal(flushed.length, 2);
+
+  const d = mk(2);
+  assert.equal(c.onFrame({ frame: d.f, ptsUs: d.ptsUs, tOut: d.tOut }), 'now');
+});
+
+test('hidden tab flushes the hold queue', () => {
+  const { mod, calls } = fakeModule();
+  const c = new PhaseController({ getModule: () => mod, getLowPower: () => null });
+  c.reset();
+  warmPhase(c, 120);
+  mod.state = 2;
+
+  const mk = (i) => {
+    const f = { closed: false, close() { this.closed = true; } };
+    const tOut = (120 + i) * PERIOD;
+    return { f, tOut, ptsUs: (tOut - 20) * 1000 };
+  };
+  const a = mk(0), b = mk(1);
+  c.onFrame({ frame: a.f, ptsUs: a.ptsUs, tOut: a.tOut });
+  c.onFrame({ frame: b.f, ptsUs: b.ptsUs, tOut: b.tOut });
+
+  c.tick(b.tOut, { lowPower: null, visible: false });
+  const tickCall = calls.filter((x) => x[0] === 'tick').pop();
+  assert.equal(tickCall[4], 0);
+  assert.equal(c.flush().length, 0);
+  assert.equal(a.f.closed, true);
+  assert.equal(b.f.closed, true);
+});
+
+test('transit jump resets', () => {
+  const { mod, calls } = fakeModule();
+  const c = new PhaseController({ getModule: () => mod, getLowPower: () => null });
+  c.reset();
+  for (let i = 0; i < 100; i++) {
+    const tOut = i * PERIOD;
+    c.onFrame({ frame: { close() {} }, ptsUs: (tOut - 20) * 1000, tOut });
+  }
+  const tOut = 100 * PERIOD;
+  c.onFrame({ frame: { close() {} }, ptsUs: (tOut - 5020) * 1000, tOut });
+  assert.ok(calls.some((x) => x[0] === 'discontinuity'), 'discontinuity fired');
+});
+
+test('controller maps drone_lp', () => {
+  const { mod, calls } = fakeModule();
+  const c = new PhaseController({ getModule: () => mod, getLowPower: () => null });
+  c.reset();
+  c.tick(0, { lowPower: true, visible: true });
+  assert.equal(calls.filter((x) => x[0] === 'tick').pop()[3], 1);
+  c.tick(0, { lowPower: false, visible: true });
+  assert.equal(calls.filter((x) => x[0] === 'tick').pop()[3], 0);
+  c.tick(0, { lowPower: null, visible: true });
+  assert.equal(calls.filter((x) => x[0] === 'tick').pop()[3], 2);
 });
