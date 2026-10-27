@@ -45,12 +45,16 @@ export class VideoPipeline {
     // the module here is what keeps a spotter session from ever making a
     // real _webgs_phase_* call.
     const spotterSafeModule = () => (this.getMode() === 'gs' ? getModule() : null);
+    // Built fresh, not through reset(): the controller's own constructor
+    // already starts in reset state without touching getModule, and this
+    // first setup must not either -- App.svelte's accessor can close over
+    // a `session` it hasn't declared yet when this constructor runs.
     this.phase = new PhaseController({ getModule: spotterSafeModule, getLowPower, onEvicted: (es) => this._closeEntries(es) });
     this._heldMeta = new Map();   // held VideoFrame -> { rec, tOutRaw }
     this._rafHandle = null;
     this._phaseLive = false;
     this._onVisibilityChange = null;
-    this.reset();
+    this._resetLocal();
   }
 
   // The one place that closes a held/displaced VideoFrame: drops its
@@ -131,6 +135,14 @@ export class VideoPipeline {
     // the next GS session starts from a fresh grid, window and counters.
     if (this._phaseLive) this._flushPhase();
     this._closeEntries(this.phase.reset());
+    this._resetLocal();
+  }
+
+  // The non-phase half of reset(): run from the constructor too, where
+  // this.phase is already freshly built (its own constructor starts reset
+  // without calling getModule) and calling phase.reset() again would only
+  // repeat that construction-time getModule() call for no reason.
+  _resetLocal() {
     this.gate = new Gate();
     this.idr = new IdrRequester();
     this.unwrap = new PtsUnwrap();
@@ -368,7 +380,7 @@ export class VideoPipeline {
     if (this.idr.poll(this.gate.armed, performance.now())) {
       // onWantIdr() returning exactly false means the request was swallowed
       // (e.g. session not live yet): don't count the poll, so the next AU
-      // asks again instead of waiting out retryMs for nothing (finding 2).
+      // asks again instead of waiting out retryMs for nothing.
       if (this.onWantIdr() === false) this.idr.cancel();
     }
   }

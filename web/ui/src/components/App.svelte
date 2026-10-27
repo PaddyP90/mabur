@@ -71,13 +71,6 @@
     if (root) try { await downloadRecording(root, name); } catch (e) { console.error('[webgs] download', name, e); }
   }
 
-  const video = new VideoPipeline({ getCanvas: () => canvas, getGlCanvas: () => glCanvas, getMode: () => sess.mode,
-    getColortrans: () => ui.cfg.colortrans, onWantIdr: () => session.requestIdr(),
-    // Phase lock (docs/phase-lock.md "Web GS"): the live module (null
-    // between/before connects) and the drone's low-power flag off the
-    // latest core stats, straight through to the PhaseController.
-    getModule: () => session.mod, getLowPower: () => tele.core?.drone_lp ?? null });
-  const tele = new Telemetry(video);
   // MSP OSD: latest DisplayPort grid, painted on
   // a second canvas over the video. The atlas URL resolves against the page
   // (works under the Pages /mabur/ base as well as at a local root).
@@ -92,6 +85,9 @@
   });
   function clearOsd() { if (osdLayer.screen) { osdLayer.clear(); osd.schedule(); } }
 
+  // Declared before VideoPipeline: its getModule/onWantIdr accessors close
+  // over `session`, and VideoPipeline's constructor calls one of them (via
+  // the phase controller's reset) synchronously, not just on a later tick.
   const session = new Session({
     createModule: (opts) => window.createWebGs(opts),
     requestDevice: async () => {
@@ -125,6 +121,14 @@
     onRecClosed: (n, b, e) => onRecClosed(n, b, e),
     reload: reloadToConfig,
   });
+
+  const video = new VideoPipeline({ getCanvas: () => canvas, getGlCanvas: () => glCanvas, getMode: () => sess.mode,
+    getColortrans: () => ui.cfg.colortrans, onWantIdr: () => session.requestIdr(),
+    // Phase lock (docs/phase-lock.md "Web GS"): the live module (null
+    // between/before connects) and the drone's low-power flag off the
+    // latest core stats, straight through to the PhaseController.
+    getModule: () => session.mod, getLowPower: () => tele.core?.drone_lp ?? null });
+  const tele = new Telemetry(video);
 
   let prevState = 'idle';
   session.subscribe((s) => {

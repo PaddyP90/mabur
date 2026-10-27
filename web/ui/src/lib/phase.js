@@ -20,9 +20,10 @@ function pct(a, p) {
 // rAF callback time (observed +-1.9 ms while drawing, on macOS Chrome) back
 // onto the steady grid underneath it. Refit every 30 ticks over the last
 // 240: the period is a ratio estimate, sum(step) / sum(k) over the steps
-// within 30 % of a whole multiple k (1-3) of the median step -- so a missed
-// frame's double-length step still counts, as two periods -- and the phase
-// is the median residual (robust to the occasional wobbled sample).
+// that land within 0.3 of the median step of a whole multiple k (1-3) of
+// it -- so a missed frame's double-length step still counts, as two
+// periods -- and the phase is the median residual (robust to the
+// occasional wobbled sample).
 export class VsyncGrid {
   constructor() {
     this._hist = [];
@@ -198,7 +199,21 @@ export class PhaseController {
     this.onEvicted = onEvicted;
     this._enabled = true;
     this._timer = null;
-    this.reset();
+    // Build the per-session state directly rather than calling reset():
+    // reset() calls getModule() to re-arm a live module, but at
+    // construction time the caller's accessor may not be safe to call yet
+    // (e.g. it closes over a `session` the caller hasn't declared). The
+    // module only ever needs resetting on first use, and _mod() already
+    // handles that.
+    this._resetMod = null;
+    this.grid = new VsyncGrid();
+    this.window = new LatenessWindow();
+    this.queue = new HoldQueue();
+    this._lastRafTick = -Infinity;
+    this._offset = 0;
+    this._held = 0;
+    this._late = 0;
+    this._displacedTotal = 0;
   }
 
   get enabled() { return this._enabled; }

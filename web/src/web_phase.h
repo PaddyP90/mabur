@@ -1,7 +1,7 @@
 #pragma once
 // WebPhase: wraps maburplay's PhaseLock + SourceRate + RateMatch for the
 // web GS core. The page (not a release thread) owns the vblank grid and
-// calls on_frame() for every displayed frame and tick() at ~20 Hz; this
+// calls on_frame() for every decoded frame and tick() at ~20 Hz; this
 // class does the same decisions gs/player's housekeeping loop does
 // (docs/phase-lock.md). It has no RCF wiring of its own: tick()'s return is
 // what the page hands the core thread to put in the RCF.
@@ -18,11 +18,13 @@ class WebPhase {
 
   WebPhase() : lock_(kTargetMs) {}
 
-  // Every displayed frame. margin_us is NaN when the page has no grid/
-  // window yet; the pts still feeds the source-rate estimate. Margins are
-  // ignored while mismatch() holds -- the lock is paused, not fed a number
-  // measured against a panel the source cannot reach -- and while not
-  // steering (the last tick() was not visible).
+  // Every decoded frame (not every displayed one -- a held frame's release
+  // tick is a page-side wait, not a second call here). margin_us is NaN
+  // when the page has no grid/window yet; the pts still feeds the
+  // source-rate estimate. Margins are ignored while mismatch() holds --
+  // the lock is paused, not fed a number measured against a panel the
+  // source cannot reach -- and while not steering (the last tick() was
+  // not visible).
   void on_frame(uint32_t pts_us, double margin_us, double period_us, uint64_t now_us);
   // The pts timeline restarted (drone reboot): forget the centre, send 0.
   void on_discontinuity(uint64_t now_us);

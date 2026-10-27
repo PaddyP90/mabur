@@ -362,3 +362,12 @@ test('frames flushed by a now verdict count as displaced', () => {
   assert.equal(c.snapshot().displaced, before + 2);
   assert.equal(c.flush().length, 0);
 });
+
+// App.svelte builds VideoPipeline (and therefore PhaseController) before
+// the `session` it closes over is declared, so the accessor it passes
+// reads `session` in its temporal dead zone until that statement runs.
+// Construction must never call it -- only a later tick/onFrame/reset may.
+test('construction never calls getModule, even one that throws', () => {
+  const getModule = () => { throw new ReferenceError("Cannot access 'session' before initialization"); };
+  assert.doesNotThrow(() => new PhaseController({ getModule }));
+});

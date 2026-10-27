@@ -115,9 +115,9 @@ test('no onWantIdr given: the pipeline still runs (spotter / tests)', () => {
   assert.equal(v.gateArmed(), true);
 });
 
-// Final review finding 1: a device-local decode failure (unsupported codec,
-// reclaimed hardware decoder) must not hammer the drone with an IDR request
-// every 300 ms forever -- the drone serving it never fixes anything local.
+// A device-local decode failure (unsupported codec, reclaimed hardware
+// decoder) must not hammer the drone with an IDR request every 300 ms
+// forever -- the drone serving it never fixes anything local.
 
 test('no VideoDecoder: pollIdr never asks -- nothing a key frame could fix', () => {
   delete globalThis.VideoDecoder;
@@ -420,4 +420,15 @@ test('onWantIdr returning false is not counted: the next AU asks again immediate
     t = 3; au(v, P, 1003);      // that one counted: gated at retryMs now
     assert.deepEqual(asks, [0, 1, 2]);
   } finally { performance.now = realNow; }
+});
+
+// App.svelte passes getModule/getLowPower accessors that close over a
+// `session` it declares after constructing VideoPipeline; if construction
+// called through to them, it would read `session` in its temporal dead
+// zone. Neither VideoPipeline's own reset() nor the PhaseController it
+// builds may call getModule()/getLowPower() during construction.
+test('construction never calls getModule, even one that throws', () => {
+  const getModule = () => { throw new ReferenceError("Cannot access 'session' before initialization"); };
+  const getLowPower = () => { throw new ReferenceError("Cannot access 'tele' before initialization"); };
+  assert.doesNotThrow(() => new VideoPipeline({ getCanvas: () => null, getMode: () => 'gs', getModule, getLowPower }));
 });
