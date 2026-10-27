@@ -76,9 +76,9 @@ TEST(hidden_sends_zero) {
 TEST(mismatch_sends_zero) {
   WebPhase wp;
   uint64_t now = 1'000'000;
-  // 100 fps source against a 60 Hz panel: a NaN margin stands in for "no
-  // grid yet" so only the source-rate estimate (and the mismatch check) is
-  // exercised, same as a page with margins still fed meanwhile.
+  // 100 fps source against a 60 Hz panel, margins held at the target: the
+  // lock would otherwise be locking fine, but RateMatch flags the mismatch
+  // after 3 bad windows (~4 s).
   run(wp, &now, /*margin_us=*/4'000.0, /*panel_hz=*/60.0, RateMatch::LowPower::kNo,
       /*visible=*/true, /*duration_us=*/4'000'000, /*pts_step_us=*/10'000);
   REQUIRE(wp.mismatch());
@@ -86,8 +86,15 @@ TEST(mismatch_sends_zero) {
   const int16_t r = wp.tick(now + 50'000, 60.0, RateMatch::LowPower::kNo, /*visible=*/true);
   CHECK(r == 0);
   CHECK(wp.sent() == 0);
-  // More margins fed while mismatched must not move the held error.
-  wp.on_frame(0, 9'000.0, 16'667.0, now + 60'000);
+  now += 50'000;
+  // Keep feeding a badly off-target margin (9000 us) for another full
+  // window while still mismatched: if on_frame still passed it to
+  // PhaseLock, the window that closes during this run would move
+  // err_ms() off err_before. It must not, since margins are ignored while
+  // mismatch() holds.
+  run(wp, &now, /*margin_us=*/9'000.0, /*panel_hz=*/60.0, RateMatch::LowPower::kNo,
+      /*visible=*/true, /*duration_us=*/1'100'000, /*pts_step_us=*/10'000);
+  CHECK(wp.mismatch());
   CHECK(wp.err_ms() == err_before);
 }
 
