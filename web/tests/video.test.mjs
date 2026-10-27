@@ -3,7 +3,14 @@ import assert from 'node:assert/strict';
 
 // video.js is browser code; stub the few globals its per-AU path touches.
 globalThis.performance ??= { timeOrigin: 0, now: () => Date.now() };
-globalThis.document ??= { hidden: false };
+// Captures visibilitychange listeners instead of being a real EventTarget,
+// so a test can flip `hidden` and fire the stored listener itself.
+let visCbs = [];
+globalThis.document = {
+  hidden: false,
+  addEventListener: (name, cb) => { if (name === 'visibilitychange') visCbs.push(cb); },
+  removeEventListener: (name, cb) => { if (name === 'visibilitychange') visCbs = visCbs.filter((c) => c !== cb); },
+};
 // Stores callbacks instead of firing them: tests fire a specific one
 // manually (the continuous phase rAF loop re-registers itself on every
 // call, so the stored reference keeps working across repeated fires).
@@ -273,6 +280,90 @@ test('displaced frames are closed without being drawn', () => {
     assert.equal(frameB.closed, true, 'drawn frame closed after presenting');
     assert.equal(frameA.closed, true, 'displaced frame closed without drawing');
   } finally { performance.now = realNow; }
+});
+
+test('a newer "now" frame flushes any older held frame first (no out-of-order draw)', () => {
+  globalThis.VideoDecoder = FakeDecoder;
+  made.length = 0;
+  rafCbs = [];
+  let t = 0;
+  const realNow = performance.now;
+  performance.now = () => t;
+  try {
+    const { canvas, draws } = fakeCanvas();
+    const v = new VideoPipeline({ getCanvas: () => canvas, getMode: () => 'gs' });
+    const frameA = { timestamp: 1000, closed: false, close() { this.closed = true; } };
+    let onFrameCalls = 0;
+    v.phase = {
+      start() {}, stop() {}, reset() { return []; },
+      // First decode holds (e.g. still locked); the second drops to 'now'
+      // (lock lost, mismatch, disabled, hidden, late -- the reason doesn't
+      // matter here) while A is still sitting in the queue.
+      onFrame() { onFrameCalls++; return onFrameCalls === 1 ? 'hold' : 'now'; },
+      onRaf() { return { draw: null, displaced: [] }; },
+      flush() { return onFrameCalls >= 2 ? [{ frame: frameA }] : []; },
+    };
+    t = 10; au(v, IRAP, 1000, hvcc);
+    const loopCb = rafCbs[0];   // the continuous phase loop, captured before frameB adds more
+
+    t = 20; made[0].init.output(frameA);        // onFrame -> 'hold'
+    assert.equal(draws(), 0);
+    assert.equal(frameA.closed, false);
+
+    au(v, P, 17000);
+    const frameB = { timestamp: 17000, closed: false, close() { this.closed = true; } };
+    t = 21; made[0].init.output(frameB);        // onFrame -> 'now': must flush A first
+    assert.equal(frameA.closed, true, 'the older held frame is closed, not left to draw later');
+    assert.equal(draws(), 1, 'B drawn immediately');
+    assert.equal(frameB.closed, true);
+
+    // Firing the loop's rAF afterward must not bring A back.
+    loopCb(1000);
+    assert.equal(draws(), 1, 'still just the one draw -- A never comes back');
+  } finally { performance.now = realNow; }
+});
+
+test('visibilitychange to hidden flushes and closes the hold queue at once', () => {
+  globalThis.VideoDecoder = FakeDecoder;
+  made.length = 0;
+  rafCbs = [];
+  visCbs = [];
+  document.hidden = false;
+  try {
+    const v = new VideoPipeline({ getCanvas: () => null, getMode: () => 'gs' });
+    const heldFrame = { closed: false, close() { this.closed = true; } };
+    let flushCalls = 0;
+    v.phase = {
+      start() {}, stop() {}, reset() { return []; },
+      onFrame() { return 'hold'; },
+      onRaf() { return { draw: null, displaced: [] }; },
+      flush() { flushCalls++; return [{ frame: heldFrame }]; },
+    };
+    au(v, IRAP, 1000, hvcc);
+    assert.equal(visCbs.length, 1, 'onAu registered a visibilitychange listener');
+
+    document.hidden = true;
+    visCbs[0]();
+    assert.equal(flushCalls, 1, 'hidden fired an immediate flush, not a wait for the next tick/rAF');
+    assert.equal(heldFrame.closed, true);
+
+    v.close();
+    assert.equal(visCbs.length, 0, 'close() removed the listener');
+  } finally { document.hidden = false; }
+});
+
+test('spotter mode never touches the phase controller (no wasm reset call)', () => {
+  globalThis.VideoDecoder = FakeDecoder;
+  rafCbs = [];
+  const calls = [];
+  const mod = { _webgs_phase_reset() { calls.push('reset'); } };
+  const v = new VideoPipeline({ getCanvas: () => null, getMode: () => 'spotter', getModule: () => mod });
+  v.reset();
+  au(v, P, 1000);
+  au(v, IRAP, 17000, hvcc);
+  v.close();
+  assert.deepEqual(calls, [], 'spotter never calls _webgs_phase_reset');
+  assert.equal(rafCbs.length, 0, 'spotter never starts the continuous rAF loop');
 });
 
 test('onWantIdr returning false is not counted: the next AU asks again immediately', () => {

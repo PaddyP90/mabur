@@ -174,9 +174,19 @@ function warmPhase(c, n = 120) {
   }
 }
 
+// In the real pipeline, onEvicted closes the frame and drops its
+// _heldMeta record (video.js's _closeEntries); here it's just the close(),
+// which is enough to tell an evicted frame from one still queued.
+function newController(mod) {
+  return new PhaseController({
+    getModule: () => mod, getLowPower: () => null,
+    onEvicted: (es) => { for (const e of es) e.frame.close(); },
+  });
+}
+
 test('controller holds only when locked', () => {
   const { mod } = fakeModule();
-  const c = new PhaseController({ getModule: () => mod, getLowPower: () => null });
+  const c = newController(mod);
   c.reset();
   warmPhase(c, 120);
 
@@ -193,7 +203,7 @@ test('controller holds only when locked', () => {
 
 test('disable flushes and stops holding', () => {
   const { mod } = fakeModule();
-  const c = new PhaseController({ getModule: () => mod, getLowPower: () => null });
+  const c = newController(mod);
   c.reset();
   warmPhase(c, 120);
   mod.state = 2;
@@ -207,17 +217,33 @@ test('disable flushes and stops holding', () => {
   assert.equal(c.onFrame({ frame: a.f, ptsUs: a.ptsUs, tOut: a.tOut }), 'hold');
   assert.equal(c.onFrame({ frame: b.f, ptsUs: b.ptsUs, tOut: b.tOut }), 'hold');
 
+  // The disable itself must evict -- not leave it for some later flush()
+  // call that might never come.
   c.enabled = false;
-  const flushed = c.flush();
-  assert.equal(flushed.length, 2);
+  assert.equal(a.f.closed, true, 'disabling closed the queued frame at once');
+  assert.equal(b.f.closed, true, 'disabling closed the queued frame at once');
+  assert.equal(c.flush().length, 0, 'nothing left queued after the disable');
 
   const d = mk(2);
   assert.equal(c.onFrame({ frame: d.f, ptsUs: d.ptsUs, tOut: d.tOut }), 'now');
 });
 
+test('disabled tells the core not-visible; snapshot still reports its real offset', () => {
+  const { mod, calls } = fakeModule();
+  mod.offset = 7;
+  const c = newController(mod);
+  c.reset();
+
+  c.enabled = false;
+  c.tick(0, { lowPower: null, visible: true });   // tab IS visible; disabled overrides it
+  const last = calls.filter((x) => x[0] === 'tick').pop();
+  assert.equal(last[4], 0, 'visible forced to 0 while disabled, so the core lets go of the offset at once');
+  assert.equal(c.snapshot().offset, 7, 'snapshot reports the real tick return, never hidden from it');
+});
+
 test('hidden tab flushes the hold queue', () => {
   const { mod, calls } = fakeModule();
-  const c = new PhaseController({ getModule: () => mod, getLowPower: () => null });
+  const c = newController(mod);
   c.reset();
   warmPhase(c, 120);
   mod.state = 2;
@@ -241,7 +267,7 @@ test('hidden tab flushes the hold queue', () => {
 
 test('transit jump resets', () => {
   const { mod, calls } = fakeModule();
-  const c = new PhaseController({ getModule: () => mod, getLowPower: () => null });
+  const c = newController(mod);
   c.reset();
   for (let i = 0; i < 100; i++) {
     const tOut = i * PERIOD;
@@ -254,7 +280,7 @@ test('transit jump resets', () => {
 
 test('controller maps drone_lp', () => {
   const { mod, calls } = fakeModule();
-  const c = new PhaseController({ getModule: () => mod, getLowPower: () => null });
+  const c = newController(mod);
   c.reset();
   c.tick(0, { lowPower: true, visible: true });
   assert.equal(calls.filter((x) => x[0] === 'tick').pop()[3], 1);

@@ -177,25 +177,44 @@ const PHASE_STATE_NAMES = { 0: 'wait', 1: 'acq', 2: 'lock', 3: 'oor' };
 // calls, and decides whether a decoded frame should wait for its release
 // tick (held in a HoldQueue) or draw right away. getModule() is null until
 // the wasm core attaches (or forever, in spotter mode, where the caller
-// never touches this class at all).
+// never touches this class at all). onEvicted(entries) is how a flush that
+// happens with no caller waiting for a return value (a disable, a transit
+// jump, a hidden tab caught by the tick timer) still reaches the pipeline:
+// it owns every VideoFrame.close() and the bookkeeping that goes with it.
 export class PhaseController {
-  constructor({ getModule, getLowPower = () => null }) {
+  constructor({ getModule, getLowPower = () => null, onEvicted = () => {} }) {
     this.getModule = getModule;
     this.getLowPower = getLowPower;
+    this.onEvicted = onEvicted;
     this._enabled = true;
     this._timer = null;
     this.reset();
   }
 
   get enabled() { return this._enabled; }
-  set enabled(on) { this._enabled = !!on; }
+  // Off: nothing queued may outlive the moment it's disabled -- evict now,
+  // not whenever the queue would otherwise have next drained.
+  set enabled(on) {
+    on = !!on;
+    if (!on && this._enabled) this._evict();
+    this._enabled = on;
+  }
+
+  _evict() {
+    const entries = this.queue.flush();
+    if (entries.length) this.onEvicted(entries);
+    return entries;
+  }
 
   // New session: re-arms the C++ lock and starts the grid/window/queue
   // over. Doesn't touch `enabled` -- that's a standing preference, not
-  // per-session state.
+  // per-session state. Returns whatever was still queued (normally
+  // nothing -- the caller flushes first -- kept as a ledger rather than
+  // silently dropped).
   reset() {
     const mod = this.getModule();
     if (mod) mod._webgs_phase_reset();
+    const dropped = this.queue ? this.queue.flush() : [];
     this.grid = new VsyncGrid();
     this.window = new LatenessWindow();
     this.queue = new HoldQueue();
@@ -204,6 +223,7 @@ export class PhaseController {
     this._held = 0;
     this._late = 0;
     this._displacedTotal = 0;
+    return dropped;
   }
 
   start() {
@@ -254,10 +274,10 @@ export class PhaseController {
       const mod = this.getModule();
       if (mod) mod._webgs_phase_discontinuity(tOut * 1000);
       this.window.reset();
-      // These were queued before the jump; nothing else is going to see
-      // them (onFrame only returns a verdict for the frame in hand), so
-      // close them here instead of leaking.
-      for (const e of this.queue.flush()) e.frame.close();
+      // These were queued before the jump; onFrame only returns a verdict
+      // for the frame in hand, so hand the rest to onEvicted instead of
+      // leaking them.
+      this._evict();
     }
     this.window.add(d);
 
@@ -282,24 +302,29 @@ export class PhaseController {
   }
 
   // The 50 ms driver: feeds the C++ lock's tick and tracks its last
-  // offset. A hidden tab will never present a held frame, so its queue is
-  // flushed and closed here -- nothing else will do it before the tab
-  // comes back, maybe minutes later.
+  // offset -- the real one, always, since the core already put its return
+  // straight into the RCF by the time this call returns; hiding it behind
+  // `enabled` here would only mislead snapshot(), not change what the
+  // drone received. Disabled reports not-visible instead, so the core lets
+  // go of the offset immediately rather than riding out its own staleness
+  // timeout. A hidden tab will also never present a held frame, so its
+  // queue is evicted here as a backup for whenever this call lands --
+  // _startPhaseLoop's own visibilitychange listener is the fast path and
+  // usually gets there first.
   tick(nowMs, { lowPower, visible }) {
     const mod = this.getModule();
     const panelHz = this.grid.period ? 1000 / this.grid.period : 0;
     const lp = lowPower === true ? 1 : lowPower === false ? 0 : 2;
-    const offset = mod ? mod._webgs_phase_tick(nowMs * 1000, panelHz, lp, visible ? 1 : 0) : 0;
-    this._offset = this._enabled ? offset : 0;
-    if (!visible) {
-      for (const e of this.queue.flush()) e.frame.close();
-    }
+    const vis = this._enabled && visible ? 1 : 0;
+    this._offset = mod ? mod._webgs_phase_tick(nowMs * 1000, panelHz, lp, vis) : 0;
+    if (!visible) this._evict();
     return this._offset;
   }
 
-  // Queued entries for the caller to close: a disable, a session reset or
-  // close, anything that needs the hold queue emptied outside of tick()'s
-  // own hidden-tab handling above.
+  // Queued entries for an explicit caller to close: a session reset or
+  // close, or a 'now' verdict that must not let an older held frame
+  // outlive it. Internal evictions (disable, discontinuity, hidden tab)
+  // go through onEvicted instead -- nothing calls this to receive those.
   flush() { return this.queue.flush(); }
 
   snapshot() {
