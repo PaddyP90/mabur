@@ -17,7 +17,7 @@ extern "C" {
 
 /* Milli-fps either side of the trim request; matches the wire's
  * mabur::rc::kSnrOffRangeMfps. */
-#define SENSOR_STEER_RANGE_MFPS 200
+#define SENSOR_STEER_RANGE_MFPS 500
 
 typedef struct {
 	uint32_t request_mfps; /* apply this to the sensor; 0 = leave it alone */

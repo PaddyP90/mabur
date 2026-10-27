@@ -189,6 +189,7 @@ WebGs::WebGs(const maburgs::Config& cfg, Mode mode, uint8_t start_ch, int width,
     if (mabur::rc::frame_type(f.data(), f.size()) == mabur::rc::T_TELEM) {
       if (auto t = mabur::rc::parse_telem(f.data(), f.size())) {
         telem_ = t;
+        telem_rx_us_ = us;
         // Spotter has no session edge: a maburd restart (new seqs, frame_ids
         // from 0) is the one discontinuity it can see. Safe mid-drain: an RC
         // body never reaches the decoder.
@@ -567,6 +568,11 @@ Stats WebGs::stats() const {
     s.drone_state = telem_->state;
     s.rec_status = telem_->rec_status;
     if (telem_->soc_temp_c != -128) s.drone_temp_c = telem_->soc_temp_c;
+    // Gs only: a Spotter has no RCF to steer, so its low_power readout would
+    // have nothing to drive -- null regardless of how fresh the Telem is.
+    constexpr uint64_t kDroneLpStaleUs = 3'000'000;
+    if (vrx_ && now_us_ - telem_rx_us_ <= kDroneLpStaleUs)
+      s.drone_lp = (telem_->flags & 0x80) != 0;
   }
   s.osd_snaps = msp_ ? msp_->snapshots_out() : 0;
   s.osd_screens = osd_.screens();
@@ -641,6 +647,7 @@ std::string stats_json(const Stats& s) {
   j["uplink"] = s.uplink;
   opt("drone_state", s.drone_state);
   opt("drone_temp_c", s.drone_temp_c);
+  opt("drone_lp", s.drone_lp);
   if (s.rec_status) {
     j["rec_state"] = *s.rec_status & 0x03;
     j["rec_err"] = *s.rec_status >> 2;

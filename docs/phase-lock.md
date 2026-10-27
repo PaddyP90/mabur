@@ -29,7 +29,7 @@ slot. The evidence is `docs/findings/2026-10-17-phase-lock-spike.md` and
      residual exceeds 1 ms RMS give no slope;
    - `centre` = EMA of n (α 0.3), the offset sent = centre − 30 mfps per
      ms of error, the correction clamped to ±60 mfps while acquiring and
-     ±20 while locked, the whole clamped to ±200 mfps.
+     ±20 while locked, the whole clamped to ±500 mfps.
    The sensor only takes whole lines, so near lock the line count toggles
    between neighbours.
 3. **maburgs forwards.** maburplay sends `phase <mfps>` to RecControl
@@ -37,7 +37,7 @@ slot. The evidence is `docs/findings/2026-10-17-phase-lock-spike.md` and
    in every RCF; after 3 s without a `phase` line it sends 0.
 4. **The drone applies.** `RcAgent` hands each new `snr_off` to venc. The
    encoder thread sets the sensor to the trim request plus the offset,
-   clamped to ±200 mfps and never above the sensor mode's ceiling (maxFps
+   clamped to ±500 mfps and never above the sensor mode's ceiling (maxFps
    × 1000: a mode whose maximum is its nominal rate, like 1728x972@100,
    has the driver refuse anything faster), once the boot trim has locked
    (or given up): one sensor writer. 0 restores the trim's own request. Link loss keeps the
@@ -60,8 +60,8 @@ window and ends in oor.
 
 The player measures the drone's frame rate (median pts step over 1 s,
 `SourceRate`) and compares it with the panel's refresh (`RateMatch`,
-`gs/player/src/rate_match.h`). More than 0.25 Hz apart (the steer reaches
-±0.2 fps) for 3 consecutive seconds is a mismatch: a drone `venc.fps` that
+`gs/player/src/rate_match.h`). More than 0.55 Hz apart (the steer reaches
+±0.5 fps) for 3 consecutive seconds is a mismatch: a drone `venc.fps` that
 does not match `screen_mode`, or a display that fell back to another mode
 because the sink does not offer the requested one. While it lasts the lock
 is held in wait and sends nothing (maburgs' RCF `snr_off` falls to 0 after
@@ -87,8 +87,23 @@ drone.
 ## Wire
 
 `Rcf::snr_off`: int16 little-endian at RCF head offset 15, milli-fps on the
-drone's trim request, 0 = no steering. `RC_VERSION` 16. The web GS and
-spotters always send 0.
+drone's trim request, 0 = no steering. `RC_VERSION` 16. The web GS steers
+too, in GS mode; spotters send no RCFs at all and so always send 0.
+
+### Web GS
+
+`web/` (GS mode) runs the same loop in the browser instead of against a
+display's vblank: the page measures its own refresh from rAF timestamps
+(`VsyncGrid`, `web/ui/src/lib/phase.js`: the period is a ratio estimate,
+the summed steps over the summed whole periods they span, taken over the
+steps near the median), feeds the
+same `PhaseLock`/`RateMatch` C++ sources through WASM exports
+(`web/src/web_phase.cpp`), and holds a decoded frame to its release tick
+instead of drawing it on arrival (`HoldQueue`). The offset reaches the
+drone the same way as from `maburplay`: through the core's RCF `snr_off`.
+Spotter mode sends no RCFs and runs no phase-lock calls at all. See
+`docs/web-gs.md` ("Phase lock") for the toggle, the hold, and the Stats
+panel group.
 
 ## Deploy
 
@@ -97,6 +112,9 @@ page: finish the deploy on both devices (and republish the web page) before
 judging the link, per `docs/deploy.md`. On the GS, the `maburplay` binary
 goes in before its config -- an older binary exits on the new
 `[display]` keys (`phase_lock`, `phase_margin_ms`).
+A `maburd` from before the ±500 mfps range clamps `snr_off` at ±200 mfps,
+so a panel that needs more (phone-class refresh rates) cannot lock until
+the drone is redeployed.
 
 ## Configuration
 

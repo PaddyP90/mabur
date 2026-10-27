@@ -356,6 +356,8 @@ add_mtest(test_au_ring test_au_ring.cpp LIBS mabur_gs_core pthread)
   target_compile_definitions(test_web_gs PRIVATE MABUR_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
   # Spotter follower (web/src/spotter_follow.h): pure, no body generator.
   add_mtest(test_spotter_follow test_spotter_follow.cpp LIBS mabur_web_core)
+  # WebPhase (web/src/web_phase.h): PhaseLock + RateMatch wrapper for the page.
+  add_mtest(test_web_phase test_web_phase.cpp LIBS mabur_web_core)
   add_mtest(test_relay_ring test_relay_ring.cpp LIBS mabur_web_core)
   add_test(NAME web_relay_e2e
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/web/tests/test_relay_e2e.py $<TARGET_FILE:webgs>)

@@ -199,6 +199,16 @@
       </div>
       <div class="hint">Undoes the drone camera's colortrans tuning. Turn off for a drone without the colortrans sensor file.</div>
     </div>
+    {#if !spotter}
+      <div class="field">
+        <span id="{uid}phase-label" class="fieldlabel">Phase lock</span>
+        <div class="seg" role="radiogroup" aria-labelledby="{uid}phase-label">
+          <label class="seg-opt"><input type="radio" name="{uid}phase" checked={cfg.phaseLock} onchange={() => set('phaseLock', true)}>On</label>
+          <label class="seg-opt"><input type="radio" name="{uid}phase" checked={!cfg.phaseLock} onchange={() => set('phaseLock', false)}>Off</label>
+        </div>
+        <div class="hint">Locks the drone's sensor rate to this browser's refresh, so capture-time placement has no sawtooth. GS mode only; off holds no frame and the drone runs on its trim.</div>
+      </div>
+    {/if}
   </div>
 
   {#if applied}

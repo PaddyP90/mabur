@@ -72,9 +72,10 @@ constexpr uint8_t kRecOn = 0x01;     // the operator wants the VTX recording
 constexpr uint8_t kRecKnown = 0x02;  // the GS knows the wish; 0 = unknown, drone keeps its state
 
 // Phase lock: the steering range either end accepts, in milli-fps around
-// the drone's boot trim (about 11 sensor lines at 60 fps: a 59.94 Hz panel
-// needs ~3, the rest is headroom for auto-exposure stretching the frame).
-constexpr int16_t kSnrOffRangeMfps = 200;
+// the drone's boot trim (about 28 sensor lines at 60 fps: a 59.94 Hz panel
+// needs ~3, a browser panel up to 0.5 Hz off nominal needs up to ~300, the
+// rest is headroom for auto-exposure stretching the frame).
+constexpr int16_t kSnrOffRangeMfps = 500;
 
 constexpr uint8_t T_RCF = 1;
 constexpr uint8_t T_DISC = 2;

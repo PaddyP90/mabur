@@ -82,7 +82,7 @@ log line). Known sinks:
   `screen_mode = "1920x1080@100"` with a 91–100 fps drone.
 
 When the drone's measured rate and the panel's refresh are too far apart
-for the phase lock (more than 0.25 Hz: a wrong `venc.fps`, or a sink that
+for the phase lock (more than 0.55 Hz: a wrong `venc.fps`, or a sink that
 fell back), the OSD fps cell reads `source/panel` in caution (`100/60`),
 the phase lock pauses and sends nothing, and the player logs
 `maburplay: rate mismatch`. A drone in low-power is never a mismatch. If

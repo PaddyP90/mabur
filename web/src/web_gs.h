@@ -135,6 +135,9 @@ struct Stats {
   std::string uplink = "none";
   std::optional<uint8_t> drone_state;
   std::optional<uint8_t> rec_status;      // Telem.rec_status raw (VTX recorder)
+  // Telem flags bit7 (low_power), while that Telem is <= 3 s old on WebGs's
+  // own clock; null once stale. Always null in Spotter (no RCF to steer).
+  std::optional<bool> drone_lp;
   uint32_t idr_req = 0;                   // page IDR requests so far (set_idr_requests)
   std::optional<int> drone_temp_c;        // Telem.soc_temp_c; unset when -128 (unavailable)
   uint64_t osd_snaps = 0;     // MSP snapshots out of the FEC sink
@@ -303,6 +306,7 @@ class WebGs {
   maburgs::OpPoint spotter_op_;                   // fixed: configured width only
   int air_mcs_ = -1;                              // last base-stream RX mcs (Spotter readout)
   std::optional<mabur::rc::Telem> telem_;
+  uint64_t telem_rx_us_ = 0;   // core clock when telem_ was set; drives drone_lp staleness
   Au cur_;
   uint64_t bodies_ = 0, aus_complete_ = 0, aus_truncated_ = 0, sends_ = 0, rcf_sent_ = 0;
   uint64_t aus_truncated_base_ = 0;

@@ -55,16 +55,16 @@ TEST(rec_control_phase_line_held_with_timeout) {
   CHECK(c.snr_off(1000) == -37);
   CHECK(c.snr_off(1000 + RecControl::kPhaseTimeoutMs) == -37);
   CHECK(c.snr_off(1001 + RecControl::kPhaseTimeoutMs) == 0);
-  CHECK(!c.apply("phase 200\n", 5000));       // the range edge, newline tolerated
-  CHECK(c.snr_off(5000) == 200);
+  CHECK(!c.apply("phase 500\n", 5000));       // the range edge, newline tolerated
+  CHECK(c.snr_off(5000) == 500);
   CHECK(c.wire() == 0);                       // the VTX wish is untouched
 }
 
 TEST(rec_control_phase_rejects_bad_values) {
   RecControl c;
   c.apply("phase 12", 0);
-  c.apply("phase 201", 10);
-  c.apply("phase -201", 10);
+  c.apply("phase 501", 10);
+  c.apply("phase -501", 10);
   c.apply("phase abc", 10);
   c.apply("phase 5x", 10);
   CHECK(c.snr_off(10) == 12);   // the last good value stays

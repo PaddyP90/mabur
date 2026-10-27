@@ -52,10 +52,19 @@ TEST(rate_match_accepts_trimmed_rates) {
   CHECK(!b.mismatch());
 }
 
-TEST(rate_match_flags_a_ceiling_short_of_the_panel) {
+TEST(rate_match_accepts_a_ceiling_within_reach) {
   RateMatch m;
-  windows(&m, 3, 119.66, 120.0);  // 0.34 Hz: past the steer's reach
-  CHECK(m.mismatch());
+  windows(&m, 3, 119.66, 120.0);  // 0.34 Hz: inside the steer's wider reach
+  CHECK(!m.mismatch());
+}
+
+TEST(reach_is_half_a_hertz) {
+  RateMatch a;
+  windows(&a, 3, 59.5, 60.0);  // 0.5 Hz: still within reach
+  CHECK(!a.mismatch());
+  RateMatch b;
+  windows(&b, 3, 59.4, 60.0);  // 0.6 Hz: past the steer's reach
+  CHECK(b.mismatch());
 }
 
 TEST(rate_match_is_silent_in_low_power) {

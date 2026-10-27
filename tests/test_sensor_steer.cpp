@@ -28,6 +28,14 @@ TEST(zero_restores_the_trim_request) {
   CHECK(s.offset_mfps == 0);
 }
 
+TEST(phone_panel_offset_is_not_clamped) {
+  // A browser grid 0.27 Hz above a 59.988 Hz trim needs ~+300 mfps.
+  const SensorSteer s = sensor_steer_plan(SENSOR_CAL_STATE_LOCKED, 59988, 300, 59988, 0, 0);
+  CHECK(!s.clamped);
+  CHECK(s.request_mfps == 60288);
+  CHECK(SENSOR_STEER_RANGE_MFPS == 500);
+}
+
 TEST(clamps_to_the_range) {
   const SensorSteer hi = sensor_steer_plan(SENSOR_CAL_STATE_LOCKED, 59718, 900, 59718, 0, 0);
   CHECK(hi.clamped);
