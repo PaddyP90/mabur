@@ -48,7 +48,7 @@ class SourceRate {
 };
 
 // Whether the panel rate is within the phase lock's reach of the source
-// rate. The steer moves the sensor at most +-0.2 fps around its trim, so a
+// rate. The steer moves the sensor at most +-0.5 fps around its trim, so a
 // source further than kReachHz from the panel can never lock: a drone fps
 // that does not match the display (or a display that fell back to another
 // rate). It flips only after kFlipWindows consecutive windows agree, a
@@ -56,7 +56,7 @@ class SourceRate {
 // no current low-power report it holds whatever it last decided.
 class RateMatch {
  public:
-  static constexpr double kReachHz = 0.25;
+  static constexpr double kReachHz = 0.55;
   static constexpr int kFlipWindows = 3;
 
   // The drone's low-power report: kUnknown when its sideport is quiet.
