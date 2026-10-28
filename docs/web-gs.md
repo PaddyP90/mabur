@@ -1074,8 +1074,19 @@ at most once per animation frame. It blanks after 5 s without a screen
 (`maburplay`'s `stale_ms` default) and on Disconnect. There is no toggle;
 trim elements in the Betaflight OSD tab.
 
-Font: Betaflight only, `web/ui/public/font_btfl.png` (32 glyphs per row,
-36×54). It is generated from `maburplay`'s `gs/player/bundle/font_btfl.mfont`
+Font: the Display menu's "OSD font" picker (page-only `osdFont` in the saved
+config, applied on the next frame). The shipped font is Betaflight,
+`web/ui/public/font_btfl.png`; extra fonts are PNG atlases listed in
+`web/ui/public/fonts/index.json` (`[{id, name, file}]`), made from `.mfont`
+files with `tools/msp/gen_webfonts.py <dir-or-files>` (36×54, 1024 glyphs;
+colours that cannot be premultiplied are read as straight alpha). Everything
+under `public/` is precached, subfolders included, except the font atlases
+(`fonts/*.png`): those are lazy. Only the selected font is fetched, on the first
+OSD screen, and the service worker caches it then, so it works offline after
+one use. `fonts/index.json` is precached. Switching fonts frees the old
+decoded bitmap. An unknown saved id falls
+back to Betaflight. Every atlas is 32 glyphs per row,
+36×54. It is generated from `maburplay`'s `gs/player/bundle/font_btfl.mfont`
 by `tools/msp/gen_webfont.py` (re-run it if the `.mfont` changes; it
 self-checks the round trip). The page fetches it on the first screen. A
 failed fetch logs once to the console and leaves the OSD off for the rest of
