@@ -51,6 +51,9 @@ export const ui = $state({
   relayAddr: loadRelayCustom(saved),   // typed override; '' = use RELAY_DEFAULT
   relayFieldOpen: false,               // a Connect this visit found no relay
   tick: 0,
+  // Selectable OSD fonts: the manifest (public/fonts/index.json) replaces
+  // this at startup; the shipped Betaflight atlas is always available.
+  osdFonts: [{ id: 'btfl', name: 'Betaflight', file: 'font_btfl.png' }],
 });
 
 // Field visibility is decided by what was saved when the page loaded, so
