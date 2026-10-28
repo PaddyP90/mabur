@@ -23,6 +23,7 @@
   import { effectiveTarget, targetCovers, recFileName, localView, combinedRec, headroomWarning,
     formatBytes, listRecordings, downloadRecording, deleteRecording, opfsRoot } from '../lib/localrec.js';
   import { OsdLayer, OsdPainter } from '../lib/osd.js';
+  import { loadFontList, fontFile } from '../lib/osdfonts.js';
   import { ScreenWake } from '../lib/wakelock.js';
 
   let canvas = $state(null);
@@ -77,12 +78,18 @@
   const osdLayer = new OsdLayer();
   const osd = new OsdPainter({
     layer: osdLayer,
-    loadAtlas: async () => {
-      const r = await fetch(new URL('font_btfl.png', document.baseURI));
+    fontId: ui.cfg.osdFont,
+    loadAtlas: async (id) => {
+      const r = await fetch(new URL(fontFile(ui.osdFonts, id), document.baseURI));
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       return createImageBitmap(await r.blob());
     },
   });
+  // Font list from public/fonts/index.json (loaded long before the first OSD
+  // screen needs an atlas), then follow the Display menu's choice. An id the
+  // list lacks falls back to the shipped atlas.
+  loadFontList(fetch, document.baseURI).then((l) => { ui.osdFonts = l; });
+  $effect(() => { osd.setFont(ui.cfg.osdFont); });
   function clearOsd() { if (osdLayer.screen) { osdLayer.clear(); osd.schedule(); } }
 
   // Declared before VideoPipeline: its accessors (getModule, onWantIdr, etc.)
