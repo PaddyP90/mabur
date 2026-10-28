@@ -58,8 +58,8 @@ export class OsdLayer {
 // refetch per screen) -- video is unaffected. resetAtlasFailure(), called on
 // Connect, allows one more attempt per session.
 export class OsdPainter {
-  constructor({ layer, loadAtlas, raf = (f) => requestAnimationFrame(f), log = console }) {
-    Object.assign(this, { layer, loadAtlas, raf, log });
+  constructor({ layer, loadAtlas, fontId = null, raf = (f) => requestAnimationFrame(f), log = console }) {
+    Object.assign(this, { layer, loadAtlas, fontId, raf, log });
     this.canvas = null;
     this.atlas = null;
     this.atlasP = null;
@@ -101,13 +101,27 @@ export class OsdPainter {
   }
 
   fetchAtlas() {
-    if (this.atlasP) return;
-    this.atlasP = Promise.resolve().then(() => this.loadAtlas()).then(
-      (bmp) => { this.atlas = bmp; this.schedule(); },
+    if (this.atlasP || this.atlasFailed) return;
+    const id = this.fontId;
+    const p = Promise.resolve().then(() => this.loadAtlas(id)).then(
+      (bmp) => { if (this.atlasP !== p) return; this.atlas = bmp; this.schedule(); },
       (e) => {
+        if (this.atlasP !== p) return;   // a font switch superseded this load
         this.atlasFailed = true;
         this.log.error('[webgs] OSD font atlas failed to load; OSD off until the next Connect', e);
       });
+    this.atlasP = p;
+  }
+
+  // Switch the OSD font. The old atlas is dropped and the next paint fetches
+  // the new one; a load still in flight for the previous font is ignored.
+  setFont(id) {
+    if (id === this.fontId) return;
+    this.fontId = id;
+    this.atlas = null;
+    this.atlasP = null;
+    this.atlasFailed = false;
+    this.schedule();
   }
 
   // A loaded or in-flight atlas is kept; only a failed one is forgotten.
