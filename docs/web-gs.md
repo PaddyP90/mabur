@@ -1023,8 +1023,9 @@ In every eviction case the controller still owns the frame's
 `VideoFrame.close()` — nothing queued can outlive the moment it stops being
 wanted.
 
-**Stats group.** The Stats panel's **Phase lock** group
-(`statsView`'s `phaseGroup`, `web/ui/src/lib/view.js`) reads
+**Debug group.** The Debug tab's **Phase lock** group
+(`debugGroups()`'s `phaseGroup`, `web/ui/src/lib/view.js`, after the NACK
+group) reads
 `PhaseController.snapshot()` while a GS session is live (all dashes
 otherwise). With the toggle off it is a single `state` row reading `off`;
 on, it has:

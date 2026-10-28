@@ -55,14 +55,6 @@
   <span class="dim6" style="font-size:11px">{v.latencyCaption}</span>
 </div>
 
-<div class="group">
-  <span class="card-kicker">{v.phaseGroup.title}</span>
-  {#each v.phaseGroup.rows as row}
-    <div style="display:flex;justify-content:space-between;font-size:12px">
-      <span class="dim5">{row.k}</span><span class="num nowrap {row.tone || ''}">{row.v}</span></div>
-  {/each}
-</div>
-
 <style>
   /* Uplink tones (view.js uplinkCell): amber below 80 %, red when the drone stopped hearing us. */
   .low { color: var(--color-status-caution); } .dead { color: var(--color-status-critical); }
