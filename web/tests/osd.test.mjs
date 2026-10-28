@@ -221,3 +221,22 @@ test('painter.setFont: drops the atlas, reloads for the new id, ignores a supers
   await settle();
   assert.deepEqual(loads, ['a', 'b']);
 });
+
+test('painter.setFont: closes the old bitmap and one that lands after a switch', async () => {
+  const layer = new OsdLayer();
+  const raf = fakeRaf();
+  const closed = [];
+  const bmp = (id) => ({ id, close: () => closed.push(id) });
+  const res = {};
+  const p = new OsdPainter({ layer, raf, fontId: 'a', loadAtlas: (id) => new Promise((r) => { res[id] = r; }) });
+  p.attach(fakeCanvas());
+  layer.onScreen(18, 50, grid(18, 50, { 0: 0x48 }), 1000);
+  p.schedule(); raf.flush(); await settle();
+  res.a(bmp('A')); await settle(); raf.flush();
+  assert.equal(p.atlas.id, 'A');
+  p.setFont('b'); raf.flush(); await settle();
+  assert.deepEqual(closed, ['A']);              // switching frees the decoded atlas
+  p.setFont('c'); raf.flush(); await settle();  // 'b' is still loading when 'c' is chosen
+  res.b(bmp('B')); await settle();
+  assert.deepEqual(closed, ['A', 'B']);         // the stale load is closed, never kept
+});
