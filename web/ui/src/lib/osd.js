@@ -113,8 +113,9 @@ export class OsdPainter {
     this.atlasP = p;
   }
 
-  // Switch the OSD font. The old atlas is dropped and the next paint fetches
-  // the new one; a load still in flight for the previous font is ignored.
+  // Switch the OSD font (loadAtlas receives the id). The old atlas is dropped
+  // and the next paint fetches the new one; a load still in flight for the
+  // previous font is ignored when it lands.
   setFont(id) {
     if (id === this.fontId) return;
     this.fontId = id;
