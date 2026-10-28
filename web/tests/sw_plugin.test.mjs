@@ -66,3 +66,16 @@ test('sw.js install precache bypasses the HTTP cache (fixed-name files can be st
   const install = src.slice(src.indexOf("addEventListener('install'"), src.indexOf("addEventListener('activate'"));
   assert.ok(install.includes("cache: 'reload'"), "install handler must fetch precache entries with cache: 'reload'");
 });
+
+test('listPublic: recurses into subfolders, files only, posix paths', async () => {
+  const { listPublic } = await import('../ui/sw/plugin.mjs');
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'pub-'));
+  fs.mkdirSync(path.join(d, 'fonts'));
+  fs.writeFileSync(path.join(d, 'a.png'), 'x');
+  fs.writeFileSync(path.join(d, 'fonts', 'b.png'), 'x');
+  assert.deepEqual(listPublic(d).sort(), ['a.png', 'fonts/b.png']);
+  assert.deepEqual(listPublic(path.join(d, 'missing')), []);
+});
