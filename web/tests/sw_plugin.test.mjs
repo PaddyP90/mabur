@@ -79,3 +79,8 @@ test('listPublic: recurses into subfolders, files only, posix paths', async () =
   assert.deepEqual(listPublic(d).sort(), ['a.png', 'fonts/b.png']);
   assert.deepEqual(listPublic(path.join(d, 'missing')), []);
 });
+
+test('precacheList: selectable OSD font atlases are lazy, their manifest is not', () => {
+  const files = precacheList(['index.html'], ['font_btfl.png', 'fonts/index.json', 'fonts/a.png', 'fonts/b_2.png'], []);
+  assert.deepEqual(files, ['font_btfl.png', 'fonts/index.json', 'index.html']);
+});
