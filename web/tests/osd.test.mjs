@@ -195,3 +195,29 @@ test('painter: a failed atlas load is retried once per session after resetAtlasF
   p.schedule(); raf.flush(); await settle(); raf.flush();
   assert.equal(loads, 2);
 });
+
+test('painter.setFont: drops the atlas, reloads for the new id, ignores a superseded load', async () => {
+  const layer = new OsdLayer();
+  const raf = fakeRaf();
+  const loads = [];
+  const resolvers = {};
+  const p = new OsdPainter({ layer, raf, fontId: 'a',
+    loadAtlas: (id) => { loads.push(id); return new Promise((res) => { resolvers[id] = res; }); } });
+  const cv = fakeCanvas();
+  p.attach(cv);
+  layer.onScreen(18, 50, grid(18, 50, { 0: 0x48 }), 1000);
+  p.schedule(); raf.flush();
+  await settle();                               // loadAtlas runs a microtask later
+  assert.deepEqual(loads, ['a']);
+  p.setFont('b'); raf.flush();                  // switch while 'a' is still loading
+  await settle();
+  assert.deepEqual(loads, ['a', 'b']);
+  resolvers.a({ id: 'A' }); await settle(); raf.flush();
+  assert.equal(p.atlas, null);                  // the superseded load never lands
+  resolvers.b({ id: 'B' }); await settle(); raf.flush();
+  assert.equal(p.atlas.id, 'B');
+  assert.equal(cv.ctx.draws.at(-1)[0].id, 'B');
+  p.setFont('b'); raf.flush();                  // same id: no reload
+  await settle();
+  assert.deepEqual(loads, ['a', 'b']);
+});
