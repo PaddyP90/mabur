@@ -104,7 +104,7 @@ export class OsdPainter {
     if (this.atlasP || this.atlasFailed) return;
     const id = this.fontId;
     const p = Promise.resolve().then(() => this.loadAtlas(id)).then(
-      (bmp) => { if (this.atlasP !== p) return; this.atlas = bmp; this.schedule(); },
+      (bmp) => { if (this.atlasP !== p) { bmp?.close?.(); return; } this.atlas = bmp; this.schedule(); },
       (e) => {
         if (this.atlasP !== p) return;   // a font switch superseded this load
         this.atlasFailed = true;
@@ -119,6 +119,7 @@ export class OsdPainter {
   setFont(id) {
     if (id === this.fontId) return;
     this.fontId = id;
+    this.atlas?.close?.();   // free the old ~8 MB decoded bitmap
     this.atlas = null;
     this.atlasP = null;
     this.atlasFailed = false;
