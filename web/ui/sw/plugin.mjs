@@ -8,8 +8,13 @@ import crypto from 'node:crypto';
 
 const TOKEN = '/*__MABUR_PRECACHE__*/ null';
 
+// The selectable OSD font atlases (public/fonts/*.png, ~0.5 MB each) are not
+// precached: only the font in use is fetched, on the first OSD screen, and
+// the network-first handler caches it then. fonts/index.json stays precached.
+const LAZY = /^fonts\/.+\.png$/;
+
 export function precacheList(bundleNames, publicNames, extraNames) {
-  const keep = (f) => f !== 'sw.js' && f !== '.gitkeep' && !f.endsWith('.map');
+  const keep = (f) => f !== 'sw.js' && f !== '.gitkeep' && !f.endsWith('.map') && !LAZY.test(f);
   return [...new Set([...bundleNames, ...publicNames, ...extraNames].filter(keep))].sort();
 }
 
