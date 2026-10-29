@@ -190,12 +190,12 @@ TEST(p99_frame_is_the_real_outliers_own_tuple) {
   // OWN air (5ms) is far below the per-column p99 air (118ms, from a
   // baseline frame). A "sum independently-ranked percentiles" bug would
   // report the baseline's 118ms; the real-frame rule must report 5ms.
-  // pts must climb in small steps (< kLeakPpm's ~16.7 ms/step threshold)
-  // from warm()'s last pts (32 * kFrameStep) so the anchor's floor stays
-  // pinned exactly at kC with zero leak -- see warm()'s comment. Each
-  // frame's t_first is then set as kC + pts + <desired span>, which
-  // on_submit's span = t_first - anchor.map_us(pts64) resolves back to
-  // exactly <desired span>, independent of the actual pts value.
+  // pts climbs in 2 ms steps from warm()'s last pts (32 * kFrameStep);
+  // no frame arrives at the floor, so the anchor leaks up kLeakPpm of the
+  // 200 ms pts span (12 µs) across the test. Each frame's t_first is set
+  // as kC + pts + <desired span>, which on_submit's span = t_first -
+  // anchor.map_us(pts64) resolves back to <desired span> minus that
+  // creep -- invisible in the ms figures, bounded below in the raw one.
   const uint32_t base_pts = 32 * kFrameStep;
   for (int i = 0; i < 99; ++i) {
     AuRecordMeta m;
@@ -242,6 +242,19 @@ TEST(p99_frame_is_the_real_outliers_own_tuple) {
   CHECK(B.ms[5] == 5);    // reg
   CHECK(B.ms[6] == 500);  // dsp
   CHECK(B.ms[7] == 610);  // e2e
+  // The raw sum, for the OSD's single rounding: 610 ms less the leak's
+  // creep over the test (60 ppm of 200 ms = 12 µs).
+  CHECK(B.e2e_us <= 610'000 && B.e2e_us >= 610'000 - 15);
+}
+
+// The OSD's absolute LAT is the frame's e2e plus the network floor. Both
+// are µs; rounding each to ms and adding would be off by one whenever the
+// two halves round the same way (22.4 + 2.4 = 24.8 -> 25, not 22 + 2 = 24).
+TEST(absolute_lat_rounds_the_sum_once) {
+  CHECK(maburplay::abs_lat_ms(22'400, 2'400) == 25);
+  CHECK(maburplay::abs_lat_ms(22'600, 2'600) == 25);   // 25.2
+  CHECK(maburplay::abs_lat_ms(22'400, 0) == 22);       // relative: no floor
+  CHECK(maburplay::abs_lat_ms(22'400, -900) == 22);    // slightly negative floor: 21.5 -> 22
 }
 
 TEST(chk_is_zero_on_clean_synthetic_data) {
