@@ -27,6 +27,7 @@
 #include "config.h"
 #include "frame_file_source.h"
 #include "mabur/raw_dvr.h"
+#include "mav_ring.h"
 #include "web_gs.h"
 #include "web_phase.h"
 #ifdef WEBGS_LIVE
@@ -97,15 +98,15 @@ struct LocalRecReq {
 // webgs_mav_take exports hand raw bytes across the page/core thread
 // boundary (WebGs itself is single-threaded, so this mutex is the seam).
 // `out`: outbound bytes queued by the page, drained into
-// WebGs::mav_push_outbound once per loop iteration. `in`/`in_lens`: whole
-// inbound packets the core drained out of WebGs::mav_take_inbound, each
-// run's byte length recorded so webgs_mav_take never returns a prefix that
-// splits one.
+// WebGs::mav_push_outbound once per loop iteration. `in`: inbound packets
+// the core drained out of WebGs::mav_take_inbound one at a time -- a
+// bounded MavRing (mav_ring.h), since nothing calls webgs_mav_take without
+// a page MAVLink UI and the drone's once-a-second heartbeat would
+// otherwise grow it for the module's whole lifetime.
 struct MavBridge {
   std::mutex mu;
   std::vector<uint8_t> out;
-  std::vector<uint8_t> in;
-  std::vector<int> in_lens;
+  webgs::MavRing in;
 } g_mav;
 // False before the core exists and after it exits: webgs_mav_push then
 // has nothing to drain into, so it refuses rather than growing `out`
@@ -446,7 +447,6 @@ int live_loop(const LiveOpts& o, const maburgs::Config& cfg, uint8_t ch, int wid
     std::lock_guard<std::mutex> lk(g_mav.mu);
     g_mav.out.clear();
     g_mav.in.clear();
-    g_mav.in_lens.clear();
   }
   g_mav_running.store(true, std::memory_order_release);
 
@@ -526,15 +526,16 @@ int live_loop(const LiveOpts& o, const maburgs::Config& cfg, uint8_t ch, int wid
     g.tick(now_us());
     {
       // Inbound MAVLink (webgs_mav_take): drain whatever the tunnel
-      // delivered this tick into the bridge, one run of whole packets at
-      // a time so the bridge's own cap-bound take can never split one.
-      uint8_t mbuf[2048];
+      // delivered this tick into the bridge, one whole packet at a time
+      // (mav_take_inbound's own contract); the bridge's ring applies its
+      // own cap, dropping the oldest queued packet(s) if the page never
+      // calls webgs_mav_take to make room.
+      uint8_t mbuf[512];   // > MAVLINK_MAX_PACKET_LEN (~280 B)
       for (;;) {
         const size_t n = g.mav_take_inbound(mbuf, sizeof mbuf);
         if (n == 0) break;
         std::lock_guard<std::mutex> lk(g_mav.mu);
-        g_mav.in.insert(g_mav.in.end(), mbuf, mbuf + n);
-        g_mav.in_lens.push_back(static_cast<int>(n));
+        g_mav.in.push(mbuf, n);
       }
     }
     if (const uint32_t sq = g_phase_seq.load(std::memory_order_acquire); sq != phase_seq_seen) {
@@ -795,9 +796,14 @@ EMSCRIPTEN_KEEPALIVE void webgs_set_local_rec(int on, const char* name) {
 
 // MAVLink tunnel seam (no UI): raw packet bytes both ways. webgs_mav_push
 // queues bytes from a local MAVLink peer for the core to parse and tunnel
-// to the drone; webgs_mav_take drains whatever the drone's T_MAV frames
-// delivered, up to `cap` bytes, never splitting a packet across two calls
-// (a packet that would not fit is left queued for the next one).
+// to the drone; webgs_mav_take pops one whole packet (drone -> local peer)
+// per call, up to `cap` bytes -- never split, and never more than one
+// packet per call (loop until it returns 0 to drain everything queued). A
+// `cap` of at least MAVLINK_MAX_PACKET_LEN (~280 B) always succeeds; a
+// smaller one leaves a too-big packet queued rather than returning a
+// partial one. The ring behind this is bounded (mav_ring.h): with no page
+// MAVLink UI yet, nothing may call this for the module's whole lifetime,
+// so unread packets age out oldest-first instead of growing forever.
 EMSCRIPTEN_KEEPALIVE int webgs_mav_push(const uint8_t* p, int n) {
   if (!g_mav_running.load(std::memory_order_acquire) || n <= 0) return 0;
   std::lock_guard<std::mutex> lk(g_mav.mu);
@@ -807,18 +813,7 @@ EMSCRIPTEN_KEEPALIVE int webgs_mav_push(const uint8_t* p, int n) {
 EMSCRIPTEN_KEEPALIVE int webgs_mav_take(uint8_t* out, int cap) {
   if (cap <= 0) return 0;
   std::lock_guard<std::mutex> lk(g_mav.mu);
-  size_t copied = 0, n_runs = 0;
-  for (const int len : g_mav.in_lens) {
-    if (copied + static_cast<size_t>(len) > static_cast<size_t>(cap)) break;
-    copied += static_cast<size_t>(len);
-    ++n_runs;
-  }
-  if (copied) {
-    std::memcpy(out, g_mav.in.data(), copied);
-    g_mav.in.erase(g_mav.in.begin(), g_mav.in.begin() + static_cast<ptrdiff_t>(copied));
-    g_mav.in_lens.erase(g_mav.in_lens.begin(), g_mav.in_lens.begin() + static_cast<ptrdiff_t>(n_runs));
-  }
-  return static_cast<int>(copied);
+  return static_cast<int>(g_mav.in.take(out, static_cast<size_t>(cap)));
 }
 
 // webgs_phase_*: the page's phase lock (web_phase.h). The page calls

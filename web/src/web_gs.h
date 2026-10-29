@@ -56,6 +56,7 @@
 #include "mabur/nack_tracker.h"
 #include "mabur/node.h"
 #include "mabur/rc_proto.h"
+#include "mav_ring.h"
 #include "mav_tunnel.h"
 #include "msp_sink.h"
 #include "osd_screen.h"
@@ -252,10 +253,12 @@ class WebGs {
   // (forwarded to the tunnel's parser; unlinked outbound is dropped and
   // counted, never queued forever).
   void mav_push_outbound(const uint8_t* p, size_t n);
-  // Inbound: drains whole packets (drone -> local peer) into `out`, up to
-  // `cap` bytes -- a packet that would not fit is left queued for the next
-  // call, so a packet is never split across two calls. Returns the bytes
-  // copied.
+  // Inbound: pops one whole packet (drone -> local peer) into `out` if it
+  // fits in `cap` bytes -- never a split one, and never more than one per
+  // call (loop until this returns 0 to drain everything queued). A packet
+  // that doesn't fit is left queued for the next call with a bigger
+  // buffer; MAVLINK_MAX_PACKET_LEN (~280 B) always fits. Returns the bytes
+  // copied, 0 if nothing was.
   size_t mav_take_inbound(uint8_t* out, size_t cap);
   Mode mode() const { return mode_; }
   // Test seams.
@@ -290,12 +293,10 @@ class WebGs {
   std::unique_ptr<maburgs::VrxController> vrx_;   // Gs only
   std::unique_ptr<maburgs::RcfSlotter> slot_;     // Gs only
   // MAVLink tunnel (mav_tunnel.h): Gs only, sent through the same slotter as
-  // RCFs. Inbound packets land here (DeliverFn) for the page to drain --
-  // concatenated bytes plus each packet's length, in order, so a draining
-  // call can stop before splitting one.
+  // RCFs. Inbound packets land here (DeliverFn, mav_ring.h) for the page
+  // to drain one at a time via mav_take_inbound.
   std::unique_ptr<maburgs::MavTunnel> mav_;
-  std::vector<uint8_t> mav_in_;
-  std::vector<size_t> mav_in_lens_;
+  MavRing mav_in_;
   // Software NACK (fec-nack): Gs only, and only with [link.nack] enable --
   // null otherwise, so a spotter has no tracker at all. The same poll block
   // as maburgs main.cpp, sent directly (never the slotter) through send_().
