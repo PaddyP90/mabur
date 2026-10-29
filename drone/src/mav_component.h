@@ -20,8 +20,9 @@
 //
 // A set changes the file, not the running daemon's Config. Reads and acks
 // report the file: the ack carries the value read back from the published
-// file, and a set whose rendered line is already the one in the file is
-// acked without writing (no flash wear for a ground app that re-sends).
+// file, and a set whose rendered line is already the one in the file, or
+// whose value equals what the file loads as, is acked without writing (no
+// flash wear for a ground app that re-sends).
 //
 // Packets: inbound is MAVLink 2 only; a v1 packet, a bad CRC or a packet
 // cut off at the end of a payload is dropped and counted, and the parser

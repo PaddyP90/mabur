@@ -290,7 +290,14 @@ void MavComponent::handle_set(const char id16[16], const char value[128], uint8_
     refuse(PARAM_ACK_FAILED, field + ": key not found", true);
     return;
   }
-  if (patched == text) {
+  // Unchanged when the rendered line is already the file's, or when the
+  // decoded value equals what the file loads as (a REAL32 line spelled
+  // differently, "0.650"). Str rows are left to the text comparison: their
+  // rendering is canonical, and REC_SIZE reads back venc.size for a "0x0"
+  // line, which a set of that size must still be able to pin.
+  const bool same_value = want.type != cfgparam::Type::Str && want.b == cur.b &&
+                          want.i == cur.i && want.f == cur.f;
+  if (patched == text || same_value) {
     ack(&cur, row_type, PARAM_ACK_ACCEPTED);
     ++stats_.sets_ok;
     log("set " + shown + " = " + rendered + " (" + field + ", unchanged)");

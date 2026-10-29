@@ -368,6 +368,38 @@ TEST(set_same_value_is_accepted_and_file_unchanged) {
   CHECK(c.stats().sets_ok == 2);
 }
 
+TEST(set_real32_to_the_bundle_value_leaves_the_file_byte_identical) {
+  ScratchBundle b;
+  const std::string before = slurp(b.path());
+  REQUIRE(before.find("airtime_budget     = 0.65  #") != std::string::npos);
+  auto c = make(b.path());
+  const int writes = write_count_for_test();
+  auto r = do_set(c, set_real("ENC_AIRTIME", 0.65f));
+  CHECK(r.ack.param_result == PARAM_ACK_ACCEPTED);
+  float f;
+  std::memcpy(&f, r.ack.param_value, 4);
+  CHECK(f == 0.65f);
+  CHECK(slurp(b.path()) == before);
+  CHECK(write_count_for_test() == writes);
+  CHECK(!exists(b.path() + ".pre-param"));
+}
+
+TEST(set_real32_equal_to_a_differently_spelled_line_writes_nothing) {
+  ScratchBundle b;
+  std::string t = slurp(b.path());
+  const size_t at = t.find("airtime_budget     = 0.65  #");
+  REQUIRE(at != std::string::npos);
+  t.replace(at, std::strlen("airtime_budget     = 0.65"), "airtime_budget     = 0.650");
+  spit(b.path(), t);
+  auto c = make(b.path());
+  const int writes = write_count_for_test();
+  auto r = do_set(c, set_real("ENC_AIRTIME", 0.65f));
+  CHECK(r.ack.param_result == PARAM_ACK_ACCEPTED);
+  CHECK(slurp(b.path()) == t);
+  CHECK(write_count_for_test() == writes);
+  CHECK(c.stats().sets_ok == 1);
+}
+
 TEST(commented_out_key_is_failed_with_statustext_naming_it) {
   ScratchBundle b;
   std::string t = slurp(b.path());

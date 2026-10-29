@@ -1,4 +1,5 @@
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 
@@ -61,7 +62,13 @@ TEST(render_toml_forms) {
   CHECK(render_toml(Value{Type::Bool, true}, &o) && o == "true");
   CHECK(render_toml(Value{Type::Int32, false, -5}, &o) && o == "-5");
   CHECK(render_toml(Value{Type::Real32, false, 0, 2.0f}, &o) && o == "2.0");
-  CHECK(render_toml(Value{Type::Real32, false, 0, 0.65f}, &o) && o.find('.') != std::string::npos);
+  CHECK(render_toml(Value{Type::Real32, false, 0, 0.65f}, &o) && o == "0.65");
+  CHECK(render_toml(Value{Type::Real32, false, 0, 1.0f}, &o) && o == "1.0");
+  CHECK(render_toml(Value{Type::Real32, false, 0, 1e-7f}, &o) && o == "1e-07");
+  // A float that needs all nine digits still round-trips.
+  const float awkward = 0.1f + 0.2f;
+  CHECK(render_toml(Value{Type::Real32, false, 0, awkward}, &o) &&
+        std::strtof(o.c_str(), nullptr) == awkward);
   CHECK(render_toml(Value{Type::Str, false, 0, 0, "1280x720"}, &o) && o == "\"1280x720\"");
   CHECK(!render_toml(Value{Type::Str, false, 0, 0, "a\"b"}, &o));
   CHECK(!render_toml(Value{Type::Str, false, 0, 0, "a\nb"}, &o));

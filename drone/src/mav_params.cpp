@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace mabur::mavparam {
@@ -101,10 +102,16 @@ bool render_toml(const Value& v, std::string* out) {
       // ("nan", "inf") and the ".0" append below would mangle it further
       // ("inf.0") into something that doesn't even round-trip as a float.
       if (!std::isfinite(v.f)) return false;
-      // Shortest round-trip text; append ".0" when %g picked the integer
-      // form, so the TOML value is never read back as an Int32.
+      // Shortest text that reads back as the same float: %.9g always
+      // round-trips but spells 0.65f as 0.649999976, so a set of the value
+      // the bundle already holds would rewrite its line. Append ".0" when
+      // %g picked the integer form, so the TOML value is never read back
+      // as an Int32.
       char buf[64];
-      std::snprintf(buf, sizeof buf, "%.9g", static_cast<double>(v.f));
+      for (int prec = 6; prec <= 9; ++prec) {
+        std::snprintf(buf, sizeof buf, "%.*g", prec, static_cast<double>(v.f));
+        if (std::strtof(buf, nullptr) == v.f) break;
+      }
       std::string s(buf);
       if (s.find('.') == std::string::npos && s.find('e') == std::string::npos &&
           s.find('E') == std::string::npos) {

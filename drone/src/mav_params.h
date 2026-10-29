@@ -31,7 +31,8 @@ struct Value {
 bool read(const Config& cfg, size_t idx, Value* out);
 
 // Renders a Value as the TOML text for its row: "true"/"false", a decimal
-// int, a float that always contains a '.' or 'e', or a string quoted with
+// int, a float in the fewest significant digits (6..9) that read back as
+// the same float and always containing a '.' or 'e', or a string quoted with
 // "...". Returns false (and leaves *out unspecified) for a string
 // containing '"', '\', a control character (including DEL, 0x7f), or for
 // a non-finite float (NaN/Inf have no TOML spelling render_toml will
