@@ -62,7 +62,8 @@ constexpr uint16_t RC_MAGIC = 0x5243;  // "RC"
 // replaces the spike's wire; Telem gains nack_rx/retx_syms/retx_refused.
 // Bumped 15 -> 16: RCF gains snr_off (phase lock: the GS's sensor-rate
 // steering offset, level-triggered in every RCF).
-constexpr uint8_t RC_VERSION = 16;
+// Bumped 16 -> 17: T_MAV (MAVLink tunnel, both directions) and CAP_MAVLINK.
+constexpr uint8_t RC_VERSION = 17;
 
 // RCF probe_profile sentinel: the drone runs no probe stream.
 constexpr uint8_t kNoProbeProfile = 0xFF;
@@ -88,6 +89,12 @@ constexpr uint8_t T_CAL_RESULT = 6;
 // recover; the drone re-sends them from its retransmit ring at the head of
 // the TxQueue.
 constexpr uint8_t T_NACK = 7;
+// T_MAV (MAVLink tunnel): carries an opaque MAVLink packet. GS -> drone is
+// tagged, with the request counter doubling as the tag ctx's seq32 (same
+// accept-only-greater rule as T_NACK's counter); drone -> GS is untagged,
+// like T_TELEM. rc_proto treats the payload as opaque bytes -- MAVLink
+// parsing lives above this layer.
+constexpr uint8_t T_MAV = 8;
 
 constexpr uint8_t F_DISCOVERY = 0x04;
 
@@ -121,6 +128,11 @@ constexpr uint16_t CAP_TELEMETRY = 0x0002;
 // DiscAck.chip_caps bit: VTX understands T_CAL_CMD / T_CAL_RESULT and can run
 // a TX-power wall calibration. The GS refuses to start a session without it.
 constexpr uint16_t CAP_CALIBRATE = 0x0004;
+
+// DiscAck.chip_caps bit: VTX understands T_MAV and tunnels MAVLink both ways.
+// Display-grade only, as CAP_TELEMETRY: a GS lacking this bit just never
+// sends or expects a T_MAV frame.
+constexpr uint16_t CAP_MAVLINK = 0x0008;
 
 // VRX -> VTX feedback: the GS-authoritative operating point. Every field
 // here is one maburd acts on. It used to also carry ack_seq, an alink-style
@@ -361,18 +373,40 @@ std::vector<uint8_t> pack_nack(const Nack& n, const LinkKey& key = kDefaultLinkK
                                const TagCtx& ctx = TagCtx{});
 std::optional<Nack> parse_nack(const uint8_t* buf, size_t len);
 
+// T_MAV: an opaque MAVLink packet tunneled over the RC link. The payload is
+// never inspected here -- rc_proto just frames it. magic(2) ver type
+// counter(4) len(2) = kMavFixedLen (10); payload is len bytes, then
+// (tagged ? the tag) then the CRC.
+constexpr size_t kMavFixedLen = 2 + 1 + 1 + 4 + 2;  // magic ver type counter len = 10
+constexpr size_t kMavMaxPayload = 600;
+struct Mav {
+  uint32_t counter = 0;
+  std::vector<uint8_t> payload;
+};
+// tagged = true: GS->drone layout (tag before CRC); false: drone->GS, no
+// tag. The frame itself carries no direction bit -- the caller knows which
+// way it is sending/expecting and must pass the same `tagged` on both ends.
+// Caller keeps payload.size() <= kMavMaxPayload (asserted, not refused).
+std::vector<uint8_t> pack_mav(const Mav& m, bool tagged, const LinkKey& key = kDefaultLinkKey,
+                              const TagCtx& ctx = {});
+// Structural parse. `tagged` must match the sender's layout (the frame does
+// not say); the wrong value fails the CRC check.
+std::optional<Mav> parse_mav(const uint8_t* buf, size_t len, bool tagged);
+
 std::vector<uint8_t> pack_cal_result(const CalResult& r, const LinkKey& key = kDefaultLinkKey,
                                      const TagCtx& ctx = {});
 std::optional<CalResult> parse_cal_result(const uint8_t* buf, size_t len);
 
-// Recomputes the tag of any tagged frame (DISC/RCF/CAL_CMD/CAL_RESULT): the
-// 8 bytes at the frame's STRUCTURAL tag offset -- derived from its type
-// (DISC_LEN, RCF_HEAD_LEN, kCalResultLen, or kCalCmdFixedLen + n_windows*4)
-// -- must equal SipHash(key, bytes-before-tag || ctx). Bytes past tag+CRC
-// are ignored: on hardware the drone's body still carries the 4-byte 802.11
-// FCS. Constant-time compare. False for any other type, a CAL_CMD whose
-// n_windows is 0 or > kMaxCalWindows, or a buffer shorter than
-// structural + tag + CRC.
+// Recomputes the tag of any tagged frame (DISC/RCF/CAL_CMD/CAL_RESULT/
+// NACK/MAV): the 8 bytes at the frame's STRUCTURAL tag offset -- derived
+// from its type (DISC_LEN, RCF_HEAD_LEN, kCalResultLen,
+// kCalCmdFixedLen + n_windows*4, kNackFixedLen + n*kNackEntryLen, or
+// kMavFixedLen + len16) -- must equal SipHash(key, bytes-before-tag ||
+// ctx). Bytes past tag+CRC are ignored: on hardware the drone's body still
+// carries the 4-byte 802.11 FCS. Constant-time compare. False for any
+// other type, a CAL_CMD whose n_windows is 0 or > kMaxCalWindows, a NACK
+// whose n is 0 or > kMaxNackEntries, a MAV whose len16 > kMavMaxPayload, or
+// a buffer shorter than structural + tag + CRC.
 bool verify_control(const uint8_t* buf, size_t len, const LinkKey& key, const TagCtx& ctx);
 
 // Peeks the RC frame type without a full parse (no CRC check). Returns -1 if
