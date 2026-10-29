@@ -33,7 +33,7 @@ inline constexpr Row kTable[] = {
     {"VENC_SLICES", "venc", "slices", Type::Int32,
      "H.265 row slices on the link channel; 1 disables slice salvage"},
     {"ENC_BITRATE_MAX", "encoder", "bitrate_max_kbps", Type::Int32,
-     "Ceiling on the encoder's bitrate at the top of the ladder"},
+     "Bitrate ceiling, kbps"},
     {"ENC_AIRTIME", "encoder", "airtime_budget", Type::Real32,
      "Share of the link's real capacity the video may use"},
     {"REC_ENABLE", "record", "enable", Type::Bool,
@@ -45,12 +45,12 @@ inline constexpr Row kTable[] = {
     {"REC_SIZE", "record", "size", Type::Str,
      "Onboard recording resolution, same aspect ratio as the camera's"},
     {"LOWPWR_ENABLE", "low_power", "enable", Type::Bool,
-     "Lower bitrate and frame rate while disarmed to keep the VTX cool"},
+     "Lower bitrate and frame rate while disarmed to keep the VTX cool; needs msp.enable for arm state"},
     {"MSP_ENABLE", "msp", "enable", Type::Bool,
      "Flight-controller link for the OSD and arm state"},
 };
-constexpr size_t kCount = sizeof(kTable) / sizeof(kTable[0]);
-constexpr int kMaxIdLen = 16;
+inline constexpr size_t kCount = sizeof(kTable) / sizeof(kTable[0]);
+inline constexpr int kMaxIdLen = 16;
 
 // Index of the row with this id, or -1. `id16` is a wire-format field: only
 // an id of the full 16 chars is guaranteed to lack a NUL, so strncmp's own
