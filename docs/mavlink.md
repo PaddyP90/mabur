@@ -41,8 +41,8 @@ u16 crc16
 ```
 
 - A packet never spans two frames. Both ends pack as many whole packets as
-  fit in 600 bytes (three 161-byte `PARAM_EXT_VALUE`s, or a heartbeat
-  plus two).
+  fit in 600 bytes (three 161-byte `PARAM_EXT_VALUE`s, or a 21-byte
+  heartbeat plus three).
 - The RC layer treats the payload as opaque. Each end splits it with a
   MAVLink parser; a bad MAVLink CRC (which is also what refuses a message
   id the common dialect does not know), a MAVLink 1 packet, or a packet
@@ -58,15 +58,15 @@ u16 crc16
 - **Drone to GS** is untagged, like `T_TELEM`, and goes out on the Telem
   path (control radiotap, the shared Telem 802.11 sequence) at most one
   frame every `kMavUplinkMinMs` (50 ms), which caps the tunnel near
-  12 kB/s on the downlink.
+  12 kB/s on the drone's uplink.
 - **GS to drone** frames are offered to the RCF slotter like an RCF, so
   they land in the drone's inter-AU idle, and are never sent while a
   calibration sweep holds the GS radio-silent. A frame goes out only when
   a ground app has sent something.
 - `CAP_MAVLINK` (`0x0008`) in DISC_ACK `chip_caps` says the drone answers
-  `T_MAV`. It is display-only: `maburgs` logs
+  `T_MAV`. It is display-only: with `[mavlink] enable`, `maburgs` logs
   `maburgs: mavlink: drone lacks CAP_MAVLINK` once per session when the bit
-  is missing and gates nothing on it.
+  is missing, and it gates nothing on it.
 
 ## Ids
 

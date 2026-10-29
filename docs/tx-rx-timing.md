@@ -148,6 +148,9 @@ GS believes the drone is between bursts:
 - **No video.** With no AU in the last 100 ms (`video_recent_ms`:
   rendezvous, stalled video), everything passes through. DISC therefore
   needs no bypass.
+- **Order.** Frames offered while others are held queue behind them, so
+  every slotted sender keeps its order: a grace, no-video or pass-through
+  offer that finds the queue non-empty is held and released with it.
 
 `lead_ms`, `guard_ms`, `grace_ms` and `video_recent_ms` are compiled in
 (`RcfSlotCfg{hold, 100, 2, 3, 1}`). Only the hold is config.

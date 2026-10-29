@@ -1307,7 +1307,7 @@ static int run_radio(const maburgs::Config& cfg) {
       const mabur::rc::TagCtx mav_ctx = mav_linked ? vrx.session_ctx() : mabur::rc::TagCtx{};
       if (mav_ctx.vtx_nonce != 0 && mav_ctx.vtx_nonce != mav_vtx_seen) {
         mav_vtx_seen = mav_ctx.vtx_nonce;
-        if ((vrx.peer_caps() & mabur::rc::CAP_MAVLINK) == 0)
+        if (cfg.mavlink.enable && (vrx.peer_caps() & mabur::rc::CAP_MAVLINK) == 0)
           std::fprintf(stderr, "maburgs: mavlink: drone lacks CAP_MAVLINK\n");
       }
       mav_tunnel.set_session(mav_ctx);

@@ -25,9 +25,10 @@ namespace maburgs {
 // decides who may talk to the drone.
 //
 // Non-blocking and single-threaded: poll() and send_to_peer() run on the
-// core loop. A send with no peer, or one the kernel refuses (a full socket
-// buffer, an ICMP error from a vanished client), is dropped and counted --
-// never retried, never waited on. MAVLink's own request/ack retries are the
+// core loop. A send with no peer, or one sendto refuses (a full socket
+// buffer or any other failure), is dropped and counted -- never retried,
+// never waited on. A vanished client is not seen at all: an unconnected UDP
+// socket without IP_RECVERR does not surface ICMP errors through sendto. MAVLink's own request/ack retries are the
 // ground app's business.
 class MavEndpoint {
  public:
