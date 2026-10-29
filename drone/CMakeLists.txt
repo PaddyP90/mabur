@@ -9,6 +9,7 @@ add_library(mabur_drone_core STATIC
   src/telemetry.cpp
   src/vtx_recorder.cpp
   src/cal_apply.cpp
+  src/config_write.cpp
   src/cal_sweep.cpp
   vendor/venc_frame_ring.c
   # venc_cfg.c is dependency-free C99 (string.h only), so it compiles on

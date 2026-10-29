@@ -14,6 +14,7 @@ function(add_mtest name)
   target_compile_definitions(${name} PRIVATE
     MABUR_VECTOR_DIR="${CMAKE_CURRENT_SOURCE_DIR}/vectors"
     MABUR_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
+    MABUR_BUNDLE_DIR="${CMAKE_SOURCE_DIR}/bundle"
     MABUR_TEST_SCRATCH_DIR="${MABUR_TEST_SCRATCH_DIR}")
   add_test(NAME ${name} COMMAND ${name})
 endfunction()
@@ -126,8 +127,6 @@ add_mtest(test_cal_wire test_cal_wire.cpp)
 add_mtest(test_toml test_toml.cpp)
 if(MABUR_BUILD_DRONE)
   add_mtest(test_config test_config.cpp LIBS mabur_drone_core)
-  target_compile_definitions(test_config PRIVATE
-    MABUR_BUNDLE_DIR="${CMAKE_SOURCE_DIR}/bundle")
   add_mtest(test_frame_source test_frame_source.cpp LIBS mabur_drone_core)
   add_mtest(test_frame_pipeline test_frame_pipeline.cpp LIBS mabur_drone_core)
   add_mtest(test_radio_tx test_radio_tx.cpp LIBS mabur_drone_core)
@@ -147,6 +146,7 @@ if(MABUR_BUILD_DRONE)
   add_mtest(test_telemetry test_telemetry.cpp LIBS mabur_drone_core)
   add_mtest(test_power_plan test_power_plan.cpp LIBS mabur_drone_core)
   add_mtest(test_cal_apply test_cal_apply.cpp LIBS mabur_drone_core)
+  add_mtest(test_config_write test_config_write.cpp LIBS mabur_drone_core)
   add_mtest(test_cal_sweep test_cal_sweep.cpp LIBS mabur_drone_core)
   add_mtest(test_debug_http test_debug_http.cpp LIBS mabur_drone_core)
   add_mtest(test_probe_source test_probe_source.cpp LIBS mabur_drone_core)
