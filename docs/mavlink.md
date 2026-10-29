@@ -250,12 +250,33 @@ rewrites packets.
 default:
 
 ```
-GS=<gs-ip> PORT=14550 tools/bench/mavparam.py list
-GS=<gs-ip> PORT=14550 tools/bench/mavparam.py get VENC_FPS
-GS=<gs-ip> PORT=14550 tools/bench/mavparam.py set REC_ENABLE 0
+GS=<gs-ip> PORT=14550 nix-shell -p python3Packages.pymavlink --run "python3 tools/bench/mavparam.py list"
+GS=<gs-ip> PORT=14550 nix-shell -p python3Packages.pymavlink --run "python3 tools/bench/mavparam.py get VENC_FPS"
+GS=<gs-ip> PORT=14550 nix-shell -p python3Packages.pymavlink --run "python3 tools/bench/mavparam.py set REC_ENABLE 0"
 ```
 
-It prints each value, the ack result and any `STATUSTEXT` that follows.
+It sends one heartbeat so the endpoint learns the peer, waits up to 5 s
+for the drone's own `HEARTBEAT` (system 1, component 191), then runs the
+one subcommand:
+
+- `list` requests the whole table and prints one `id  type  value` row
+  per parameter, in `param_index` order, retrying missing indices
+  individually; a parameter still missing after the retries is a
+  non-zero exit.
+- `get ID` reads one parameter by id (1 s timeout, 3 retries) and prints
+  its `id  type  value` row.
+- `set ID VALUE` looks `ID` up in its own copy of the 13-row table (ids
+  and types mirrored from `common/include/mabur/config_params.h`) to
+  encode `VALUE` for the wire, sends the set (2 s timeout, 3 retries),
+  and prints the ack result (`ACCEPTED`/`FAILED`/`VALUE_UNSUPPORTED`/
+  `IN_PROGRESS`) and value, then any `STATUSTEXT` that follows within 1 s.
+
+Exit 0 on an ACCEPTED set or a successful list/get, 1 on a runtime
+failure (no heartbeat, a request that times out after retries, an
+incomplete list, or a non-ACCEPTED ack), 2 on a usage error (missing
+`GS`/`PORT`, a bad command line, an unknown parameter id, or a value
+that doesn't parse for its type).
+
 The endpoint binds loopback by default, so reaching it from the host means
 setting `[mavlink] bind` to the GS's LAN address in the GS's live config
 (the GS `/config` is vfat: sync after the edit, `docs/deploy.md`).
