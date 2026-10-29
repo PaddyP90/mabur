@@ -1,0 +1,119 @@
+#include "mav_tunnel.h"
+
+#include <utility>
+
+#include "mabur/mav.h"
+
+namespace maburgs {
+
+namespace {
+
+bool idle(uint8_t chan) {
+  return mavlink_get_channel_status(chan)->parse_state <= MAVLINK_PARSE_STATE_IDLE;
+}
+
+// Feeds bytes through `chan`'s parser while keeping each packet's own wire
+// bytes in `acc` (from its start byte on), so a packet is forwarded exactly
+// as it arrived. Calls on_packet(acc) for every MAVLink 2 packet whose CRC
+// checks and on_bad() for a bad CRC, a v1 packet or a header the parser
+// rejects mid-packet.
+template <class OnPacket, class OnBad>
+void split(uint8_t chan, std::vector<uint8_t>& acc, const uint8_t* p, size_t n,
+           OnPacket&& on_packet, OnBad&& on_bad) {
+  for (size_t i = 0; i < n; ++i) {
+    const bool was_idle = idle(chan);
+    if (was_idle) acc.clear();
+    acc.push_back(p[i]);
+    const uint8_t r = mavlink_frame_char(chan, p[i], nullptr, nullptr);
+    if (r == MAVLINK_FRAMING_OK) {
+      if (acc[0] == MAVLINK_STX) on_packet(acc);
+      else on_bad();
+    } else if (r != MAVLINK_FRAMING_INCOMPLETE) {
+      on_bad();
+    } else if (!was_idle && idle(chan)) {
+      on_bad();
+    }
+  }
+}
+
+}  // namespace
+
+MavTunnel::MavTunnel(mabur::LinkKey key, SendFn send, DeliverFn deliver)
+    : key_(key), send_(std::move(send)), deliver_(std::move(deliver)) {
+  mavlink_reset_channel_status(mabur::mav::kChanGsLocal);
+  mavlink_reset_channel_status(mabur::mav::kChanGsRx);
+}
+
+void MavTunnel::set_session(const mabur::rc::TagCtx& ctx) {
+  if (ctx.vtx_nonce != 0 && ctx.vtx_nonce != vtx_seen_) {
+    vtx_seen_ = ctx.vtx_nonce;
+    counter_ = 0;
+  }
+  ctx_ = ctx;
+}
+
+void MavTunnel::push_outbound(const uint8_t* bytes, size_t n) {
+  split(
+      mabur::mav::kChanGsLocal, out_acc_, bytes, n,
+      [&](const std::vector<uint8_t>& pkt) {
+        if (ctx_.vtx_nonce == 0) {
+          ++stats_.drop_unlinked;
+        } else if (pkt.size() > mabur::rc::kMavMaxPayload) {
+          ++stats_.drop_oversize;
+        } else {
+          queue_.push_back(pkt);
+        }
+      },
+      [&] { ++stats_.drop_bad_packet; });
+}
+
+int MavTunnel::flush() {
+  if (ctx_.vtx_nonce == 0) {
+    stats_.drop_unlinked += queue_.size();
+    queue_.clear();
+    return 0;
+  }
+  int frames = 0;
+  while (!queue_.empty()) {
+    mabur::rc::Mav m;
+    size_t packets = 0;
+    while (!queue_.empty() &&
+           m.payload.size() + queue_.front().size() <= mabur::rc::kMavMaxPayload) {
+      m.payload.insert(m.payload.end(), queue_.front().begin(), queue_.front().end());
+      queue_.pop_front();
+      ++packets;
+    }
+    m.counter = ++counter_;
+    mabur::rc::TagCtx tag = ctx_;
+    tag.seq32 = counter_;
+    send_(mabur::rc::pack_mav(m, true, key_, tag));
+    ++stats_.tx_frames;
+    stats_.tx_packets += packets;
+    ++frames;
+  }
+  return frames;
+}
+
+void MavTunnel::on_rc_frame(const uint8_t* body, size_t len) {
+  auto m = mabur::rc::parse_mav(body, len, false);
+  if (!m) {
+    ++stats_.drop_bad_packet;
+    return;
+  }
+  ++stats_.rx_frames;
+  const uint8_t chan = mabur::mav::kChanGsRx;
+  split(
+      chan, in_acc_, m->payload.data(), m->payload.size(),
+      [&](const std::vector<uint8_t>& pkt) {
+        ++stats_.rx_packets;
+        deliver_(pkt.data(), pkt.size());
+      },
+      [&] { ++stats_.drop_bad_packet; });
+  if (!idle(chan)) {
+    ++stats_.drop_bad_packet;
+    mavlink_reset_channel_status(chan);
+  }
+  in_acc_.clear();
+}
+
+}  // namespace maburgs
