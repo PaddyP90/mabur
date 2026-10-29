@@ -59,9 +59,10 @@ class LatTracker {
   // One completed frame, as frame.log records it: the AU meta copied at
   // submit (join key pts, plus what au.log also carries so a row reads on
   // its own), every absolute stamp of the chain (mono µs) and the segment
-  // tuple. t_submit precedes t_complete for a streamed frame (slices fed
-  // as they arrive), so dec = t_decoded - t_complete can be split into the
-  // ring-to-decoder hand-off and the decoder's own time.
+  // tuple. t_submit is the record's close on the player side (after the
+  // ring's t_complete on both paths); a streamed frame's slices were fed
+  // before it, so dec = t_decoded - t_complete is the only decode measure
+  // that reads the same for whole and streamed frames.
   struct FrameRow {
     uint32_t pts_us = 0;
     uint64_t frame_id64 = 0;
@@ -127,7 +128,7 @@ class LatTracker {
     uint32_t pts_us = 0;
     uint64_t pts64 = 0;         // anchor-unwrapped pts, for map_us() at flip
     uint64_t t_complete_us = 0;
-    uint64_t t_submit_us = 0;   // diagnostic only -- dec folds t_submit..t_complete in
+    uint64_t t_submit_us = 0;   // diagnostic only -- dec is measured from t_complete
     uint64_t t_decoded_us = 0;
     uint64_t t_release_us = 0;
     uint64_t t_commit_us = 0;

@@ -41,14 +41,22 @@ class PtsAnchor {
         // NEXT sample re-anchors it.
         pts64_ = pts32;
         base_valid_ = false;
+        leak_rem_ = 0;
         warm_ = 0;
         return Obs{pts64_, true};
       }
       pts64_ += static_cast<uint64_t>(d);
       // Upward creep so the floor follows drift when arrivals never dip
       // below it; a faster arrival snaps it back down below. Applied
-      // BEFORE the min-update, same order as the original inline code.
-      if (base_valid_ && d > 0) base_us_ += d * kLeakPpm / 1'000'000;
+      // BEFORE the min-update. The sub-µs remainder carries over between
+      // frames: at any cadence above 60 fps a single frame's share
+      // (d * 60 / 1e6) is below 1 µs and would truncate to nothing,
+      // leaving the floor pinned against drift.
+      if (base_valid_ && d > 0) {
+        const int64_t num = d * kLeakPpm + leak_rem_;
+        base_us_ += num / 1'000'000;
+        leak_rem_ = num % 1'000'000;
+      }
     }
 
     const int64_t off =
@@ -78,6 +86,7 @@ class PtsAnchor {
     pts64_ = 0;
     base_valid_ = false;
     base_us_ = 0;
+    leak_rem_ = 0;
     warm_ = 0;
   }
 
@@ -100,6 +109,7 @@ class PtsAnchor {
   uint64_t pts64_ = 0;
   bool base_valid_ = false;
   int64_t base_us_ = 0;  // min(mono − pts64), leaks upward
+  int64_t leak_rem_ = 0;  // creep not yet applied, in µs·1e6 (sub-µs carry)
   uint32_t warm_ = 0;
 };
 

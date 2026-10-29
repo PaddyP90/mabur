@@ -546,7 +546,9 @@ columns:
     t_flip pts fid sid len flags slices t_submit t_complete t_decoded t_release enc dq air fec dec reg dsp e2e exact t_commit pbits
 
 `t_flip` is the frame's scanout-start stamp (mono µs); `t_submit` is when
-the player handed the AU (or its first slice) to the decoder, `t_complete`
+the player closed the ring record and submitted it — for a whole AU the
+hand-off to the decoder, for a streamed frame the close after its slices
+were already fed — `t_complete`
 the ring's finish stamp (as `au.log`), `t_decoded` when the decoded picture
 came back, `t_release` when the release thread released it (its stamp,
 taken just before the frame goes to the display). `enc dq air fec dec
@@ -556,8 +558,9 @@ vblank event. `pts` joins the row to `au.log` (same value), which carries
 `nal0`, `t_first` and the GS stamps; `fid`, `sid`, `len`, `flags` and
 `slices` are copied from the AU record so a row reads on its own, `flags`
 in hex as `au.log` prints it (`framelog 1` printed it in decimal). A
-streamed frame has `t_submit < t_complete`, so `t_decoded − t_submit` is
-not decode time for it; split `dec` with `t_complete` instead.
+streamed frame's slices went to the decoder before `t_submit`, so
+`t_decoded − t_submit` is not decode time for it; split `dec` with
+`t_complete` instead.
 
 `t_commit` is when the frame's atomic commit ioctl returned (mono µs; 0
 when the presenter parked the frame in its mailbox because a flip was
