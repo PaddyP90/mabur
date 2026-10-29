@@ -92,7 +92,8 @@ constexpr uint8_t T_NACK = 7;
 // T_MAV (MAVLink tunnel): carries an opaque MAVLink packet. GS -> drone is
 // tagged, with the request counter doubling as the tag ctx's seq32 (same
 // accept-only-greater rule as T_NACK's counter); drone -> GS is untagged,
-// like T_TELEM. rc_proto treats the payload as opaque bytes -- MAVLink
+// like T_TELEM, and its per-process counter lets a two-card GS drop the
+// second card's copy of a frame. rc_proto treats the payload as opaque bytes -- MAVLink
 // parsing lives above this layer.
 constexpr uint8_t T_MAV = 8;
 

@@ -48,6 +48,7 @@ void MavTunnel::set_session(const mabur::rc::TagCtx& ctx) {
   if (ctx.vtx_nonce != 0 && ctx.vtx_nonce != vtx_seen_) {
     vtx_seen_ = ctx.vtx_nonce;
     counter_ = 0;
+    have_rx_ = false;   // a restarted drone starts its own counter over
   }
   ctx_ = ctx;
 }
@@ -95,11 +96,28 @@ int MavTunnel::flush() {
 }
 
 void MavTunnel::on_rc_frame(const uint8_t* body, size_t len) {
+  // The GS's other card hears the GS's own tagged T_MAV. Checked first: an
+  // untagged frame is at least 6 bytes short of the tagged structural
+  // length even with a trailing 4-byte FCS, so it never parses as tagged,
+  // while a tagged frame always passes its own CRC -- and could, once in
+  // 2^16, also pass the untagged CRC on its tag bytes and be delivered.
+  if (mabur::rc::parse_mav(body, len, /*tagged=*/true)) {
+    ++stats_.rx_uplink_heard;
+    return;
+  }
   auto m = mabur::rc::parse_mav(body, len, false);
   if (!m) {
     ++stats_.drop_bad_packet;
     return;
   }
+  // A two-card GS hands the rc sink each card's copy of a drone frame; the
+  // drone's per-process counter tells the second copy from a new frame.
+  if (have_rx_ && m->counter == rx_last_) {
+    ++stats_.rx_dup;
+    return;
+  }
+  have_rx_ = true;
+  rx_last_ = m->counter;
   ++stats_.rx_frames;
   const uint8_t chan = mabur::mav::kChanGsRx;
   split(

@@ -18,7 +18,11 @@
 // heartbeats before link-up are noise, not something to replay later.
 //
 // Inbound (drone -> local peer): on_rc_frame takes an untagged T_MAV body,
-// splits its payload and delivers each whole packet's wire bytes. The RC
+// splits its payload and delivers each whole packet's wire bytes. A frame
+// carrying the same drone counter as the last one taken is the other
+// card's copy and is dropped (rx_dup); the counter memory clears when the
+// session's vtx_nonce changes. A tagged T_MAV is the GS's own uplink heard
+// by its other card (rx_uplink_heard), never a reject. The RC
 // CRC already vouches for the bytes; the MAVLink CRC is the second check
 // and is also what rejects a message id whose CRC_EXTRA the common dialect
 // does not know. A partial packet at the end of a frame is dropped and the
@@ -47,7 +51,9 @@ struct MavTunnelStats {
   uint64_t tx_frames = 0, tx_packets = 0, rx_frames = 0, rx_packets = 0,
            drop_unlinked = 0,     // outbound packets with no session to tag them
            drop_bad_packet = 0,   // bad MAVLink CRC, v1, a partial or a T_MAV body that fails parse
-           drop_oversize = 0;     // an outbound packet larger than kMavMaxPayload
+           drop_oversize = 0,     // an outbound packet larger than kMavMaxPayload
+           rx_dup = 0,            // a drone frame repeating the last counter (the other card's copy)
+           rx_uplink_heard = 0;   // the GS's own tagged T_MAV, heard by its other card
 };
 
 class MavTunnel {
@@ -59,7 +65,8 @@ class MavTunnel {
 
   // The session the next frames are tagged under; ctx.seq32 is ignored
   // (the tunnel's counter fills it). vtx_nonce 0 = not linked: outbound is
-  // dropped. A change of vtx_nonce restarts the counter: the next frame is 1.
+  // dropped. A change of vtx_nonce restarts the counter: the next frame is 1,
+  // and forgets the last inbound counter.
   void set_session(const mabur::rc::TagCtx& ctx);
   // Bytes from a local MAVLink peer, cut at any boundary. Whole packets are
   // queued (or dropped and counted while unlinked).
@@ -68,7 +75,7 @@ class MavTunnel {
   // calls send for each. Returns frames sent.
   int flush();
   // A T_MAV frame body from the drone (the rc-sink hook). Splits it and
-  // delivers each packet.
+  // delivers each packet, unless it is a duplicate or the GS's own uplink.
   void on_rc_frame(const uint8_t* body, size_t len);
 
   const MavTunnelStats& stats() const { return stats_; }
@@ -81,6 +88,8 @@ class MavTunnel {
   mabur::rc::TagCtx ctx_{};
   uint32_t vtx_seen_ = 0;
   uint32_t counter_ = 0;
+  bool have_rx_ = false;   // rx_last_ holds a counter from this session
+  uint32_t rx_last_ = 0;   // the drone counter of the last inbound frame taken
   std::deque<std::vector<uint8_t>> queue_;
   std::vector<uint8_t> out_acc_;   // wire bytes of the outbound packet being parsed
   std::vector<uint8_t> in_acc_;    // same, inbound

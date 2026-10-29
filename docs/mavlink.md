@@ -33,7 +33,8 @@ drone direction carries the tag:
 ```
 u16 magic "RC" | u8 version | u8 type = T_MAV |
 u32 counter     GS -> drone: per-session, starts at 1, strictly increasing
-                drone -> GS: per-process, observability only
+                drone -> GS: per-process; the GS drops a frame repeating
+                the last counter (the second card's copy)
 u16 len         payload byte count, at most kMavMaxPayload (600)
 u8[len]         one or more whole MAVLink 2 packets, back to back
 [u8[8] tag]     GS -> drone only: SipHash over the bytes before it || TagCtx
@@ -58,7 +59,14 @@ u16 crc16
 - **Drone to GS** is untagged, like `T_TELEM`, and goes out on the Telem
   path (control radiotap, the shared Telem 802.11 sequence) at most one
   frame every `kMavUplinkMinMs` (50 ms), which caps the tunnel near
-  12 kB/s on the drone's uplink.
+  12 kB/s on the drone's uplink. A two-card GS receives each frame once
+  per card: the tunnel drops a frame whose counter equals the last one it
+  took, and forgets that counter when the session's `vtx_nonce` changes
+  (a restarted drone counts from 0 again).
+- The GS's other card also hears the GS's own tagged `T_MAV`. The tunnel
+  tries the tagged layout first and counts a match apart, never as a
+  reject and never delivered: an untagged frame is too short to parse as
+  tagged, even with the trailing 4-byte FCS.
 - **GS to drone** frames are offered to the RCF slotter like an RCF, so
   they land in the drone's inter-AU idle, and are never sent while a
   calibration sweep holds the GS radio-silent. A frame goes out only when

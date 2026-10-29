@@ -1814,7 +1814,7 @@ int run_real_mode(const Config& cfg, uint8_t start_ch, const std::string& cfg_pa
     std::fprintf(stderr, "maburd mav: component sys %u comp %u, config %s\n",
                  static_cast<unsigned>(MavComponent::sys_id()),
                  static_cast<unsigned>(MavComponent::comp_id()), cfg_path.c_str());
-    uint32_t up_counter = 0;   // observability only: the GS doesn't gate on it
+    uint32_t up_counter = 0;   // the GS drops a repeat of the last one: the second card's copy
     uint64_t last_hb = 0, last_up = 0, bad_parse = 0, rejected = 0;
     std::vector<uint8_t> body;
     while (!g_devourer_should_stop) {

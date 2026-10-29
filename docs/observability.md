@@ -166,10 +166,14 @@ line in the LADDER panel. Design: `docs/fec-nack.md`.
 `link.mav{tx, rx, reject, peer}`: the GS's `MavTunnel` and its UDP endpoint,
 counters cumulative since the daemon started; present only while
 `[mavlink] enable`. `tx` counts T_MAV frames sent to the drone, `rx` T_MAV
-frames received from it, `reject` the MAVLink packets the tunnel refused in
-either direction (outbound while unlinked; a bad CRC, MAVLink 1 or a
-partial; an outbound packet larger than a frame's payload; a drone T_MAV
-frame that fails to parse), and `peer` is true
+frames received from it (each once: the second card's copy of a frame is
+not counted), `reject` the MAVLink packets the tunnel refused in either
+direction (outbound while unlinked; a bad CRC, MAVLink 1 or a partial; an
+outbound packet larger than a frame's payload; a drone T_MAV frame that
+fails to parse) -- the sum of `MavTunnelStats` `drop_unlinked +
+drop_bad_packet + drop_oversize`. The second card's copies (`rx_dup`) and
+the GS's own tagged T_MAV heard by its other card (`rx_uplink_heard`) are
+neither `rx` nor `reject` and are not exported. `peer` is true
 once a UDP client has sent the endpoint a datagram. maburtop draws a
 `mav <tx>/<rx>` cell (`mav off` without the key) on the top bar beside
 `key`. Design: `docs/mavlink.md`.

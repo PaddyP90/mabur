@@ -249,11 +249,83 @@ TEST(inbound_tagged_or_corrupt_frame_delivers_nothing) {
   Mav m;
   m.counter = 1;
   m.payload = hb;
+  // A tagged T_MAV is the GS's own uplink heard by its other card: counted
+  // apart, never a reject.
   auto tagged = pack_mav(m, true, test_key(), TagCtx{1, 2, 1});
-  r.t.on_rc_frame(tagged.data(), tagged.size());   // wrong layout: RC CRC fails
+  r.t.on_rc_frame(tagged.data(), tagged.size());
   CHECK(r.delivered.empty());
   CHECK(r.t.stats().rx_frames == 0);
+  CHECK(r.t.stats().rx_uplink_heard == 1);
+  CHECK(r.t.stats().drop_bad_packet == 0);
+  // A tagged frame still carrying the 4-byte FCS is heard the same way.
+  Bytes with_fcs = cat({tagged, Bytes{1, 2, 3, 4}});
+  r.t.on_rc_frame(with_fcs.data(), with_fcs.size());
+  CHECK(r.t.stats().rx_uplink_heard == 2);
+  // A corrupt frame is a reject.
+  auto bad = pack_mav(m, false);
+  bad.back() ^= 0xFF;
+  r.t.on_rc_frame(bad.data(), bad.size());
+  CHECK(r.delivered.empty());
+  CHECK(r.t.stats().rx_uplink_heard == 2);
   CHECK(r.t.stats().drop_bad_packet == 1);
+}
+
+TEST(untagged_frame_with_fcs_is_not_taken_for_the_gs_own_uplink) {
+  Rig r;
+  Mav m;
+  m.counter = 3;
+  m.payload = hb_bytes(1, 191);
+  Bytes f = cat({pack_mav(m, false), Bytes{0xAA, 0xBB, 0xCC, 0xDD}});
+  r.t.on_rc_frame(f.data(), f.size());
+  REQUIRE(r.delivered.size() == 1);
+  CHECK(r.t.stats().rx_uplink_heard == 0);
+}
+
+TEST(second_card_copy_of_a_drone_frame_is_dropped) {
+  Rig r;
+  r.t.set_session(TagCtx{11, 22, 0});
+  auto hb = hb_bytes(1, 191);
+  auto frame = [&](uint32_t counter) {
+    Mav m;
+    m.counter = counter;
+    m.payload = hb;
+    return pack_mav(m, false);
+  };
+  auto f7 = frame(7);
+  r.t.on_rc_frame(f7.data(), f7.size());
+  r.t.on_rc_frame(f7.data(), f7.size());   // the other card's copy
+  CHECK(r.delivered.size() == 1);
+  CHECK(r.t.stats().rx_dup == 1);
+  CHECK(r.t.stats().rx_frames == 1);
+  CHECK(r.t.stats().drop_bad_packet == 0);
+  // N and N+1 both deliver.
+  auto f8 = frame(8);
+  r.t.on_rc_frame(f8.data(), f8.size());
+  CHECK(r.delivered.size() == 2);
+  CHECK(r.t.stats().rx_dup == 1);
+  // A restarted drone (new vtx nonce) counts from 0 again.
+  r.t.set_session(TagCtx{11, 33, 0});
+  auto f0 = frame(0);
+  r.t.on_rc_frame(f0.data(), f0.size());
+  CHECK(r.delivered.size() == 3);
+  r.t.on_rc_frame(f0.data(), f0.size());
+  CHECK(r.delivered.size() == 3);
+  CHECK(r.t.stats().rx_dup == 2);
+  CHECK(r.t.stats().rx_frames == 3);
+}
+
+TEST(first_drone_frame_after_a_new_vtx_nonce_delivers_even_with_the_old_counter) {
+  Rig r;
+  r.t.set_session(TagCtx{11, 22, 0});
+  Mav m;
+  m.counter = 0;
+  m.payload = hb_bytes(1, 191);
+  auto f = pack_mav(m, false);
+  r.t.on_rc_frame(f.data(), f.size());
+  r.t.set_session(TagCtx{11, 33, 0});
+  r.t.on_rc_frame(f.data(), f.size());
+  CHECK(r.delivered.size() == 2);
+  CHECK(r.t.stats().rx_dup == 0);
 }
 
 MTEST_MAIN
