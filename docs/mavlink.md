@@ -59,7 +59,8 @@ u16 crc16
 - **Drone to GS** is untagged, like `T_TELEM`, and goes out on the Telem
   path (control radiotap, the shared Telem 802.11 sequence) at most one
   frame every `kMavUplinkMinMs` (50 ms), which caps the tunnel near
-  12 kB/s on the drone's uplink. A two-card GS receives each frame once
+  12 kB/s on the drone's uplink. Nothing goes up while a calibration
+  phase sweeps (the periodic Telem's rule); replies wait queued. A two-card GS receives each frame once
   per card: the tunnel drops a frame whose counter equals the last one it
   took, and forgets that counter when the session's `vtx_nonce` changes
   (a restarted drone counts from 0 again).

@@ -96,7 +96,7 @@ its CRC; the drone-to-GS frames stay untagged:
   (`RcAgent::check_nack` → `verify_session_tagged` +
   `accept_nack_counter`, on the RX thread); a tag or counter failure sets
   `auth_reject`, a parse failure does not.
-- **MAV** (both directions, carries an opaque MAVLink packet): GS to drone
+- **MAV** (both directions, carries one or more opaque MAVLink packets): GS to drone
   is tagged, same session-bound `TagCtx` as NACK, with the request's own
   `counter` as `seq32` under the same accept-only-greater rule, on its own
   counter state (`RcAgent::check_mav` → `verify_session_tagged` +

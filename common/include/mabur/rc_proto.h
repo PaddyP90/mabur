@@ -100,7 +100,8 @@ constexpr uint8_t T_MAV = 8;
 constexpr uint8_t F_DISCOVERY = 0x04;
 
 // SipHash-24 auth tag (link pairing): the 8 bytes
-// immediately before the CRC on every DISC/RCF/CAL_CMD/CAL_RESULT frame.
+// immediately before the CRC on every DISC/RCF/CAL_CMD/CAL_RESULT/NACK frame
+// and every GS -> drone MAV frame.
 constexpr size_t kTagLen = 8;
 
 constexpr uint8_t kAckKeyMismatch = 0x01;   // DiscAck::flags bit0

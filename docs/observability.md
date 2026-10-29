@@ -129,7 +129,8 @@ everything past scanout start (HDMI + display processing) — see
 Counts how the RCF slotter released each control-frame send: `au` (at an AU
 completion with idle ahead, incl. the in-grace immediate sends), `probe` (at
 the probe body's arrival), `timeout` (hold reached `link.rcf_slot_hold_ms`),
-`passthru` (slotter off, or no AU in the last 100 ms). Cumulative.
+`passthru` (slotter off, or no AU in the last 100 ms). Cumulative; the
+counts include `T_MAV` sends, which the slotter releases like an RCF.
 `tail_ub_ms` is the slotter's learned completion→probe deadline (a lost
 probe's fallback release; ceil(decaying max) + 1). Healthy video = almost
 all `au`+`probe`; at a high duty cycle `timeout` climbs and phase-locks to
@@ -1128,7 +1129,8 @@ the phase lock's first offset, clamps and refusals) and the 5 s
 The MAVLink parameter component (T_MAV, `drone/src/mav_component.h`) logs
 to the same stderr. At boot: `maburd mav: component sys 1 comp 191,
 config <path>`. Per request, `[mav] ` lines: `list: <n> values`,
-`read <id>: no such parameter`, `set <id> = <value> (<toml key>)`, with
+`read <id>: no such parameter` (`read #<index>: no such parameter` for a
+read by index), `set <id>: no such parameter`, `set <id> = <value> (<toml key>)`, with
 `, unchanged)` when the file already held that line and nothing was
 written, `set <id> refused: <why>` (the loader's message when the result
 would not load), and `... config does not load: <why>` when the file on

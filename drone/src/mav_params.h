@@ -26,8 +26,8 @@ struct Value {
 
 // Reads row `idx` of cfgparam::kTable out of a loaded Config into *out.
 // False, *out untouched, when idx >= cfgparam::kCount — callers that drive
-// idx from a wire param_index (a later MAVLink-component task) must not be
-// able to read past the accessor table.
+// idx from a wire param_index must not be able to read past the accessor
+// table.
 bool read(const Config& cfg, size_t idx, Value* out);
 
 // Renders a Value as the TOML text for its row: "true"/"false", a decimal

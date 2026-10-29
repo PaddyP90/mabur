@@ -16,7 +16,8 @@
 // The vendored headers are MIT-licensed generated output (see
 // third_party/mavlink/LICENSE).
 
-#define MAVLINK_USE_MESSAGE_INFO 0
+#include <cstdint>
+
 #define MAVLINK_COMM_NUM_BUFFERS 4
 
 #if defined(__GNUC__) || defined(__clang__)
