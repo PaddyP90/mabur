@@ -1,19 +1,23 @@
 // MavComponent: the drone's MAVLink extended-parameter component over the
 // thirteen cfgparam::kTable keys, against a real copy of the bundle config
 // and the real loader.
+#include <array>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
+#include "cal_apply.h"
 #include "config.h"
 #include "config_write.h"
 #include "mabur/config_params.h"
 #include "mabur/mav.h"
 #include "mabur/rc_proto.h"
 #include "mav_component.h"
+#include "mav_params.h"
 #include "mtest.h"
 #include "scratch.h"
 
@@ -398,6 +402,150 @@ TEST(set_real32_equal_to_a_differently_spelled_line_writes_nothing) {
   CHECK(slurp(b.path()) == t);
   CHECK(write_count_for_test() == writes);
   CHECK(c.stats().sets_ok == 1);
+}
+
+namespace {
+
+std::vector<std::string> lines_of(const std::string& t) {
+  std::vector<std::string> out;
+  std::istringstream in(t);
+  for (std::string l; std::getline(in, l);) out.push_back(l);
+  return out;
+}
+
+// A PARAM_EXT_SET carrying `v` with its row's wire type.
+mavlink_message_t set_value(const char* id, const mavparam::Value& v) {
+  char w[128];
+  mavparam::encode_wire(v, w);
+  return set_raw(id, w, cfgparam::mav_type(v.type));
+}
+
+bool same(const mavparam::Value& a, const mavparam::Value& b) {
+  return a.type == b.type && a.b == b.b && a.i == b.i && a.f == b.f && a.s == b.s;
+}
+
+mavparam::Value file_value(const std::string& path, size_t idx) {
+  mavparam::Value v{cfgparam::kTable[idx].type};
+  REQUIRE(mavparam::read(load_config(path), idx, &v));
+  return v;
+}
+
+}  // namespace
+
+// Every row: a set of the current value writes nothing; a set of another
+// legal value (legal against the bundle with every other key unchanged)
+// changes exactly one line and reads back; a set of the original value
+// then restores the file byte for byte.
+TEST(every_row_sets_reads_back_and_restores) {
+  using mavparam::Value;
+  using cfgparam::Type;
+  struct Case {
+    const char* id;
+    Value other;
+  };
+  const Case cases[] = {
+      {"RADIO_WALL_MARGN", Value{Type::Real32, false, 0, 2.0f}},
+      {"RADIO_LDPC", Value{Type::Bool, false}},
+      {"VENC_FPS", Value{Type::Int32, false, 90}},
+      {"VENC_SIZE", Value{Type::Str, false, 0, 0, "1280x720"}},
+      {"VENC_SLICES", Value{Type::Int32, false, 2}},
+      {"ENC_BITRATE_MAX", Value{Type::Int32, false, 20000}},
+      {"ENC_AIRTIME", Value{Type::Real32, false, 0, 0.5f}},
+      {"REC_ENABLE", Value{Type::Bool, false}},
+      {"REC_BITRATE", Value{Type::Int32, false, 30000}},
+      {"REC_FPS", Value{Type::Int32, false, 30}},
+      {"REC_SIZE", Value{Type::Str, false, 0, 0, "1280x720"}},
+      {"LOWPWR_ENABLE", Value{Type::Bool, true}},
+      {"MSP_ENABLE", Value{Type::Bool, false}},
+  };
+  static_assert(sizeof(cases) / sizeof(cases[0]) == cfgparam::kCount, "one case per row");
+  ScratchBundle b;
+  const std::string bundle = slurp(b.path());
+  const auto bundle_lines = lines_of(bundle);
+  auto c = make(b.path());
+  for (size_t idx = 0; idx < cfgparam::kCount; ++idx) {
+    const Case& k = cases[idx];
+    REQUIRE(std::string(cfgparam::kTable[idx].id) == k.id);
+    const Value cur = file_value(b.path(), idx);
+    REQUIRE(!same(cur, k.other));
+
+    // (a) the current value: ACCEPTED, nothing written.
+    const int writes = write_count_for_test();
+    auto r = do_set(c, set_value(k.id, cur));
+    CHECK(r.ack.param_result == PARAM_ACK_ACCEPTED);
+    CHECK(slurp(b.path()) == bundle);
+    CHECK(write_count_for_test() == writes);
+
+    // (b) another legal value: one line changed, read back equal.
+    r = do_set(c, set_value(k.id, k.other));
+    CHECK(r.ack.param_result == PARAM_ACK_ACCEPTED);
+    if (r.ack.param_result != PARAM_ACK_ACCEPTED) {
+      for (const auto& m : r.rest)
+        std::fprintf(stderr, "%s: %s\n", k.id, statustext(m, nullptr).c_str());
+      continue;
+    }
+    const auto now_lines = lines_of(slurp(b.path()));
+    REQUIRE(now_lines.size() == bundle_lines.size());
+    int changed = 0;
+    for (size_t i = 0; i < now_lines.size(); ++i) changed += now_lines[i] != bundle_lines[i];
+    CHECK(changed == 1);
+    CHECK(same(file_value(b.path(), idx), k.other));
+    char want[128];
+    mavparam::encode_wire(k.other, want);
+    CHECK(std::memcmp(r.ack.param_value, want, sizeof want) == 0);
+
+    // Restore.
+    r = do_set(c, set_value(k.id, cur));
+    CHECK(r.ack.param_result == PARAM_ACK_ACCEPTED);
+    CHECK(slurp(b.path()) == bundle);
+  }
+}
+
+// A calibration apply and parameter sets on two threads, same file: both
+// hold the config-write lock across read -> patch -> publish, so neither
+// loses the other's change and the file always loads.
+TEST(calibration_and_parameter_sets_on_two_threads_lose_nothing) {
+  ScratchBundle b;
+  auto c = make(b.path());
+  const std::array<int, 8> walls_a = {60, 60, 60, 45, 22, 6, 9, 5};
+  const std::array<int, 8> walls_last = {58, 57, 56, 44, 21, 5, 8, 4};
+  int cal_bad = 0, set_bad = 0;
+  std::thread cal([&] {
+    for (int i = 0; i < 20; ++i) {
+      CalWrite w;
+      w.walls = i == 19 ? walls_last : walls_a;
+      w.legacy_wall = i == 19 ? 58 : 60;
+      std::string err;
+      if (apply_calibration(b.path(), w, 1.0, &err) != ApplyResult::Ok) ++cal_bad;
+    }
+  });
+  std::thread set([&] {
+    for (int i = 0; i < 20; ++i) {
+      const int32_t kbps = i == 19 ? 30000 : (i % 2 ? 35000 : 25000);
+      feed(c, set_int("REC_BITRATE", kbps));
+      std::vector<uint8_t> out;
+      c.take_outbound(&out);
+      auto msgs = parse_all(out);
+      mavlink_param_ext_ack_t ack{};
+      if (msgs.size() != 1 || msgs[0].msgid != MAVLINK_MSG_ID_PARAM_EXT_ACK) {
+        ++set_bad;
+        continue;
+      }
+      mavlink_msg_param_ext_ack_decode(&msgs[0], &ack);
+      if (ack.param_result != PARAM_ACK_ACCEPTED) ++set_bad;
+    }
+  });
+  cal.join();
+  set.join();
+  CHECK(cal_bad == 0);
+  CHECK(set_bad == 0);
+  const Config cfg = load_config(b.path());
+  CHECK(cfg.record.bitrate_kbps == 30000);
+  CHECK(cfg.radio.rate_walls_rel == walls_last);
+  CHECK(cfg.radio.legacy_wall_rel == 58);
+  CHECK(cfg.radio.power_mode == "offset");
+  std::remove((b.path() + ".pre-cal").c_str());
+  std::remove((b.path() + ".pre-cal.tmp").c_str());
 }
 
 TEST(commented_out_key_is_failed_with_statustext_naming_it) {
