@@ -293,8 +293,9 @@ incomplete list, or a non-ACCEPTED ack), 2 on a usage error (missing
 that doesn't parse for its type).
 
 The endpoint binds loopback by default, so reaching it from the host means
-setting `[mavlink] bind` to the GS's LAN address in the GS's live config
-(the GS `/config` is vfat: sync after the edit, `docs/deploy.md`).
+setting `[mavlink] bind` to the GS's LAN address in the GS's live config:
+back up `/etc/maburgs.toml`, edit it, restart `S96maburgs`
+(`docs/deploy.md`).
 
 ## Later tenants
 

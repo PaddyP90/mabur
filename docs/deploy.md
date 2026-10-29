@@ -356,11 +356,9 @@ prints it, only the fingerprint).
   backs up only the link.
 - **Bench: running `tools/bench/mavparam.py` from the host** needs
   `maburgs`'s `[mavlink] bind` set to the GS's LAN address, not its
-  loopback default (`docs/mavlink.md`). Edit the live config on the
-  `/config` vfat partition the same careful way as above: back up the
-  target, edit it, `sync` before restarting `S96maburgs`, and re-read the
-  file before trusting the edit landed — an unsynced write survives until
-  the next power-cycle, which is exactly when vfat silently drops it.
+  loopback default (`docs/mavlink.md`). `maburgs`'s config is
+  `/etc/maburgs.toml` on the overlay (only `maburplay.toml` is the vfat
+  symlink): back up `/etc/maburgs.toml`, edit it, restart `S96maburgs`.
 - There is no `maburplay` installer: copy `out/arm64/maburplay.default.toml`
   (staged by `tools/build-arm64.sh`) to the config by hand on a fresh GS.
   With no config, `maburplay -c /etc/maburplay.toml` exits 2 and
