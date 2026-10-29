@@ -58,9 +58,11 @@ TYPE_BY_ID = dict(TABLE)
 
 # MAV_PARAM_EXT_TYPE values (common.xml), matching config_params.h's
 # mav_type(): Bool -> UINT8, Int32 -> INT32, Real32 -> REAL32, Str -> CUSTOM.
+# Used for ENCODING a `set` value (the local table says what type to send).
+# DECODING never uses this by id -- see decode_value()'s note.
 MAV_TYPE = {"b": 1, "i": 6, "f": 9, "s": 11}
 TYPE_NAME = {"b": "Bool", "i": "Int32", "f": "Real32", "s": "Str"}
-NAME_BY_MAV_TYPE = {v: TYPE_NAME[k] for k, v in MAV_TYPE.items()}
+CODE_BY_MAV_TYPE = {v: k for k, v in MAV_TYPE.items()}
 
 
 def encode_value(wtype, text):
@@ -85,27 +87,42 @@ def encode_value(wtype, text):
     return buf.ljust(128, b"\x00")
 
 
-def decode_value(wtype, msg):
-    """The wire value out of a PARAM_EXT_VALUE/PARAM_EXT_ACK message,
-    formatted for `wtype`. pymavlink decodes the fixed 'char' array field
-    by stripping trailing NUL bytes; it keeps the raw (pre-ascii-decode)
-    bytes on `_param_value_raw` when the message came off the wire, but
-    older pymavlink or a hand-built message may only offer the ascii
-    `param_value` string, so both are handled."""
-    raw = getattr(msg, "_param_value_raw", None)
-    if raw is None:
-        raw = msg.param_value
+def decode_value(msg):
+    """A (type_name, value_str) pair decoded from a PARAM_EXT_VALUE or
+    PARAM_EXT_ACK message, using the message's OWN `param_type` field --
+    never the local table. The printed TYPE column already comes off the
+    wire; decoding VALUE by the wire's type too means the two can never
+    disagree, even if the local table and config_params.h ever drift on
+    a row's type (the local table is for ENCODING a `set` value only).
+
+    pymavlink's generated `MAVLink.decode()` rstrips trailing NUL bytes
+    from every fixed 'char' array field before constructing the message,
+    which can truncate the 128-byte value down to just its leading
+    non-zero bytes (e.g. int32 90 = 0x5a 0x00 0x00 0x00 arrives as a
+    single byte). `_param_value_raw` -- set unconditionally by every
+    PARAM_EXT_VALUE/PARAM_EXT_ACK message's `__init__`, including the one
+    `decode()` calls -- is the exact (already-truncated) bytes; padding
+    it back out on the right before unpacking recovers the original
+    value, since the stripped bytes were genuinely zero.
+    """
+    code = CODE_BY_MAV_TYPE.get(msg.param_type)
+    type_name = TYPE_NAME.get(code, "?")
+    raw = msg._param_value_raw
     if isinstance(raw, str):
         raw = raw.encode("latin1", errors="replace")
     else:
         raw = bytes(raw)
-    if wtype == "b":
-        return str(raw[0] if raw else 0)
-    if wtype == "i":
-        return str(struct.unpack("<i", raw[:4].ljust(4, b"\x00"))[0])
-    if wtype == "f":
-        return repr(struct.unpack("<f", raw[:4].ljust(4, b"\x00"))[0])
-    return raw.split(b"\x00", 1)[0].decode("ascii", errors="replace")  # 's'
+    if code == "b":
+        value = str(raw[0] if raw else 0)
+    elif code == "i":
+        value = str(struct.unpack("<i", raw[:4].ljust(4, b"\x00"))[0])
+    elif code == "f":
+        value = repr(struct.unpack("<f", raw[:4].ljust(4, b"\x00"))[0])
+    elif code == "s":
+        value = raw.split(b"\x00", 1)[0].decode("ascii", errors="replace")
+    else:
+        value = raw.hex()  # unrecognized MAV_PARAM_EXT_TYPE
+    return type_name, value
 
 
 def recv_one(conn, msgtype, timeout):
@@ -128,19 +145,25 @@ def wait_for_drone(conn, timeout=5.0):
 
 
 def collect_values(conn, results, idle_s):
-    """Read PARAM_EXT_VALUE messages into results[param_index] until
-    `idle_s` passes with no new one landing. Returns the param_count the
-    drone reported, or None if nothing arrived."""
+    """Read PARAM_EXT_VALUE messages into results[param_index] until every
+    index 0..param_count-1 has arrived, or `idle_s` passes with no new one
+    landing. Returns the param_count the drone reported, or None if
+    nothing arrived."""
     count = None
     last = time.time()
-    while time.time() - last < idle_s:
-        msg = recv_one(conn, "PARAM_EXT_VALUE", idle_s - (time.time() - last))
+    while True:
+        remaining = idle_s - (time.time() - last)
+        if remaining <= 0:
+            break
+        msg = recv_one(conn, "PARAM_EXT_VALUE", remaining)
         if msg is None:
             break
         last = time.time()
         count = msg.param_count
-        wtype_name = NAME_BY_MAV_TYPE.get(msg.param_type, "?")
-        results[msg.param_index] = (msg.param_id, wtype_name, decode_value(TYPE_BY_ID.get(msg.param_id, "s"), msg))
+        type_name, value = decode_value(msg)
+        results[msg.param_index] = (msg.param_id, type_name, value)
+        if count is not None and all(i in results for i in range(count)):
+            break
     return count
 
 
@@ -171,7 +194,7 @@ def cmd_list(conn):
 def cmd_get(conn, pid):
     pid_b = pid.encode("ascii")
     msg = None
-    for _ in range(3):
+    for _ in range(4):  # 1 try + 3 retries
         conn.mav.param_ext_request_read_send(DRONE_SYSTEM, DRONE_COMPONENT, pid_b, -1)
         msg = recv_one(conn, "PARAM_EXT_VALUE", 1.0)
         if msg is not None:
@@ -179,24 +202,18 @@ def cmd_get(conn, pid):
     if msg is None:
         print("no PARAM_EXT_VALUE for %s after 3 retries" % pid, file=sys.stderr)
         return 1
-    wtype_name = NAME_BY_MAV_TYPE.get(msg.param_type, "?")
-    print("%-16s  %-6s  %s" % (msg.param_id, wtype_name, decode_value(TYPE_BY_ID.get(msg.param_id, "s"), msg)))
+    type_name, value = decode_value(msg)
+    print("%-16s  %-6s  %s" % (msg.param_id, type_name, value))
     return 0
 
 
-def cmd_set(conn, pid, value):
-    wtype = TYPE_BY_ID.get(pid)
-    if wtype is None:
-        print("unknown parameter id: %s" % pid, file=sys.stderr)
-        return 2
-    try:
-        raw = encode_value(wtype, value)
-    except ValueError as exc:
-        print("bad value for %s: %s" % (pid, exc), file=sys.stderr)
-        return 2
+def cmd_set(conn, pid, wtype, raw):
+    """`wtype`/`raw` are already validated and encoded by main() before any
+    network I/O (an unknown id or a value that fails to encode is a usage
+    error, reported before a connection is even opened)."""
     pid_b = pid.encode("ascii")
     ack = None
-    for _ in range(3):
+    for _ in range(4):  # 1 try + 3 retries
         conn.mav.param_ext_set_send(DRONE_SYSTEM, DRONE_COMPONENT, pid_b, raw, MAV_TYPE[wtype])
         ack = recv_one(conn, "PARAM_EXT_ACK", 2.0)
         if ack is not None:
@@ -211,7 +228,8 @@ def cmd_set(conn, pid, value):
         mavutil.mavlink.PARAM_ACK_VALUE_UNSUPPORTED: "VALUE_UNSUPPORTED",
     }
     result = result_names.get(ack.param_result, str(ack.param_result))
-    print("%s  %s" % (result, decode_value(wtype, ack)))
+    _, value = decode_value(ack)
+    print("%s  %s" % (result, value))
     status = recv_one(conn, "STATUSTEXT", 1.0)
     if status is not None:
         print(status.text)
@@ -240,6 +258,24 @@ def main(argv):
         print(__doc__, file=sys.stderr)
         return 2
 
+    # `set` is validated and encoded here, before any network I/O: an
+    # unknown id or a value that doesn't fit its type is a usage error
+    # (int()/float() raise ValueError on unparseable text; struct.pack
+    # raises struct.error or OverflowError on text that parses but
+    # doesn't fit the wire type, e.g. an int32 out of range).
+    set_wtype = set_raw = None
+    if cmd == "set":
+        pid, value = args
+        set_wtype = TYPE_BY_ID.get(pid)
+        if set_wtype is None:
+            print("unknown parameter id: %s" % pid, file=sys.stderr)
+            return 2
+        try:
+            set_raw = encode_value(set_wtype, value)
+        except (ValueError, OverflowError, struct.error) as exc:
+            print("bad value for %s: %s" % (pid, exc), file=sys.stderr)
+            return 2
+
     # Deferred import (see the `mavutil = None` note above): the extended-
     # parameter messages are MAVLink 2 only, and pymavlink defaults to v1
     # unless told otherwise before the dialect is used.
@@ -263,7 +299,7 @@ def main(argv):
         return cmd_list(conn)
     if cmd == "get":
         return cmd_get(conn, args[0])
-    return cmd_set(conn, args[0], args[1])
+    return cmd_set(conn, args[0], set_wtype, set_raw)
 
 
 if __name__ == "__main__":
