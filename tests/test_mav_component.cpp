@@ -1,0 +1,513 @@
+// MavComponent: the drone's MAVLink extended-parameter component over the
+// thirteen cfgparam::kTable keys, against a real copy of the bundle config
+// and the real loader.
+#include <cstdio>
+#include <cstring>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <vector>
+
+#include "config.h"
+#include "config_write.h"
+#include "mabur/config_params.h"
+#include "mabur/mav.h"
+#include "mabur/rc_proto.h"
+#include "mav_component.h"
+#include "mtest.h"
+#include "scratch.h"
+
+using namespace mabur;
+
+namespace {
+
+constexpr uint8_t kGcsSys = 255, kGcsComp = 190;
+// The test's own parser channel for replies; this TU's channel state is its
+// own, but a channel the component never uses keeps that obvious.
+constexpr uint8_t kChanTest = mav::kChanGsRx;
+
+std::string slurp(const std::string& path) {
+  std::ifstream f(path, std::ios::binary);
+  std::ostringstream ss;
+  ss << f.rdbuf();
+  return ss.str();
+}
+
+void spit(const std::string& path, const std::string& content) {
+  std::ofstream f(path, std::ios::binary);
+  f << content;
+}
+
+bool exists(const std::string& path) { return std::ifstream(path).good(); }
+
+// A scratch copy of bundle/mabur.default.toml; removes the publisher's
+// siblings (backup, scratch candidate) with it.
+struct ScratchBundle {
+  ScratchFile f{"test_mav_component", ".toml"};
+  ScratchBundle() {
+    const std::string t = slurp(std::string(MABUR_BUNDLE_DIR) + "/mabur.default.toml");
+    REQUIRE(!t.empty());
+    spit(f.path, t);
+  }
+  ~ScratchBundle() {
+    std::remove((f.path + ".pre-param").c_str());
+    std::remove((f.path + ".pre-param.tmp").c_str());
+    std::remove((f.path + ".new").c_str());
+  }
+  const std::string& path() const { return f.path; }
+};
+
+std::vector<uint8_t> to_bytes(const mavlink_message_t& msg) {
+  uint8_t buf[MAVLINK_MAX_PACKET_LEN];
+  const uint16_t n = mavlink_msg_to_send_buffer(buf, &msg);
+  return std::vector<uint8_t>(buf, buf + n);
+}
+
+void feed(MavComponent& c, const mavlink_message_t& msg) {
+  const auto b = to_bytes(msg);
+  c.on_payload(b.data(), b.size());
+}
+
+// Parses one take_outbound buffer; REQUIREs that it holds whole packets only.
+std::vector<mavlink_message_t> parse_all(const std::vector<uint8_t>& bytes) {
+  std::vector<mavlink_message_t> out;
+  mavlink_reset_channel_status(kChanTest);
+  for (uint8_t b : bytes) {
+    mavlink_message_t m;
+    mavlink_status_t st;
+    if (mavlink_parse_char(kChanTest, b, &m, &st)) out.push_back(m);
+  }
+  REQUIRE(mavlink_get_channel_status(kChanTest)->parse_state <= MAVLINK_PARSE_STATE_IDLE);
+  return out;
+}
+
+std::vector<mavlink_message_t> drain(MavComponent& c) {
+  std::vector<mavlink_message_t> all;
+  for (;;) {
+    std::vector<uint8_t> out;
+    const int n = c.take_outbound(&out);
+    if (n == 0) {
+      CHECK(out.empty());
+      break;
+    }
+    CHECK(out.size() <= rc::kMavMaxPayload);
+    auto msgs = parse_all(out);
+    CHECK(static_cast<int>(msgs.size()) == n);
+    all.insert(all.end(), msgs.begin(), msgs.end());
+  }
+  CHECK(c.outbound_packets() == 0);
+  return all;
+}
+
+void id16(const char* id, char out[16]) {
+  std::memset(out, 0, 16);
+  std::strncpy(out, id, 16);
+}
+
+std::string id_of(const char id[16]) { return std::string(id, strnlen(id, 16)); }
+
+mavlink_message_t list_msg(uint8_t ts = mav::kSysId, uint8_t tc = mav::kCompId) {
+  mavlink_message_t m;
+  mavlink_msg_param_ext_request_list_pack(kGcsSys, kGcsComp, &m, ts, tc);
+  return m;
+}
+
+mavlink_message_t read_msg(const char* id, int16_t index) {
+  char pid[16];
+  id16(id, pid);
+  mavlink_message_t m;
+  mavlink_msg_param_ext_request_read_pack(kGcsSys, kGcsComp, &m, mav::kSysId, mav::kCompId,
+                                          pid, index);
+  return m;
+}
+
+mavlink_message_t set_raw(const char* id, const char value[128], uint8_t type) {
+  char pid[16];
+  id16(id, pid);
+  mavlink_message_t m;
+  mavlink_msg_param_ext_set_pack(kGcsSys, kGcsComp, &m, mav::kSysId, mav::kCompId, pid, value,
+                                 type);
+  return m;
+}
+
+mavlink_message_t set_int(const char* id, int32_t v) {
+  char w[128] = {};
+  std::memcpy(w, &v, 4);
+  return set_raw(id, w, MAV_PARAM_EXT_TYPE_INT32);
+}
+
+mavlink_message_t set_real(const char* id, float v) {
+  char w[128] = {};
+  std::memcpy(w, &v, 4);
+  return set_raw(id, w, MAV_PARAM_EXT_TYPE_REAL32);
+}
+
+mavlink_message_t set_bool(const char* id, bool v) {
+  char w[128] = {};
+  w[0] = v ? 1 : 0;
+  return set_raw(id, w, MAV_PARAM_EXT_TYPE_UINT8);
+}
+
+mavlink_message_t set_str(const char* id, const char* s) {
+  char w[128] = {};
+  std::strncpy(w, s, 127);
+  return set_raw(id, w, MAV_PARAM_EXT_TYPE_CUSTOM);
+}
+
+int32_t wire_i32(const char v[128]) {
+  int32_t i;
+  std::memcpy(&i, v, 4);
+  return i;
+}
+
+// One set round-trip: feeds the set, drains, REQUIREs a PARAM_EXT_ACK first.
+struct SetReply {
+  mavlink_param_ext_ack_t ack{};
+  std::vector<mavlink_message_t> rest;
+};
+
+SetReply do_set(MavComponent& c, const mavlink_message_t& set) {
+  feed(c, set);
+  auto msgs = drain(c);
+  REQUIRE(!msgs.empty());
+  REQUIRE(msgs[0].msgid == MAVLINK_MSG_ID_PARAM_EXT_ACK);
+  SetReply r;
+  mavlink_msg_param_ext_ack_decode(&msgs[0], &r.ack);
+  r.rest.assign(msgs.begin() + 1, msgs.end());
+  return r;
+}
+
+std::string statustext(const mavlink_message_t& m, uint8_t* severity) {
+  REQUIRE(m.msgid == MAVLINK_MSG_ID_STATUSTEXT);
+  mavlink_statustext_t s;
+  mavlink_msg_statustext_decode(&m, &s);
+  if (severity) *severity = s.severity;
+  CHECK(s.id == 0 && s.chunk_seq == 0);
+  return std::string(s.text, strnlen(s.text, sizeof s.text));
+}
+
+std::vector<std::string> logs;
+MavComponent make(const std::string& path) {
+  return MavComponent(path, [](const std::string& l) { logs.push_back(l); });
+}
+
+}  // namespace
+
+TEST(list_returns_13_values_in_table_order) {
+  ScratchBundle b;
+  auto c = make(b.path());
+  feed(c, list_msg());
+  CHECK(c.outbound_packets() == cfgparam::kCount);
+  auto msgs = drain(c);
+  REQUIRE(msgs.size() == cfgparam::kCount);
+  for (size_t i = 0; i < msgs.size(); ++i) {
+    CHECK(msgs[i].msgid == MAVLINK_MSG_ID_PARAM_EXT_VALUE);
+    CHECK(msgs[i].sysid == mav::kSysId && msgs[i].compid == mav::kCompId);
+    mavlink_param_ext_value_t v;
+    mavlink_msg_param_ext_value_decode(&msgs[i], &v);
+    CHECK(v.param_count == cfgparam::kCount);
+    CHECK(v.param_index == i);
+    CHECK(id_of(v.param_id) == cfgparam::kTable[i].id);
+    CHECK(v.param_type == cfgparam::mav_type(cfgparam::kTable[i].type));
+    if (id_of(v.param_id) == "VENC_FPS") {
+      CHECK(v.param_type == MAV_PARAM_EXT_TYPE_INT32);
+      CHECK(wire_i32(v.param_value) == 60);
+    }
+  }
+  CHECK(c.stats().rx_packets == 1);
+  CHECK(c.stats().drop_not_for_us == 0);
+}
+
+TEST(list_for_another_component_is_ignored) {
+  ScratchBundle b;
+  auto c = make(b.path());
+  feed(c, list_msg(mav::kSysId, 1));
+  CHECK(c.outbound_packets() == 0);
+  CHECK(c.stats().drop_not_for_us == 1);
+  feed(c, list_msg(2, mav::kCompId));
+  CHECK(c.outbound_packets() == 0);
+  CHECK(c.stats().drop_not_for_us == 2);
+  // 0 is broadcast: both fields 0 is for us.
+  feed(c, list_msg(0, 0));
+  CHECK(c.outbound_packets() == cfgparam::kCount);
+}
+
+TEST(read_by_index_and_by_id) {
+  ScratchBundle b;
+  auto c = make(b.path());
+  feed(c, read_msg("", 9));
+  auto msgs = drain(c);
+  REQUIRE(msgs.size() == 1);
+  mavlink_param_ext_value_t v;
+  mavlink_msg_param_ext_value_decode(&msgs[0], &v);
+  CHECK(id_of(v.param_id) == "REC_FPS");
+  CHECK(v.param_index == 9 && v.param_count == cfgparam::kCount);
+  CHECK(wire_i32(v.param_value) == 60);
+
+  feed(c, read_msg("VENC_SIZE", -1));
+  msgs = drain(c);
+  REQUIRE(msgs.size() == 1);
+  mavlink_msg_param_ext_value_decode(&msgs[0], &v);
+  CHECK(id_of(v.param_id) == "VENC_SIZE");
+  CHECK(v.param_index == 3);
+  CHECK(v.param_type == MAV_PARAM_EXT_TYPE_CUSTOM);
+  CHECK(std::string(v.param_value) == "1920x1080");
+
+  feed(c, read_msg("NOPE", -1));
+  CHECK(drain(c).empty());
+  feed(c, read_msg("", 13));   // one past the table
+  CHECK(drain(c).empty());
+  feed(c, read_msg("", 32767));
+  CHECK(drain(c).empty());
+}
+
+TEST(set_rec_fps_writes_record_section_only_and_acks_new_value) {
+  ScratchBundle b;
+  auto c = make(b.path());
+  auto r = do_set(c, set_int("REC_FPS", 30));
+  CHECK(r.ack.param_result == PARAM_ACK_ACCEPTED);
+  CHECK(id_of(r.ack.param_id) == "REC_FPS");
+  CHECK(r.ack.param_type == MAV_PARAM_EXT_TYPE_INT32);
+  CHECK(wire_i32(r.ack.param_value) == 30);
+  CHECK(r.rest.empty());
+  const std::string t = slurp(b.path());
+  CHECK(t.find("fps          = 30                 # at most venc.fps") != std::string::npos);
+  CHECK(t.find("fps        = 60            # 1..120") != std::string::npos);   // [venc] fps
+  CHECK(exists(b.path() + ".pre-param"));
+  CHECK(c.stats().sets_ok == 1 && c.stats().sets_refused == 0);
+}
+
+TEST(set_unknown_id_is_value_unsupported) {
+  ScratchBundle b;
+  const std::string before = slurp(b.path());
+  auto c = make(b.path());
+  auto r = do_set(c, set_int("NOPE", 30));
+  CHECK(r.ack.param_result == PARAM_ACK_VALUE_UNSUPPORTED);
+  CHECK(id_of(r.ack.param_id) == "NOPE");
+  bool zero = true;
+  for (char ch : r.ack.param_value) zero = zero && ch == 0;
+  CHECK(zero);
+  CHECK(slurp(b.path()) == before);
+  CHECK(c.stats().sets_refused == 1);
+}
+
+TEST(set_type_mismatch_is_value_unsupported_with_current_value) {
+  ScratchBundle b;
+  const std::string before = slurp(b.path());
+  auto c = make(b.path());
+  auto r = do_set(c, set_real("VENC_FPS", 30.0f));
+  CHECK(r.ack.param_result == PARAM_ACK_VALUE_UNSUPPORTED);
+  CHECK(r.ack.param_type == MAV_PARAM_EXT_TYPE_INT32);
+  CHECK(wire_i32(r.ack.param_value) == 60);
+  CHECK(slurp(b.path()) == before);
+  // A bool byte other than 0/1 is malformed too.
+  char w[128] = {};
+  w[0] = 2;
+  r = do_set(c, set_raw("MSP_ENABLE", w, MAV_PARAM_EXT_TYPE_UINT8));
+  CHECK(r.ack.param_result == PARAM_ACK_VALUE_UNSUPPORTED);
+  CHECK(r.ack.param_value[0] == 1);
+  CHECK(slurp(b.path()) == before);
+  CHECK(c.stats().sets_refused == 2);
+}
+
+TEST(set_refused_by_loader_sends_failed_ack_then_statustext) {
+  ScratchBundle b;
+  const std::string before = slurp(b.path());
+  const int writes = write_count_for_test();
+  auto c = make(b.path());
+  auto r = do_set(c, set_str("VENC_SIZE", "1x"));
+  CHECK(r.ack.param_result == PARAM_ACK_FAILED);
+  CHECK(r.ack.param_type == MAV_PARAM_EXT_TYPE_CUSTOM);
+  CHECK(std::string(r.ack.param_value) == "1920x1080");
+  REQUIRE(r.rest.size() == 1);
+  uint8_t sev = 0;
+  const std::string text = statustext(r.rest[0], &sev);
+  CHECK(sev == MAV_SEVERITY_ERROR);
+  CHECK(text.rfind("venc.size", 0) == 0);   // prefix stripped: the field leads
+  CHECK(text.find("config:") == std::string::npos);
+  CHECK(slurp(b.path()) == before);
+  CHECK(!exists(b.path() + ".new"));
+  CHECK(write_count_for_test() == writes);
+  CHECK(c.stats().sets_refused == 1 && c.stats().sets_ok == 0);
+}
+
+TEST(ordering_rules_are_enforced_by_the_loader) {
+  ScratchBundle b;
+  auto c = make(b.path());
+  auto result = [&](const mavlink_message_t& m) { return do_set(c, m).ack.param_result; };
+  // Bundle defaults: record.fps 60, so venc.fps can't drop below it first.
+  CHECK(result(set_int("VENC_FPS", 30)) == PARAM_ACK_FAILED);
+  CHECK(result(set_int("REC_FPS", 30)) == PARAM_ACK_ACCEPTED);
+  CHECK(result(set_int("VENC_FPS", 30)) == PARAM_ACK_ACCEPTED);
+  // 100 fps is the 1728x972 mode: the size must move first.
+  CHECK(result(set_int("VENC_FPS", 100)) == PARAM_ACK_FAILED);
+  CHECK(result(set_str("VENC_SIZE", "1728x972")) == PARAM_ACK_ACCEPTED);
+  CHECK(result(set_int("VENC_FPS", 100)) == PARAM_ACK_ACCEPTED);
+  // low_power needs msp for the arm state.
+  CHECK(result(set_bool("LOWPWR_ENABLE", true)) == PARAM_ACK_ACCEPTED);
+  CHECK(result(set_bool("MSP_ENABLE", false)) == PARAM_ACK_FAILED);
+  CHECK(result(set_bool("LOWPWR_ENABLE", false)) == PARAM_ACK_ACCEPTED);
+  CHECK(result(set_bool("MSP_ENABLE", false)) == PARAM_ACK_ACCEPTED);
+  const Config cfg = load_config(b.path());
+  CHECK(cfg.venc.core.fps == 100 && cfg.venc.core.width == 1728);
+  CHECK(cfg.record.fps == 30 && !cfg.msp.enable && !cfg.low_power.enable);
+}
+
+TEST(set_same_value_is_accepted_and_file_unchanged) {
+  ScratchBundle b;
+  const std::string before = slurp(b.path());
+  auto c = make(b.path());
+  const int writes = write_count_for_test();
+  auto r = do_set(c, set_int("REC_FPS", 60));
+  CHECK(r.ack.param_result == PARAM_ACK_ACCEPTED && wire_i32(r.ack.param_value) == 60);
+  r = do_set(c, set_int("REC_FPS", 60));
+  CHECK(r.ack.param_result == PARAM_ACK_ACCEPTED && wire_i32(r.ack.param_value) == 60);
+  CHECK(slurp(b.path()) == before);
+  CHECK(write_count_for_test() == writes);
+  CHECK(!exists(b.path() + ".pre-param"));
+  CHECK(c.stats().sets_ok == 2);
+}
+
+TEST(commented_out_key_is_failed_with_statustext_naming_it) {
+  ScratchBundle b;
+  std::string t = slurp(b.path());
+  const size_t msp = t.find("[msp]");
+  REQUIRE(msp != std::string::npos);
+  const size_t en = t.find("enable", msp);
+  REQUIRE(en != std::string::npos);
+  t.insert(en, "# ");
+  spit(b.path(), t);
+  auto c = make(b.path());
+  auto r = do_set(c, set_bool("MSP_ENABLE", false));
+  CHECK(r.ack.param_result == PARAM_ACK_FAILED);
+  CHECK(r.ack.param_value[0] == 0);   // what the live file loads as: the loader default, off
+  REQUIRE(r.rest.size() == 1);
+  const std::string text = statustext(r.rest[0], nullptr);
+  CHECK(text.find("msp.enable") != std::string::npos);
+  CHECK(slurp(b.path()) == t);
+  CHECK(c.stats().sets_refused == 1);
+}
+
+TEST(custom_value_with_quote_or_no_nul_never_reaches_the_file) {
+  ScratchBundle b;
+  const std::string before = slurp(b.path());
+  auto c = make(b.path());
+  auto r = do_set(c, set_str("VENC_SIZE", "19\"20x1080"));
+  CHECK(r.ack.param_result == PARAM_ACK_VALUE_UNSUPPORTED);
+  CHECK(std::string(r.ack.param_value) == "1920x1080");
+  char w[128];
+  std::memset(w, 'A', sizeof w);   // no NUL anywhere
+  r = do_set(c, set_raw("VENC_SIZE", w, MAV_PARAM_EXT_TYPE_CUSTOM));
+  CHECK(r.ack.param_result == PARAM_ACK_VALUE_UNSUPPORTED);
+  CHECK(slurp(b.path()) == before);
+  CHECK(!exists(b.path() + ".pre-param"));
+}
+
+TEST(take_outbound_never_exceeds_600_bytes_and_never_splits_a_packet) {
+  ScratchBundle b;
+  auto c = make(b.path());
+  feed(c, list_msg());
+  size_t total = 0;
+  int takes = 0;
+  for (;;) {
+    std::vector<uint8_t> out;
+    const int n = c.take_outbound(&out);
+    if (n == 0) break;
+    ++takes;
+    CHECK(out.size() <= rc::kMavMaxPayload);
+    CHECK(parse_all(out).size() == static_cast<size_t>(n));
+    total += static_cast<size_t>(n);
+  }
+  CHECK(total == cfgparam::kCount);
+  CHECK(takes > 1);
+  // A caller's partly filled buffer only gets what still fits.
+  feed(c, list_msg());
+  std::vector<uint8_t> out(rc::kMavMaxPayload - 10, 0);
+  CHECK(c.take_outbound(&out) == 0);
+  CHECK(out.size() == rc::kMavMaxPayload - 10);
+  CHECK(c.outbound_packets() == cfgparam::kCount);
+}
+
+TEST(heartbeat_fields) {
+  ScratchBundle b;
+  auto c = make(b.path());
+  c.queue_heartbeat();
+  auto msgs = drain(c);
+  REQUIRE(msgs.size() == 1);
+  CHECK(msgs[0].msgid == MAVLINK_MSG_ID_HEARTBEAT);
+  CHECK(msgs[0].sysid == 1 && msgs[0].compid == 191);
+  mavlink_heartbeat_t h;
+  mavlink_msg_heartbeat_decode(&msgs[0], &h);
+  CHECK(h.type == 18 && h.autopilot == 8 && h.base_mode == 0 && h.system_status == 4);
+}
+
+TEST(mavlink1_and_garbage_are_dropped) {
+  ScratchBundle b;
+  auto c = make(b.path());
+  // A well-formed MAVLink 1 heartbeat: valid CRC, but v1 is dropped.
+  mavlink_message_t m;
+  mavlink_status_t* st = mavlink_get_channel_status(MAVLINK_COMM_0);
+  st->flags |= MAVLINK_STATUS_FLAG_OUT_MAVLINK1;
+  mavlink_msg_heartbeat_pack(kGcsSys, kGcsComp, &m, MAV_TYPE_GCS, MAV_AUTOPILOT_INVALID, 0, 0,
+                             MAV_STATE_ACTIVE);
+  st->flags &= ~MAVLINK_STATUS_FLAG_OUT_MAVLINK1;
+  auto v1 = to_bytes(m);
+  REQUIRE(v1[0] == MAVLINK_STX_MAVLINK1);
+  c.on_payload(v1.data(), v1.size());
+  CHECK(c.stats().drop_bad_packet == 1);
+  CHECK(c.stats().rx_packets == 0);
+
+  // A packet with a corrupted CRC, then a truncated one at the frame end.
+  auto good = to_bytes(list_msg());
+  auto bad = good;
+  bad.back() ^= 0xFF;
+  c.on_payload(bad.data(), bad.size());
+  CHECK(c.stats().drop_bad_packet == 2);
+  c.on_payload(good.data(), good.size() - 3);
+  CHECK(c.stats().drop_bad_packet == 3);
+  // The partial packet must not bleed into the next payload.
+  c.on_payload(good.data(), good.size());
+  CHECK(c.stats().drop_bad_packet == 3 && c.stats().rx_packets == 1);
+  CHECK(c.outbound_packets() == cfgparam::kCount);
+  drain(c);
+
+  const uint8_t junk[] = {0x13, 0x37, 0xFD, 0x05, 0x00, 0x00, 0x01, 0x02, 0x03, 0xAA};
+  c.on_payload(junk, sizeof junk);
+  CHECK(c.stats().drop_bad_packet == 4);
+  CHECK(c.outbound_packets() == 0);
+  CHECK(c.stats().rx_packets == 1);
+}
+
+TEST(heartbeat_from_gcs_is_counted_and_ignored) {
+  ScratchBundle b;
+  auto c = make(b.path());
+  mavlink_message_t m;
+  mavlink_msg_heartbeat_pack(kGcsSys, kGcsComp, &m, MAV_TYPE_GCS, MAV_AUTOPILOT_INVALID, 0, 0,
+                             MAV_STATE_ACTIVE);
+  feed(c, m);
+  CHECK(c.stats().rx_packets == 1);
+  CHECK(c.stats().drop_not_for_us == 0);
+  CHECK(c.outbound_packets() == 0);
+  // A message with no handler here counts as not for us.
+  mavlink_msg_param_request_list_pack(kGcsSys, kGcsComp, &m, 1, 191);
+  feed(c, m);
+  CHECK(c.stats().drop_not_for_us == 1);
+}
+
+TEST(log_lines_are_prefixed_and_null_log_is_allowed) {
+  ScratchBundle b;
+  logs.clear();
+  auto c = make(b.path());
+  (void)do_set(c, set_int("REC_FPS", 30));
+  (void)do_set(c, set_str("VENC_SIZE", "1x"));
+  REQUIRE(!logs.empty());
+  for (const auto& l : logs) {
+    CHECK(l.rfind("[mav] ", 0) == 0);
+    CHECK(l.find('\n') == std::string::npos);
+  }
+  MavComponent quiet(b.path(), nullptr);
+  auto r = do_set(quiet, set_int("REC_FPS", 45));
+  CHECK(r.ack.param_result == PARAM_ACK_ACCEPTED);
+}
+
+MTEST_MAIN
