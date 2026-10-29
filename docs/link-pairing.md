@@ -97,8 +97,11 @@ its CRC; the drone-to-GS frames stay untagged:
   `auth_reject`, a parse failure does not.
 - **MAV** (both directions, carries an opaque MAVLink packet): GS to drone
   is tagged, same session-bound `TagCtx` as NACK, with the request's own
-  `counter` as `seq32` under the same accept-only-greater rule; drone to
-  GS is untagged, like Telem.
+  `counter` as `seq32` under the same accept-only-greater rule, on its own
+  counter state (`RcAgent::check_mav` → `verify_session_tagged` +
+  `accept_mav_counter`, on the MAV thread); a tag or counter failure sets
+  `auth_reject`, a parse failure does not. Drone to GS is untagged, like
+  Telem.
 - **Telem** (drone to GS): flags bit1 is `kTelemAuthReject`
   (`0x02`) — at least one control frame failed verification this
   telemetry period. (Bit1 was `radio_rx_ok` before the 2026-09-30 telem
@@ -108,7 +111,7 @@ its CRC; the drone-to-GS frames stay untagged:
 `rc::verify_control(buf, len, key, ctx)` is the one place a tag is
 checked — on the drone, for DISC/RCF on the agent thread, for
 CAL_CMD/CAL_RESULT on the TX writer thread (`RcAgent::verify_cal_frame`)
-and for NACK on the RX thread. It finds the tag at the frame's
+for NACK on the RX thread and for MAV on the MAV thread. It finds the tag at the frame's
 **structural** offset, derived from the type (`DISC_LEN`, `RCF_HEAD_LEN`,
 `kCalResultLen`, `kCalCmdFixedLen + n_windows * 4`,
 `kNackFixedLen + n * kNackEntryLen`, or `kMavFixedLen + len16`), never at

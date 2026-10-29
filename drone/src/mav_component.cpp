@@ -81,6 +81,9 @@ MavComponent::MavComponent(std::string cfg_path, std::function<void(const std::s
   mavlink_reset_channel_status(kChanDroneRx);
 }
 
+uint8_t MavComponent::sys_id() { return mav::kSysId; }
+uint8_t MavComponent::comp_id() { return mav::kCompId; }
+
 void MavComponent::log(const std::string& line) const {
   if (log_) log_("[mav] " + line);
 }

@@ -1108,6 +1108,25 @@ trim's own rate); `rc: low_power ENTER/EXIT` lines mark transitions,
 the phase lock's first offset, clamps and refusals) and the 5 s
 `frame_ring:` line (below).
 
+The MAVLink parameter component (T_MAV, `drone/src/mav_component.h`) logs
+to the same stderr. At boot: `maburd mav: component sys 1 comp 191,
+config <path>`. Per request, `[mav] ` lines: `list: <n> values`,
+`read <id>: no such parameter`, `set <id> = <value> (<toml key>)`, with
+`, unchanged)` when the file already held that line and nothing was
+written, `set <id> refused: <why>` (the loader's message when the result
+would not load), and `... config does not load: <why>` when the file on
+disk itself fails to load. The `stats:` line gains
+`mav rx=<frames>/<packets> tx=<frames>/<packets> drop=<n> reject=<n>`
+on the ticks where any of those moved since the last time they were
+printed; the values are cumulative since start. `rx` counts verified
+T_MAV frames and the MAVLink 2 packets parsed out of them, `tx` the
+uplink T_MAV frames and the packets they carried (replies and the 1 Hz
+HEARTBEAT, sent only while a session is published), `drop` the frames
+that failed to parse plus the packets the component dropped (another
+target, an unhandled message, bad CRC, MAVLink 1, a partial), and
+`reject` the frames that parsed but failed the tag or the counter (these
+also raise Telem's `auth_reject`).
+
 ## Frame loss inside the drone ("wire clean" ≠ no frame loss)
 
 Frames can vanish INSIDE the drone — between the encoder and maburd's ring

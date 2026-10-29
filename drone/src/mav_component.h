@@ -76,6 +76,10 @@ class MavComponent {
   int take_outbound(std::vector<uint8_t>* out);
   size_t outbound_packets() const { return queue_.size(); }
   const MavComponentStats& stats() const { return stats_; }
+  // The MAVLink identity this component answers as (mabur/mav.h's kSysId
+  // and kCompId), for callers that don't include the MAVLink headers.
+  static uint8_t sys_id();
+  static uint8_t comp_id();
 
  private:
   struct Msg;   // wraps mavlink_message_t, which this header doesn't include

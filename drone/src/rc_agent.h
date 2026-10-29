@@ -293,6 +293,21 @@ class RcAgent {
   // raises auth_reject. kOk fills *out. Any thread.
   enum class NackCheck { kOk, kMalformed, kRejected };
   NackCheck check_nack(const uint8_t* body, size_t len, rc::Nack* out);
+  // True while a link session is published (current_ is valid). Any thread.
+  bool has_published_session() const {
+    return published_session_.load(std::memory_order_acquire) != 0;
+  }
+  // T_MAV replay guard: accept_nack_counter's rule and CAS shape on its own
+  // state (mav_last_), so the GS's MAV and NACK counters never refuse each
+  // other. Any thread.
+  bool accept_mav_counter(uint32_t counter, uint64_t session);
+  // The MAV thread's whole T_MAV gate: parse_mav (tagged layout),
+  // verify_session_tagged with the counter as seq32, accept_mav_counter.
+  // kMalformed = the parse failed (radio corruption): auth_reject stays
+  // down. kRejected = parsed but the tag or the counter failed: raises
+  // auth_reject. kOk fills *out. Any thread.
+  enum class MavCheck { kOk, kMalformed, kRejected };
+  MavCheck check_mav(const uint8_t* body, size_t len, rc::Mav* out);
   static constexpr size_t kCalNonceRing = 8;
   // Replay harness only (maburd --dry-run): install a known pair so a file
   // of RCFs tagged under (vrx, vtx) verifies without a DISC exchange.
@@ -388,6 +403,11 @@ class RcAgent {
   // accept_nack_counter's state: (vtx_nonce << 32) | last accepted counter.
   // A vtx other than the current pair's means "nothing accepted yet".
   std::atomic<uint64_t> nack_last_{0};
+  // accept_mav_counter's state, same encoding as nack_last_.
+  std::atomic<uint64_t> mav_last_{0};
+  // accept_nack_counter / accept_mav_counter: the CAS on one state word.
+  bool accept_session_counter_(std::atomic<uint64_t>& last_word, uint32_t counter,
+                               uint64_t session);
   bool session_promoted_ = false;
   uint8_t deferred_move_ch_ = 0;   // executed in tick() after main sent the promote Telem
   uint32_t fresh_vtx_nonce_();

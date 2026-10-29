@@ -12,7 +12,8 @@ different versions reject each other's frames in BOTH directions, and
 because DISC_ACK is what carries `CAP_FRAME_WIRE`, the symptom is no
 control link and no video. Restarting either daemon does not fix a
 version mismatch; finish the deploy. The RC wire goldens live in
-`tests/test_rc.cpp`.
+`tests/test_rc.cpp`. `RC_VERSION` 17 (the T_MAV tunnel and `CAP_MAVLINK`)
+is a flag day like every other bump.
 
 **A config error crash-loops the daemon.** A stale, removed or unknown key
 makes the daemon fail to start. A config-load error exits **1** in `maburd`
@@ -292,7 +293,11 @@ prints it, only the fingerprint).
    exit 2, no respawn.
 3. **Make room and keep one rollback.** `df -h /` on the drone first; keep
    the old binary and its config side by side (`maburd.pre-<change>`,
-   `mabur.toml.pre-<change>`), and prune older copies.
+   `mabur.toml.pre-<change>`), and prune older copies. `maburd` writes two
+   `.pre-*` copies of its own next to `/etc/mabur.toml`: `.pre-cal`
+   (`maburcal`) and `.pre-param` (a MAVLink parameter set), each the file
+   as it was before that tool's most recent write; neither is a rollback
+   for a deploy.
 4. **Stop, verify, swap, start** — each in its own ssh call on the drone,
    with `setsid` for the start.
 5. **Verify.** The `config: N key(s) defaulted:` list after each start;
