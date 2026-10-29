@@ -82,8 +82,9 @@ its CRC; the drone-to-GS frames stay untagged:
   `kAckKeyMismatch`, `0x01`). Unauthenticated — the drone has nothing of
   the GS's to prove yet, and a forged ack can only confuse a display, not
   move the aircraft (see "Not defended"). `chip_caps` carries `CAP_MAVLINK`
-  (`0x0008`) when the drone understands T_MAV; a GS lacking the peer's bit
-  just never sends or expects one.
+  (`0x0008`) when the drone understands T_MAV. It is display-only: the GS
+  logs `maburgs: mavlink: drone lacks CAP_MAVLINK` once per session when the
+  bit is missing and gates nothing on it.
 - **RCF** (GS to drone): tagged over the frame bytes
   plus `vrx_nonce ‖ vtx_nonce ‖ seq32` (`TagCtx`) — session-bound, not
   just key-bound.

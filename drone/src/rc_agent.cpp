@@ -954,8 +954,9 @@ rc::DiscAck RcAgent::make_disc_ack(uint32_t vrx_nonce, uint32_t vtx_nonce, uint8
   // CAP_CALIBRATE: this build understands T_CAL_CMD/T_CAL_RESULT (main.cpp
   // wires them up) -- a real gate, unlike CAP_TELEMETRY:
   // gs/src/cal_session.cpp's start() refuses a session outright without it.
-  // CAP_MAVLINK: this build answers T_MAV (main.cpp's MAV thread); the GS
-  // neither sends nor expects a T_MAV frame without it.
+  // CAP_MAVLINK: this build answers T_MAV (main.cpp's MAV thread).
+  // Display-only, like CAP_TELEMETRY: the GS logs a peer without it once
+  // per session and gates nothing on it.
   ack.chip_caps = rc::CAP_FRAME_WIRE | rc::CAP_TELEMETRY | rc::CAP_CALIBRATE | rc::CAP_MAVLINK;
   // agreed is member_(op_channel) ? the DISC's proposed op_channel : the
   // current channel -- computed by the caller, which also stores it in the

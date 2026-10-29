@@ -161,6 +161,19 @@ by `link.nack.min_lead_ms` because the answer could not land before the
 deadline. The drone side is `drone.nack` (below). maburtop draws a `nack:`
 line in the LADDER panel. Design: `docs/fec-nack.md`.
 
+### `link.mav` — MAVLink tunnel
+
+`link.mav{tx, rx, reject, peer}`: the GS's `MavTunnel` and its UDP endpoint,
+counters cumulative since the daemon started; present only while
+`[mavlink] enable`. `tx` counts T_MAV frames sent to the drone, `rx` T_MAV
+frames received from it, `reject` the MAVLink packets the tunnel refused in
+either direction (outbound while unlinked; a bad CRC, MAVLink 1 or a
+partial; an outbound packet larger than a frame's payload; a drone T_MAV
+frame that fails to parse), and `peer` is true
+once a UDP client has sent the endpoint a datagram. maburtop draws a
+`mav <tx>/<rx>` cell (`mav off` without the key) on the top bar beside
+`key`. Design: `docs/mavlink.md`.
+
 ### `link.refresh` — demand refresh
 
 `link.refresh{armed, requests, retries, heals, heal_ms_last, by_reason{hole,

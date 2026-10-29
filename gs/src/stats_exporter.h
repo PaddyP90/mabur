@@ -12,6 +12,7 @@
 #include "lat_window.h"
 #include "mabur/nack_tracker.h"
 #include "mabur/rc_proto.h"
+#include "mav_tunnel.h"
 #include "op_point.h"
 #include "refresh_requester.h"
 #include "relay_stats.h"
@@ -202,6 +203,14 @@ struct StatsNackIn {
   double interval_s = 0.0;       // for fill_pps; 0 = no window yet -> null
 };
 
+// MAVLink tunnel + UDP endpoint (maburgs [mavlink]): exported as link.mav
+// only while the endpoint is enabled. peer = a UDP client has spoken.
+struct StatsMavIn {
+  bool enabled = false;
+  MavTunnelStats t;
+  bool peer = false;
+};
+
 // Demand refresh: the core's RefreshRequester, exported as link.refresh
 // whenever the core has one (always in maburgs; never in the web GS).
 struct StatsRefreshIn {
@@ -285,6 +294,7 @@ struct StatsInput {
   StatsRcfSlotIn rcf_slot;
   StatsNackIn nack;
   StatsRefreshIn refresh;
+  StatsMavIn mav;
   bool in_session = false;  // VrxState::SESSION
   bool key_mismatch = false;   // VrxState::KEY_MISMATCH
   std::string key_fp;          // mabur::key_fingerprint(cfg.link.key)

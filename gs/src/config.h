@@ -283,6 +283,15 @@ struct DebugLogCfg {
   int rung_period_s = 10;    // ctl.log R lines (the per-rung store snapshot)
 };
 
+/// MAVLink UDP endpoint (docs/mavlink.md): the socket a ground app talks to,
+/// bridged onto the T_MAV tunnel. Loopback by default: whoever can reach the
+/// socket can set drone parameters, so a LAN bind is a deliberate choice.
+struct MavlinkCfg {
+  bool enable = true;
+  std::string bind = "127.0.0.1";   // dotted IPv4
+  int port = 14550;                 // MAVLink's conventional GCS port
+};
+
 /// Ground station configuration: radio, FEC, link, video reassembly, AU ring, MSP OSD.
 struct Config {
   RadioCfg radio;
@@ -294,6 +303,7 @@ struct Config {
   AuRingOutCfg au_ring;
   DebugLogCfg debug_log;
   HopCfg hop;
+  MavlinkCfg mavlink;
 
   /// Builds decoder configuration with per-stream RS and UEP overhead
   /// (2 streams since the airtime-balance-uep fold-in).

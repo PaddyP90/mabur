@@ -1361,4 +1361,31 @@ TEST(video_exports_slice_salvage_counters) {
   CHECK(v["slice_fallback"]["no_params"] == 0);
 }
 
+// MAVLink endpoint: link.mav carries the tunnel's frame counts, the summed
+// outbound/inbound rejects and whether a UDP client is attached; absent when
+// [mavlink] is off.
+TEST(link_mav_block) {
+  Capture cap;
+  StatsExporter ex(1, 500, cap.fn());
+  StatsInput in = base_input();
+  ex.poll(1000, in);
+  CHECK(!cap.last()["link"].contains("mav"));
+  in.mav.enabled = true;
+  in.mav.t.tx_frames = 4; in.mav.t.tx_packets = 9;
+  in.mav.t.rx_frames = 7; in.mav.t.rx_packets = 20;
+  in.mav.t.drop_unlinked = 2; in.mav.t.drop_bad_packet = 3; in.mav.t.drop_oversize = 1;
+  in.mav.peer = true;
+  ex.poll(1600, in);
+  json j = cap.last();
+  REQUIRE(j["link"].contains("mav"));
+  CHECK(j["link"]["mav"].size() == 4);
+  CHECK(j["link"]["mav"]["tx"] == 4);
+  CHECK(j["link"]["mav"]["rx"] == 7);
+  CHECK(j["link"]["mav"]["reject"] == 6);
+  CHECK(j["link"]["mav"]["peer"] == true);
+  in.mav.peer = false;
+  ex.poll(2200, in);
+  CHECK(cap.last()["link"]["mav"]["peer"] == false);
+}
+
 MTEST_MAIN

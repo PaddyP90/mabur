@@ -130,8 +130,8 @@ constexpr uint16_t CAP_TELEMETRY = 0x0002;
 constexpr uint16_t CAP_CALIBRATE = 0x0004;
 
 // DiscAck.chip_caps bit: VTX understands T_MAV and tunnels MAVLink both ways.
-// Display-grade only, as CAP_TELEMETRY: a GS lacking this bit just never
-// sends or expects a T_MAV frame.
+// Display-only, as CAP_TELEMETRY: the GS logs a peer without it once per
+// session and gates nothing on it.
 constexpr uint16_t CAP_MAVLINK = 0x0008;
 
 // VRX -> VTX feedback: the GS-authoritative operating point. Every field
