@@ -24,21 +24,27 @@ struct Value {
   std::string s;
 };
 
-// Reads row `idx` of cfgparam::kTable out of a loaded Config. `idx` must be
-// < cfgparam::kCount.
-Value read(const Config& cfg, size_t idx);
+// Reads row `idx` of cfgparam::kTable out of a loaded Config into *out.
+// False, *out untouched, when idx >= cfgparam::kCount — callers that drive
+// idx from a wire param_index (a later MAVLink-component task) must not be
+// able to read past the accessor table.
+bool read(const Config& cfg, size_t idx, Value* out);
 
 // Renders a Value as the TOML text for its row: "true"/"false", a decimal
 // int, a float that always contains a '.' or 'e', or a string quoted with
 // "...". Returns false (and leaves *out unspecified) for a string
-// containing '"', '\', or a control character — render_toml never escapes.
+// containing '"', '\', a control character (including DEL, 0x7f), or for
+// a non-finite float (NaN/Inf have no TOML spelling render_toml will
+// produce) — render_toml never escapes.
 bool render_toml(const Value& v, std::string* out);
 
 // Decodes the 128-byte wire buffer for row `idx`, given the sender's
 // MAV_PARAM_EXT_TYPE (as a plain number, see cfgparam::mav_type). False
-// (the caller should answer PARAM_ACK_VALUE_UNSUPPORTED) when mav_type
-// doesn't match the row's type, a Bool byte isn't 0 or 1, or a CUSTOM
-// buffer has no NUL within 128 bytes or a non-printable byte before it.
+// (the caller should answer PARAM_ACK_VALUE_UNSUPPORTED) when idx is out
+// of range, mav_type doesn't match the row's type, a Bool byte isn't 0 or
+// 1, a Real32 buffer decodes to NaN or Inf, or a CUSTOM buffer has no NUL
+// within 128 bytes or a non-printable byte (outside 0x20..0x7e, so DEL
+// 0x7f included) before it.
 bool decode_wire(size_t idx, uint8_t mav_type, const char wire[128], Value* out);
 
 // Encodes `v` for PARAM_EXT_VALUE/PARAM_EXT_ACK: little-endian in bytes

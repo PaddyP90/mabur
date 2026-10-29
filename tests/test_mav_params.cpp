@@ -17,27 +17,43 @@ std::string bundle_path() {
   return std::string(MABUR_BUNDLE_DIR) + "/mabur.default.toml";
 }
 
+// read() now returns bool (false for idx out of range); tests want the
+// Value itself and REQUIRE success is unremarkable noise at every call
+// site below, so wrap it once.
+Value rd(const Config& c, size_t idx) {
+  Value v;
+  REQUIRE(read(c, idx, &v));
+  return v;
+}
+
 }  // namespace
 
 TEST(reads_every_row_of_the_default_bundle) {
   Config c = load_config(bundle_path());
-  CHECK(read(c, 0).f == 1.0f);            // radio.wall_margin_db
-  CHECK(read(c, 1).b == true);            // radio.ldpc
-  CHECK(read(c, 2).i == 60);              // venc.fps
-  CHECK(read(c, 3).s == "1920x1080");     // venc.size
-  CHECK(read(c, 4).i == 4);               // venc.slices
-  CHECK(read(c, 5).i == 24000);           // encoder.bitrate_max_kbps
-  CHECK(std::fabs(read(c, 6).f - 0.65f) < 1e-6f);
-  CHECK(read(c, 7).b == true);            // record.enable
-  CHECK(read(c, 8).i == 40000 && read(c, 9).i == 60 && read(c, 10).s == "1920x1080");
-  CHECK(read(c, 11).b == false && read(c, 12).b == true);
+  CHECK(rd(c, 0).f == 1.0f);            // radio.wall_margin_db
+  CHECK(rd(c, 1).b == true);            // radio.ldpc
+  CHECK(rd(c, 2).i == 60);              // venc.fps
+  CHECK(rd(c, 3).s == "1920x1080");     // venc.size
+  CHECK(rd(c, 4).i == 4);               // venc.slices
+  CHECK(rd(c, 5).i == 24000);           // encoder.bitrate_max_kbps
+  CHECK(std::fabs(rd(c, 6).f - 0.65f) < 1e-6f);
+  CHECK(rd(c, 7).b == true);            // record.enable
+  CHECK(rd(c, 8).i == 40000 && rd(c, 9).i == 60 && rd(c, 10).s == "1920x1080");
+  CHECK(rd(c, 11).b == false && rd(c, 12).b == true);
 }
 
 TEST(rec_size_falls_back_to_venc_size_when_record_size_is_zero) {
   Config c = load_config(bundle_path());
   c.record.width = 0;
   c.record.height = 0;
-  CHECK(read(c, 10).s == read(c, 3).s);
+  CHECK(rd(c, 10).s == rd(c, 3).s);
+}
+
+TEST(read_rejects_idx_out_of_range) {
+  Config c = load_config(bundle_path());
+  Value v;
+  CHECK(!read(c, 13, &v));                    // cfgparam::kCount == 13
+  CHECK(!read(c, static_cast<size_t>(-1), &v));
 }
 
 TEST(render_toml_forms) {
@@ -49,6 +65,9 @@ TEST(render_toml_forms) {
   CHECK(render_toml(Value{Type::Str, false, 0, 0, "1280x720"}, &o) && o == "\"1280x720\"");
   CHECK(!render_toml(Value{Type::Str, false, 0, 0, "a\"b"}, &o));
   CHECK(!render_toml(Value{Type::Str, false, 0, 0, "a\nb"}, &o));
+  CHECK(!render_toml(Value{Type::Real32, false, 0, INFINITY}, &o));
+  CHECK(!render_toml(Value{Type::Real32, false, 0, -INFINITY}, &o));
+  CHECK(!render_toml(Value{Type::Real32, false, 0, NAN}, &o));
 }
 
 TEST(decode_wire_rejects_type_mismatch_and_bad_bytes) {
@@ -61,6 +80,20 @@ TEST(decode_wire_rejects_type_mismatch_and_bad_bytes) {
   std::memcpy(w, "1280x720", 9); CHECK(decode_wire(3, 11, w, &v) && v.s == "1280x720");
   std::memcpy(w, "12\x01", 4); CHECK(!decode_wire(3, 11, w, &v));
   int32_t x = 90; std::memcpy(w, &x, 4); CHECK(decode_wire(2, 6, w, &v) && v.i == 90);
+}
+
+TEST(decode_wire_rejects_non_finite_real32) {
+  char w[128] = {};
+  Value v;
+  float nan_v = NAN;
+  std::memcpy(w, &nan_v, 4);
+  CHECK(!decode_wire(6, 9, w, &v));  // ENC_AIRTIME REAL32, NaN
+  float inf_v = INFINITY;
+  std::memcpy(w, &inf_v, 4);
+  CHECK(!decode_wire(6, 9, w, &v));  // ENC_AIRTIME REAL32, +Inf
+  float ninf_v = -INFINITY;
+  std::memcpy(w, &ninf_v, 4);
+  CHECK(!decode_wire(6, 9, w, &v));  // ENC_AIRTIME REAL32, -Inf
 }
 
 TEST(encode_wire_round_trips) {

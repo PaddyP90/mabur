@@ -1,6 +1,7 @@
 #include "mav_params.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -81,7 +82,11 @@ bool is_control_or_quote(unsigned char c) {
 
 }  // namespace
 
-Value read(const Config& cfg, size_t idx) { return kAccessors[idx](cfg); }
+bool read(const Config& cfg, size_t idx, Value* out) {
+  if (idx >= cfgparam::kCount) return false;
+  *out = kAccessors[idx](cfg);
+  return true;
+}
 
 bool render_toml(const Value& v, std::string* out) {
   switch (v.type) {
@@ -92,6 +97,10 @@ bool render_toml(const Value& v, std::string* out) {
       *out = std::to_string(v.i);
       return true;
     case Type::Real32: {
+      // NaN/Inf have no TOML spelling %.9g would produce one anyway
+      // ("nan", "inf") and the ".0" append below would mangle it further
+      // ("inf.0") into something that doesn't even round-trip as a float.
+      if (!std::isfinite(v.f)) return false;
       // Shortest round-trip text; append ".0" when %g picked the integer
       // form, so the TOML value is never read back as an Int32.
       char buf[64];
@@ -135,6 +144,10 @@ bool decode_wire(size_t idx, uint8_t mav_type, const char wire[128], Value* out)
     case Type::Real32: {
       float v;
       std::memcpy(&v, wire, sizeof v);
+      // A wire buffer decoding to NaN/Inf can never have come from a
+      // legal config value (venc_cfg's rails, the bundle's %.9g text):
+      // treat it the same as any other malformed payload.
+      if (!std::isfinite(v)) return false;
       *out = Value{Type::Real32, false, 0, v};
       return true;
     }
