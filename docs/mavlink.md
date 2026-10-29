@@ -106,7 +106,14 @@ agent and TX threads.
   `param_count` 13 and `param_index` = the row. Values are read by loading
   the file with the boot loader (`mabur::load_config`) on every request,
   so a list shows a set made a moment ago or an ssh edit. A file that no
-  longer loads answers nothing and logs the loader's reason.
+  longer loads answers nothing and logs the loader's reason. A list
+  request that arrives while an earlier list's values are still queued
+  is answered by those values, not a second copy.
+- **Outbound queue.** At most 64 packets wait for the uplink; the cap
+  applies to every reply and the heartbeat alike. A packet that would
+  exceed it is dropped and counted in the `stats:` line's `drop`
+  (`docs/observability.md`), never one already queued; the ground app's
+  retry recovers it.
 - **Read.** By `param_index` (when not -1) or by `param_id`: one
   `PARAM_EXT_VALUE`. An unknown id or index gets no reply (the protocol
   has no negative read answer; the ground end times out) and is logged.

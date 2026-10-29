@@ -460,6 +460,51 @@ TEST(take_outbound_never_exceeds_600_bytes_and_never_splits_a_packet) {
   CHECK(c.outbound_packets() == cfgparam::kCount);
 }
 
+TEST(request_lists_coalesce_while_a_list_is_queued) {
+  ScratchBundle b;
+  auto c = make(b.path());
+  std::vector<uint8_t> payload;
+  const auto one = to_bytes(list_msg());
+  for (int i = 0; i < 100; ++i) payload.insert(payload.end(), one.begin(), one.end());
+  c.on_payload(payload.data(), payload.size());
+  CHECK(c.stats().rx_packets == 100);
+  CHECK(c.outbound_packets() <= kMavQueueCap);
+  CHECK(c.outbound_packets() == cfgparam::kCount);
+  CHECK(c.stats().list_coalesced == 99);
+  CHECK(c.stats().drop_queue_full == 0);
+  // Still coalesced after a partial drain; a fresh list once all are sent.
+  std::vector<uint8_t> out;
+  REQUIRE(c.take_outbound(&out) > 0);
+  feed(c, list_msg());
+  CHECK(c.stats().list_coalesced == 100);
+  auto msgs = drain(c);
+  CHECK(msgs.size() + parse_all(out).size() == cfgparam::kCount);
+  feed(c, list_msg());
+  CHECK(c.outbound_packets() == cfgparam::kCount);
+  CHECK(c.stats().list_coalesced == 100);
+}
+
+// The cap applies to every packet alike: once the queue is full, a new
+// heartbeat, value or set ack is dropped and counted; what is queued stays.
+TEST(outbound_queue_is_capped_and_drops_the_new_packet) {
+  ScratchBundle b;
+  auto c = make(b.path());
+  for (size_t i = 0; i < kMavQueueCap + 6; ++i) c.queue_heartbeat();
+  CHECK(c.outbound_packets() == kMavQueueCap);
+  CHECK(c.stats().drop_queue_full == 6);
+  feed(c, read_msg("VENC_FPS", -1));
+  CHECK(c.outbound_packets() == kMavQueueCap);
+  CHECK(c.stats().drop_queue_full == 7);
+  // A set on a full queue is still applied; only its ack is dropped.
+  feed(c, set_int("REC_FPS", 30));
+  CHECK(c.stats().sets_ok == 1);
+  CHECK(c.stats().drop_queue_full == 8);
+  CHECK(load_config(b.path()).record.fps == 30);
+  auto msgs = drain(c);
+  CHECK(msgs.size() == kMavQueueCap);
+  for (const auto& m : msgs) CHECK(m.msgid == MAVLINK_MSG_ID_HEARTBEAT);
+}
+
 TEST(heartbeat_fields) {
   ScratchBundle b;
   auto c = make(b.path());

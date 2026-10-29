@@ -88,10 +88,15 @@ void MavComponent::log(const std::string& line) const {
   if (log_) log_("[mav] " + line);
 }
 
-void MavComponent::queue(const Msg& m) {
+void MavComponent::queue(const Msg& m, bool list_value) {
+  if (queue_.size() >= kMavQueueCap) {
+    ++stats_.drop_queue_full;
+    return;
+  }
   uint8_t buf[MAVLINK_MAX_PACKET_LEN];
   const uint16_t n = mavlink_msg_to_send_buffer(buf, &m.m);
-  queue_.emplace_back(buf, buf + n);
+  queue_.push_back(Out{std::vector<uint8_t>(buf, buf + n), list_value});
+  if (list_value) ++list_queued_;
 }
 
 void MavComponent::on_payload(const uint8_t* bytes, size_t n) {
@@ -158,8 +163,10 @@ void MavComponent::queue_heartbeat() {
 
 int MavComponent::take_outbound(std::vector<uint8_t>* out) {
   int taken = 0;
-  while (!queue_.empty() && out->size() + queue_.front().size() <= rc::kMavMaxPayload) {
-    out->insert(out->end(), queue_.front().begin(), queue_.front().end());
+  while (!queue_.empty() && out->size() + queue_.front().bytes.size() <= rc::kMavMaxPayload) {
+    const Out& o = queue_.front();
+    out->insert(out->end(), o.bytes.begin(), o.bytes.end());
+    if (o.list_value) --list_queued_;
     queue_.pop_front();
     ++taken;
   }
@@ -176,7 +183,7 @@ void row_id(size_t idx, char id16[16]) {
 
 }  // namespace
 
-void MavComponent::queue_value(size_t idx, const Value& v) {
+void MavComponent::queue_value(size_t idx, const Value& v, bool list_value) {
   char id[16], wire[128];
   row_id(idx, id);
   mavparam::encode_wire(v, wire);
@@ -184,10 +191,14 @@ void MavComponent::queue_value(size_t idx, const Value& v) {
   mavlink_msg_param_ext_value_pack_chan(kSysId, kCompId, kChanDroneRx, &m.m, id, wire,
                                         cfgparam::mav_type(v.type), cfgparam::kCount,
                                         static_cast<uint16_t>(idx));
-  queue(m);
+  queue(m, list_value);
 }
 
 void MavComponent::handle_list() {
+  if (list_queued_ > 0) {
+    ++stats_.list_coalesced;
+    return;
+  }
   Config cfg;
   try {
     cfg = load_config(cfg_path_);
@@ -198,7 +209,7 @@ void MavComponent::handle_list() {
   for (size_t idx = 0; idx < cfgparam::kCount; ++idx) {
     Value v;
     mavparam::read(cfg, idx, &v);
-    queue_value(idx, v);
+    queue_value(idx, v, /*list_value=*/true);
   }
   log("list: " + std::to_string(cfgparam::kCount) + " values");
 }

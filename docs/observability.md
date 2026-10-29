@@ -1140,7 +1140,8 @@ T_MAV frames and the MAVLink 2 packets parsed out of them, `tx` the
 uplink T_MAV frames and the packets they carried (replies and the 1 Hz
 HEARTBEAT, sent only while a session is published), `drop` the frames
 that failed to parse plus the packets the component dropped (another
-target, an unhandled message, bad CRC, MAVLink 1, a partial), and
+target, an unhandled message, bad CRC, MAVLink 1, a partial, and a reply
+dropped because the 64-packet outbound queue was full), and
 `reject` the frames that parsed but failed the tag or the counter (these
 also raise Telem's `auth_reject`).
 

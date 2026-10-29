@@ -31,6 +31,15 @@
 // take_outbound into buffers of at most rc::kMavMaxPayload bytes. The
 // component itself does no timing.
 //
+// The outbound queue holds at most kMavQueueCap packets. The cap applies
+// to every packet alike (values, acks, status text, heartbeats): a packet
+// that would exceed it is dropped and counted, never one already queued,
+// and the ground app's own retry recovers it. A PARAM_EXT_REQUEST_LIST
+// that arrives while an earlier list's values are still queued is
+// coalesced into that list (counted, not answered again): the values on
+// their way already answer it, and a flooding sender can't make the
+// component reload the config per request.
+//
 // mabur/mav.h's helpers keep per-translation-unit channel state, so
 // mav_component.cpp is the drone's one TU that packs or parses MAVLink. It
 // parses on kChanDroneRx; that channel state is process-wide, so one
@@ -53,12 +62,18 @@ namespace mabur {
 // leaves the 1 Hz Telem and the OSD stream their airtime.
 constexpr uint64_t kMavUplinkMinMs = 50;
 
+// Outbound queue bound, in packets: room for several lists' worth of
+// replies, a few seconds of uplink at kMavUplinkMinMs.
+constexpr size_t kMavQueueCap = 64;
+
 struct MavComponentStats {
   uint64_t rx_packets = 0,       // good MAVLink 2 packets, before routing
       drop_not_for_us = 0,       // another target, or a message this component doesn't handle
       drop_bad_packet = 0,       // bad CRC, MAVLink 1, a header the parser rejects, a partial
       sets_ok = 0,               // PARAM_EXT_SET acked ACCEPTED
-      sets_refused = 0;          // PARAM_EXT_SET acked VALUE_UNSUPPORTED or FAILED
+      sets_refused = 0,          // PARAM_EXT_SET acked VALUE_UNSUPPORTED or FAILED
+      drop_queue_full = 0,       // an outbound packet dropped at kMavQueueCap
+      list_coalesced = 0;        // a REQUEST_LIST answered by a list still queued
 };
 
 class MavComponent {
@@ -89,13 +104,19 @@ class MavComponent {
   void handle_list();
   void handle_read(const char id16[16], int16_t index);
   void handle_set(const char id16[16], const char value[128], uint8_t type);
-  void queue(const Msg& m);
-  void queue_value(size_t idx, const mavparam::Value& v);   // a PARAM_EXT_VALUE for row idx
+  void queue(const Msg& m, bool list_value = false);
+  // A PARAM_EXT_VALUE for row idx; list_value marks one queued by a list.
+  void queue_value(size_t idx, const mavparam::Value& v, bool list_value = false);
   void log(const std::string& line) const;
 
   std::string cfg_path_;
   std::function<void(const std::string&)> log_;
-  std::deque<std::vector<uint8_t>> queue_;
+  struct Out {
+    std::vector<uint8_t> bytes;
+    bool list_value;   // a PARAM_EXT_VALUE queued by handle_list
+  };
+  std::deque<Out> queue_;
+  size_t list_queued_ = 0;   // list values in queue_
   MavComponentStats stats_;
 };
 

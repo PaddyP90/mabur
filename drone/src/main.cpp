@@ -1853,7 +1853,8 @@ int run_real_mode(const Config& cfg, uint8_t start_ch, const std::string& cfg_pa
       }
       const MavComponentStats& cs = comp.stats();
       mav_rx_packets.store(cs.rx_packets, std::memory_order_relaxed);
-      mav_drop.store(bad_parse + cs.drop_not_for_us + cs.drop_bad_packet, std::memory_order_relaxed);
+      mav_drop.store(bad_parse + cs.drop_not_for_us + cs.drop_bad_packet + cs.drop_queue_full,
+                     std::memory_order_relaxed);
       mav_reject.store(rejected, std::memory_order_relaxed);
       std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
