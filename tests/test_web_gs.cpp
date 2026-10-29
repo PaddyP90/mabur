@@ -10,6 +10,7 @@
 #include "fake_link_card.h"
 #include "mtest.h"
 #include "web_gs.h"
+#include "mabur/mav.h"
 #include "mabur/msp_dp.h"
 #include "mabur/msp_source.h"
 #include "osd_screen.h"
@@ -45,6 +46,24 @@ mabur::node::RxBody telem_body(uint16_t tlm_seq, uint64_t mono_us) {
   mabur::rc::Telem t;
   t.tlm_seq = tlm_seq;
   return rc_body(mabur::rc::pack_telem(t), mono_us);
+}
+// A wire-exact MAVLink 2 heartbeat (as the drone's component would send),
+// for feeding the web core's T_MAV rc-sink branch.
+std::vector<uint8_t> mav_heartbeat_bytes(uint8_t sysid, uint8_t compid) {
+  mavlink_message_t msg;
+  mavlink_msg_heartbeat_pack(sysid, compid, &msg, MAV_TYPE_GCS, MAV_AUTOPILOT_INVALID, 0, 0,
+                             MAV_STATE_ACTIVE);
+  uint8_t buf[MAVLINK_MAX_PACKET_LEN];
+  const uint16_t n = mavlink_msg_to_send_buffer(buf, &msg);
+  return std::vector<uint8_t>(buf, buf + n);
+}
+// An untagged T_MAV frame (drone -> GS layout) carrying one packet.
+mabur::node::RxBody mav_body(const std::vector<uint8_t>& payload, uint32_t counter,
+                              uint64_t mono_us) {
+  mabur::rc::Mav m;
+  m.counter = counter;
+  m.payload = payload;
+  return rc_body(mabur::rc::pack_mav(m, /*tagged=*/false), mono_us);
 }
 // One full DisplayPort screen: CLEAR, optional SET_OPTIONS (hd_option),
 // `text` at row 0 col 0, then DRAW_SCREEN unless `finish` is false.
@@ -499,6 +518,48 @@ TEST(idr_requests_are_noop_in_spotter) {
   g.set_idr_requests(4);   // must not crash; there is no send path
   CHECK(g.vrx() == nullptr);
   CHECK(g.sends() == 0);
+}
+
+// The T_MAV rc-sink branch (mav_tunnel.h, drone -> GS layout, untagged):
+// one whole heartbeat packet in one frame reaches mav_take_inbound byte
+// for byte, and nothing is left queued after it is drained.
+TEST(mav_inbound_frame_delivers_whole_packet_to_take) {
+  Io io;
+  io.on_au = [](Au&&) {};
+  io.send = [](const std::vector<uint8_t>&) {};
+  WebGs g(cfg(), Mode::Gs, 136, 40, {}, 0, io);
+  REQUIRE(g.mav() != nullptr);
+  const auto hb = mav_heartbeat_bytes(1, 191);
+  const uint64_t t = 1'000'000;
+  g.on_rx(mav_body(hb, 1, t));
+  g.tick(t);
+  CHECK(g.mav()->stats().rx_frames == 1);
+  CHECK(g.mav()->stats().rx_packets == 1);
+  uint8_t buf[256];
+  const size_t n = g.mav_take_inbound(buf, sizeof buf);
+  REQUIRE(n == hb.size());
+  CHECK(std::vector<uint8_t>(buf, buf + n) == hb);
+  CHECK(g.mav_take_inbound(buf, sizeof buf) == 0);   // nothing left queued
+}
+
+// Outbound bytes pushed before any session exists are parsed and dropped
+// at flush() -- the tunnel's own unlinked-drop counter, read through the
+// test seam. The rendezvous beacon itself still goes out (unrelated to
+// MAVLink), so the check is "no T_MAV frame left", not "nothing sent".
+TEST(mav_outbound_drops_while_unlinked) {
+  std::vector<std::vector<uint8_t>> sent;
+  Io io;
+  io.on_au = [](Au&&) {};
+  io.send = [&](const std::vector<uint8_t>& b) { sent.push_back(b); };
+  WebGs g(cfg(), Mode::Gs, 136, 40, {}, 0, io);
+  REQUIRE(g.mav() != nullptr);
+  CHECK(!g.stats().session);
+  const auto hb = mav_heartbeat_bytes(255, 190);
+  g.mav_push_outbound(hb.data(), hb.size());
+  const uint64_t t = 1'000'000;
+  g.tick(t);   // runs set_session({}) + flush() while unlinked
+  CHECK(g.mav()->stats().drop_unlinked == 1);
+  for (auto& s : sent) CHECK(mabur::rc::frame_type(s.data(), s.size()) != mabur::rc::T_MAV);
 }
 
 // A spotter's link setting is just the configured width (the drone's

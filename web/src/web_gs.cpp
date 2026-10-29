@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <stdexcept>
 #include <thread>
 #include <utility>
@@ -144,6 +145,20 @@ WebGs::WebGs(const maburgs::Config& cfg, Mode mode, uint8_t start_ch, int width,
     vrx_ = std::make_unique<maburgs::VrxController>(vc);
     slot_ = std::make_unique<maburgs::RcfSlotter>(
         maburgs::RcfSlotCfg{cfg.link.rcf_slot_hold_ms, 100, 2, 3, 1});
+    // MAVLink tunnel (mav_tunnel.h): leaves like an RCF, offered to the
+    // same slotter and sent directly only when the slotter has nothing
+    // held. Inbound packets land in mav_in_/mav_in_lens_ for the page to
+    // drain (mav_take_inbound).
+    mav_ = std::make_unique<maburgs::MavTunnel>(
+        cfg.link.key,
+        [this](std::vector<uint8_t> frame) {
+          maburgs::SlotFrame sf{std::move(frame), 0, 0, false};
+          if (!slot_->offer(sf, now_us_ / 1000, false)) send_(sf);
+        },
+        [this](const uint8_t* b, size_t n) {
+          mav_in_.insert(mav_in_.end(), b, b + n);
+          mav_in_lens_.push_back(n);
+        });
     if (cfg.link.nack.enable) {
       nack_ = std::make_unique<mabur::NackTracker>(cfg.link.nack);
       nack_lookback_ = static_cast<uint32_t>(cfg.link.nack.lookback);
@@ -186,6 +201,10 @@ WebGs::WebGs(const maburgs::Config& cfg, Mode mode, uint8_t start_ch, int width,
                       {f.body_mono_us, f.q_ms, f.enc_us, f.air_ms, f.sw_seq, true, f.retx});
   });
   agg_.set_rc_sink([this](uint8_t, const std::vector<uint8_t>& f, uint64_t us) {
+    if (mav_ && mabur::rc::frame_type(f.data(), f.size()) == mabur::rc::T_MAV) {
+      mav_->on_rc_frame(f.data(), f.size());
+      return;
+    }
     if (mabur::rc::frame_type(f.data(), f.size()) == mabur::rc::T_TELEM) {
       if (auto t = mabur::rc::parse_telem(f.data(), f.size())) {
         telem_ = t;
@@ -444,6 +463,14 @@ void WebGs::tick(uint64_t now_us) {
     poll_nack_(now_ms_u);
     drain_nack_window_(now_ms_u);
   }
+  if (mav_) {
+    // Tag outbound frames under the live session only: session_ctx() keeps
+    // reporting the held nonce while BEACONING, so an unlinked tick tags
+    // nothing and the tunnel drops (and counts) whatever is queued.
+    const bool mav_linked = vrx_->link_state() == maburgs::VrxState::SESSION;
+    mav_->set_session(mav_linked ? vrx_->session_ctx() : mabur::rc::TagCtx{});
+    mav_->flush();
+  }
   maburgs::LinkHealthInputs in;
   if (vrx_) {
     in.op = vrx_->cur_op();
@@ -506,6 +533,25 @@ void WebGs::set_vtx_rec(bool on) {
 void WebGs::set_idr_requests(uint32_t n) {
   idr_req_ = n;
   if (vrx_) vrx_->set_idr_epoch(static_cast<uint8_t>(n));
+}
+
+void WebGs::mav_push_outbound(const uint8_t* p, size_t n) {
+  if (mav_) mav_->push_outbound(p, n);
+}
+
+size_t WebGs::mav_take_inbound(uint8_t* out, size_t cap) {
+  size_t copied = 0, n_pkts = 0;
+  for (const size_t len : mav_in_lens_) {
+    if (copied + len > cap) break;   // never split a packet across two calls
+    copied += len;
+    ++n_pkts;
+  }
+  if (copied) {
+    std::memcpy(out, mav_in_.data(), copied);
+    mav_in_.erase(mav_in_.begin(), mav_in_.begin() + static_cast<ptrdiff_t>(copied));
+    mav_in_lens_.erase(mav_in_lens_.begin(), mav_in_lens_.begin() + static_cast<ptrdiff_t>(n_pkts));
+  }
+  return copied;
 }
 
 Stats WebGs::stats() const {
