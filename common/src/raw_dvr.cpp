@@ -19,8 +19,34 @@ void RawDvr::start(const std::string& path, int width, int height, int fragment_
   height_ = height;
   fragment_ms_ = fragment_ms;
   opened_ = false;
+  width_open_ = 0;
+  height_open_ = 0;
   err_ = Err::None;
   state_ = State::WaitSync;
+  rolls_ = 0;
+  last_sealed_bytes_ = 0;
+}
+
+void RawDvr::set_next_sink(NextSink fn) { next_sink_ = std::move(fn); }
+
+bool RawDvr::roll(int w, int h) {
+  last_sealed_bytes_ = mux_.bytes_written();
+  mux_.close();
+  opened_ = false;
+  std::string name;
+  std::unique_ptr<DvrSink> sink = next_sink_ ? next_sink_(&name) : nullptr;
+  if (!sink || !mux_.open(std::move(sink), params_.hvcc(), w, h, fragment_ms_) || !mux_.ok()) {
+    mux_.close();
+    state_ = State::Error;
+    err_ = Err::Open;
+    return false;
+  }
+  path_ = name;
+  width_open_ = w;
+  height_open_ = h;
+  opened_ = true;
+  ++rolls_;
+  return true;
 }
 
 void RawDvr::start(std::unique_ptr<DvrSink> sink, int width, int height, int fragment_ms) {
@@ -62,7 +88,19 @@ void RawDvr::feed(const uint8_t* au, size_t n, uint32_t pts_us, bool complete) {
       return;
     }
     opened_ = true;
+    width_open_ = w;
+    height_open_ = h;
     state_ = State::Recording;
+  } else if (opened_ && key) {
+    // The file's header carries one size; a coded-size change (the drone
+    // picked a new camera mode mid-session) can only be served by sealing
+    // this file and starting the next one, cut right at the IRAP that
+    // changed the SPS. Changed VPS/SPS/PPS bytes at the SAME size are not a
+    // roll -- the live GDR encoder rewrites them on every refresh start.
+    int w = 0, h = 0;
+    if (params_.sps_dimensions(&w, &h) && (w != width_open_ || h != height_open_)) {
+      if (!roll(w, h)) return;
+    }
   }
   mux_.write_sample(au, n, pts_us, key);
   if (!mux_.ok()) {  // card/quota full: keep what was written, stop feeding

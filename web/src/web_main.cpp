@@ -405,11 +405,35 @@ int live_loop(const LiveOpts& o, const maburgs::Config& cfg, uint8_t ch, int wid
   // page hand-off.
   mabur::RawDvr dvr;
   std::string lrec_name;       // the armed/last recording's file name
+  std::string lrec_base_name;  // the name it was armed with, before any roll suffix
+  uint32_t lrec_roll_n = 0;    // roll suffix counter, reset whenever a recording (re)arms
   bool lrec_armed = false;     // a recording is armed or open and not yet reported
   int lrec_err = 0;            // last reported code (3 = no OPFS)
   // lrec_err stays set after an error, so the stats show state 3 until the
   // next start: the UI keeps REC! until the next press.
   uint32_t lrec_seq = 0;
+#ifdef WEBGS_PAGE
+  // A coded-size change mid-recording seals the current OPFS file -- reported
+  // the same way the record button's own stop reports a seal -- and rolls to
+  // <base>-r<N>.mp4, N counting up within this recording; recFileName (the
+  // page's collision check) never produces that suffix, so it can never
+  // collide with a later recording's own name.
+  dvr.set_next_sink([&](std::string* name) {
+    report_rec_closed(lrec_name, dvr.last_sealed_bytes(), 0);
+    std::string base = lrec_base_name;
+    const std::string suffix = ".mp4";
+    if (base.size() >= suffix.size() &&
+        base.compare(base.size() - suffix.size(), suffix.size(), suffix) == 0) {
+      base.resize(base.size() - suffix.size());
+    }
+    const std::string rolled = base + "-r" + std::to_string(++lrec_roll_n) + ".mp4";
+    *name = rolled;
+    lrec_name = rolled;
+    std::unique_ptr<mabur::DvrSink> sink;
+    if (auto f = webgs::OpfsFile::open(rolled)) sink = std::make_unique<OpfsSink>(std::move(f));
+    return sink;
+  });
+#endif
   auto seal_local_rec = [&]() {
     if (!lrec_armed) return;
     const int err = lrec_err_code(dvr);   // read before stop(): Error is sticky
@@ -496,6 +520,8 @@ int live_loop(const LiveOpts& o, const maburgs::Config& cfg, uint8_t ch, int wid
           report_rec_closed(name, 0, 3);
         } else if (on) {
           lrec_name = name;
+          lrec_base_name = name;
+          lrec_roll_n = 0;
           lrec_err = 0;
 #ifdef WEBGS_PAGE
           // Created now, from the loop (the open awaits through ASYNCIFY);

@@ -3,6 +3,7 @@
 #include <iterator>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "mabur/raw_dvr.h"
@@ -17,6 +18,84 @@ std::string scratch(const char* name) { return std::string(MABUR_TEST_SCRATCH_DI
 bool exists(const std::string& p) {
   std::ifstream f(p, std::ios::binary);
   return f.good();
+}
+
+std::vector<uint8_t> read_whole_file(const std::string& path) {
+  std::ifstream f(path, std::ios::binary);
+  return std::vector<uint8_t>((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+}
+
+// ---- minimal box walker (mirrors tests/test_dvr_mux.cpp's) --------------
+struct Box {
+  std::string type;
+  size_t off, size;
+  size_t payload_off() const { return off + 8; }
+};
+
+uint32_t read_u32(const std::vector<uint8_t>& f, size_t p) {
+  return (static_cast<uint32_t>(f[p]) << 24) | (static_cast<uint32_t>(f[p + 1]) << 16) |
+         (static_cast<uint32_t>(f[p + 2]) << 8) | static_cast<uint32_t>(f[p + 3]);
+}
+
+uint16_t read_u16(const std::vector<uint8_t>& f, size_t p) {
+  return static_cast<uint16_t>((f[p] << 8) | f[p + 1]);
+}
+
+std::vector<Box> parse_boxes(const std::vector<uint8_t>& f, size_t begin, size_t end) {
+  std::vector<Box> out;
+  size_t p = begin;
+  while (p + 8 <= end) {
+    const uint32_t sz = read_u32(f, p);
+    if (sz < 8 || p + sz > end) break;
+    out.push_back(Box{std::string(reinterpret_cast<const char*>(&f[p + 4]), 4), p, sz});
+    p += sz;
+  }
+  return out;
+}
+
+const Box* find(const std::vector<Box>& boxes, const char* type) {
+  for (const Box& b : boxes)
+    if (b.type == type) return &b;
+  return nullptr;
+}
+
+// Walks moov/trak/mdia/minf/stbl/stsd down to the hvc1 VisualSampleEntry and
+// reads its width/height fields -- the coded size the moov was written with.
+std::pair<int, int> moov_size_of(const std::string& path) {
+  const std::vector<uint8_t> f = read_whole_file(path);
+  const std::vector<Box> top = parse_boxes(f, 0, f.size());
+  const Box* moov = find(top, "moov");
+  if (!moov) return {0, 0};
+  const Box* trak = find(parse_boxes(f, moov->payload_off(), moov->off + moov->size), "trak");
+  if (!trak) return {0, 0};
+  const Box* mdia = find(parse_boxes(f, trak->payload_off(), trak->off + trak->size), "mdia");
+  if (!mdia) return {0, 0};
+  const Box* minf = find(parse_boxes(f, mdia->payload_off(), mdia->off + mdia->size), "minf");
+  if (!minf) return {0, 0};
+  const Box* stbl = find(parse_boxes(f, minf->payload_off(), minf->off + minf->size), "stbl");
+  if (!stbl) return {0, 0};
+  const Box* stsd = find(parse_boxes(f, stbl->payload_off(), stbl->off + stbl->size), "stsd");
+  if (!stsd) return {0, 0};
+  // stsd is a FullBox with an entry_count before its entries.
+  const Box* hvc1 = find(parse_boxes(f, stsd->payload_off() + 8, stsd->off + stsd->size), "hvc1");
+  if (!hvc1) return {0, 0};
+  // SampleEntry(8) + VisualSampleEntry fixed fields up to width/height at 24/26.
+  return {read_u16(f, hvc1->payload_off() + 24), read_u16(f, hvc1->payload_off() + 26)};
+}
+
+// Total sample count across every moof/traf/trun in the file.
+int samples_in(const std::string& path) {
+  const std::vector<uint8_t> f = read_whole_file(path);
+  int total = 0;
+  for (const Box& b : parse_boxes(f, 0, f.size())) {
+    if (b.type != "moof") continue;
+    const Box* traf = find(parse_boxes(f, b.payload_off(), b.off + b.size), "traf");
+    if (!traf) continue;
+    const Box* trun = find(parse_boxes(f, traf->payload_off(), traf->off + traf->size), "trun");
+    if (!trun) continue;
+    total += static_cast<int>(read_u32(f, trun->payload_off() + 4));
+  }
+  return total;
 }
 
 void nal(std::vector<uint8_t>& au, std::initializer_list<uint8_t> bytes) {
@@ -45,6 +124,49 @@ std::vector<uint8_t> param_au(uint8_t tag) {
 std::vector<uint8_t> idr_au(uint8_t tag) {
   std::vector<uint8_t> au = param_au(tag);
   au[au.size() - 4] = 0x26;                       // TRAIL_R slice -> IDR_W_RADL
+  return au;
+}
+
+// Named for the size-change tests below: param_au()/idr_au() already encode
+// 1280x720 (checked against HevcParams::sps_dimensions in
+// size_change_at_irap_rolls_to_the_next_sink).
+std::vector<uint8_t> idr_au_720(uint8_t tag) { return idr_au(tag); }
+
+// Same PPS content as param_au()/idr_au(), at a different coded size (the
+// vendored 1920x1080 x265 SPS from test_hevc_params.cpp's kSps1080).
+std::vector<uint8_t> param_au_1080(uint8_t tag) {
+  std::vector<uint8_t> au;
+  nal(au, {0x40, 0x01, 0x0c, 0x01, 0xff, 0xff});  // VPS (content irrelevant to RawDvr)
+  au.insert(au.end(), {0, 0, 1});
+  const uint8_t sps[] = {0x42, 0x01, 0x01, 0x01, 0x60, 0x00, 0x00, 0x03, 0x00, 0x90, 0x00, 0x00,
+                         0x03, 0x00, 0x00, 0x03, 0x00, 0x7b, 0xa0, 0x03, 0xc0, 0x80, 0x10, 0xe5,
+                         0x96, 0x56, 0x69, 0x24, 0xca, 0xf0, 0x16, 0x80, 0x80, 0x00, 0x00, 0x03,
+                         0x00, 0x80, 0x00, 0x00, 0x1e, 0x04};
+  au.insert(au.end(), std::begin(sps), std::end(sps));
+  nal(au, {0x44, 0x01, 0xc1, 0x72});              // PPS
+  nal(au, {0x02, 0x01, tag, tag});                // TRAIL_R
+  return au;
+}
+
+std::vector<uint8_t> idr_au_1080(uint8_t tag) {
+  std::vector<uint8_t> au = param_au_1080(tag);
+  au[au.size() - 4] = 0x26;                       // TRAIL_R slice -> IDR_W_RADL
+  return au;
+}
+
+// Same size as idr_au_720(), different PPS bytes (the GDR encoder rewrites
+// parameter sets on every refresh start): must never roll on its own.
+std::vector<uint8_t> idr_au_720_other_pps(uint8_t tag) {
+  std::vector<uint8_t> au;
+  nal(au, {0x40, 0x01, 0x0c, 0x01, 0xff, 0xff});  // VPS
+  au.insert(au.end(), {0, 0, 1});
+  const uint8_t sps[] = {0x42, 0x01, 0x01, 0x01, 0x60, 0x00, 0x00, 0x03, 0x00, 0x90, 0x00, 0x00,
+                         0x03, 0x00, 0x00, 0x03, 0x00, 0x78, 0xa0, 0x02, 0x80, 0x80, 0x2d, 0x16,
+                         0x59, 0x59, 0xa4, 0x93, 0x2b, 0xc0, 0x5a, 0x02, 0x00, 0x00, 0x03, 0x00,
+                         0x02, 0x00, 0x00, 0x03, 0x00, 0x78, 0x10};
+  au.insert(au.end(), std::begin(sps), std::end(sps));
+  nal(au, {0x44, 0x01, 0xc1, 0x73});              // PPS, differs from idr_au_720's last byte
+  nal(au, {0x26, 0x01, tag, tag});                // IDR_W_RADL
   return au;
 }
 
@@ -309,6 +431,83 @@ TEST(start_while_recording_seals_previous_file) {
   CHECK(d.err() == RawDvr::Err::None);
   std::ifstream f(a, std::ios::binary | std::ios::ate);
   CHECK(f.good() && f.tellg() > 0);     // a was flushed and closed
+}
+
+// ---- roll on a coded-size change -----------------------------------------
+
+TEST(size_change_at_irap_rolls_to_the_next_sink) {
+  // Confirm the vendored SPS bytes parse to the sizes the rest of this test
+  // relies on, rather than trusting the comment above param_au_1080().
+  {
+    mabur::HevcParams hp720;
+    const auto a720 = param_au(1);
+    hp720.feed(a720.data(), a720.size());
+    int w = 0, h = 0;
+    REQUIRE(hp720.sps_dimensions(&w, &h));
+    REQUIRE(w == 1280 && h == 720);
+
+    mabur::HevcParams hp1080;
+    const auto a1080 = param_au_1080(1);
+    hp1080.feed(a1080.data(), a1080.size());
+    REQUIRE(hp1080.sps_dimensions(&w, &h));
+    REQUIRE(w == 1920 && h == 1080);
+  }
+
+  const std::string roll1 = scratch("roll1.mp4"), roll2 = scratch("roll2.mp4");
+  std::remove(roll1.c_str());
+  std::remove(roll2.c_str());
+  RawDvr d;
+  int calls = 0;
+  d.set_next_sink([&](std::string* name) {
+    ++calls;
+    *name = roll2;
+    return mabur::open_file_sink(*name);
+  });
+  d.start(roll1, 0, 0);
+  feed(d, idr_au_720(1), 0);
+  feed(d, p_au(2), 16667);
+  feed(d, idr_au_1080(3), 33333);       // size changes: rolls before this sample is written
+  feed(d, p_au(4), 50000);
+  CHECK(calls == 1);
+  CHECK(d.rolls() == 1);
+  CHECK(d.path() == roll2);
+  d.stop();
+  CHECK(exists(roll1));
+  CHECK(exists(roll2));
+  CHECK(moov_size_of(roll1) == std::make_pair(1280, 720));
+  CHECK(moov_size_of(roll2) == std::make_pair(1920, 1080));
+  CHECK(samples_in(roll2) == 2);         // the 1080 IDR and its P
+}
+
+TEST(changed_parameter_sets_at_the_same_size_do_not_roll) {
+  const std::string path = scratch("rawdvr_same_size.mp4");
+  std::remove(path.c_str());
+  RawDvr d;
+  int calls = 0;
+  d.set_next_sink([&](std::string* name) {
+    ++calls;
+    *name = scratch("rawdvr_same_size_next.mp4");
+    return mabur::open_file_sink(*name);
+  });
+  d.start(path, 0, 0);
+  feed(d, idr_au_720(1), 0);
+  feed(d, idr_au_720_other_pps(2), 16667);  // new PPS bytes, same 1280x720
+  CHECK(d.rolls() == 0);
+  CHECK(calls == 0);
+  CHECK(d.state() != RawDvr::State::Error);
+  d.stop();
+}
+
+TEST(roll_without_a_next_sink_is_an_open_error) {
+  const std::string path = scratch("rawdvr_noroll.mp4");
+  std::remove(path.c_str());
+  RawDvr d;  // no set_next_sink
+  d.start(path, 0, 0);
+  feed(d, idr_au_720(1), 0);
+  feed(d, idr_au_1080(2), 16667);        // size change, nowhere to roll to
+  CHECK(d.state() == RawDvr::State::Error);
+  CHECK(d.err() == RawDvr::Err::Open);
+  d.stop();
 }
 
 MTEST_MAIN

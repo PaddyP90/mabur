@@ -20,7 +20,10 @@ export function recFileName(date, existing) {
   const p = (x) => String(x).padStart(2, '0');
   const base = `mabur-${date.getFullYear()}${p(date.getMonth() + 1)}${p(date.getDate())}`
     + `-${p(date.getHours())}${p(date.getMinutes())}${p(date.getSeconds())}`;
-  const have = new Set(existing);
+  // -rN.mp4 is a roll's own file (the core appends it to an armed
+  // recording's name on a coded-size change) -- never a collision to dodge
+  // when picking a new recording's name.
+  const have = new Set(existing.filter((n) => !/-r\d+\.mp4$/.test(n)));
   if (!have.has(`${base}.mp4`)) return `${base}.mp4`;
   for (let i = 2; ; i++) if (!have.has(`${base}-${i}.mp4`)) return `${base}-${i}.mp4`;
 }
