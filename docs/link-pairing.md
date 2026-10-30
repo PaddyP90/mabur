@@ -81,7 +81,10 @@ its CRC; the drone-to-GS frames stay untagged:
 - **DISC_ACK** (drone to GS): carries u32 `vtx_nonce` and u8 `flags` (bit0 =
   `kAckKeyMismatch`, `0x01`). Unauthenticated — the drone has nothing of
   the GS's to prove yet, and a forged ack can only confuse a display, not
-  move the aircraft (see "Not defended").
+  move the aircraft (see "Not defended"). `chip_caps` carries `CAP_MAVLINK`
+  (`0x0008`) when the drone understands T_MAV. It is display-only: the GS
+  logs `maburgs: mavlink: drone lacks CAP_MAVLINK` once per session when the
+  bit is missing and gates nothing on it.
 - **RCF** (GS to drone): tagged over the frame bytes
   plus `vrx_nonce ‖ vtx_nonce ‖ seq32` (`TagCtx`) — session-bound, not
   just key-bound.
@@ -93,6 +96,13 @@ its CRC; the drone-to-GS frames stay untagged:
   (`RcAgent::check_nack` → `verify_session_tagged` +
   `accept_nack_counter`, on the RX thread); a tag or counter failure sets
   `auth_reject`, a parse failure does not.
+- **MAV** (both directions, carries one or more opaque MAVLink packets): GS to drone
+  is tagged, same session-bound `TagCtx` as NACK, with the request's own
+  `counter` as `seq32` under the same accept-only-greater rule, on its own
+  counter state (`RcAgent::check_mav` → `verify_session_tagged` +
+  `accept_mav_counter`, on the MAV thread); a tag or counter failure sets
+  `auth_reject`, a parse failure does not. Drone to GS is untagged, like
+  Telem.
 - **Telem** (drone to GS): flags bit1 is `kTelemAuthReject`
   (`0x02`) — at least one control frame failed verification this
   telemetry period. (Bit1 was `radio_rx_ok` before the 2026-09-30 telem
@@ -102,11 +112,12 @@ its CRC; the drone-to-GS frames stay untagged:
 `rc::verify_control(buf, len, key, ctx)` is the one place a tag is
 checked — on the drone, for DISC/RCF on the agent thread, for
 CAL_CMD/CAL_RESULT on the TX writer thread (`RcAgent::verify_cal_frame`)
-and for NACK on the RX thread. It finds the tag at the frame's
+for NACK on the RX thread and for MAV on the MAV thread. It finds the tag at the frame's
 **structural** offset, derived from the type (`DISC_LEN`, `RCF_HEAD_LEN`,
-`kCalResultLen`, `kCalCmdFixedLen + n_windows * 4`, or
-`kNackFixedLen + n * kNackEntryLen`), never at `len - 10`: on hardware the
-drone's RC body still carries devourer's trailing 4-byte 802.11 FCS
+`kCalResultLen`, `kCalCmdFixedLen + n_windows * 4`,
+`kNackFixedLen + n * kNackEntryLen`, or `kMavFixedLen + len16`), never at
+`len - 10`: on hardware the drone's RC body still carries devourer's
+trailing 4-byte 802.11 FCS
 (`Packet.Data`), and bytes past the CRC are ignored exactly as `parse_*`
 ignores them. `common/include/mabur/siphash.h` + `common/src/siphash.cpp`
 are the primitive — SipHash-2-4, 128-bit key, 64-bit output, no library,

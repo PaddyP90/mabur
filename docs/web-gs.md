@@ -1117,6 +1117,27 @@ overlay loader) and `web/tests/{config,view}.test.mjs`. The page requests
 no IDR on a truncated AU (`Gate.onAu` → `skip: 'truncated'`). Bench record
 (USB, CPE relay, browser): `docs/findings/2026-10-07-web-gs-nack-bench.md`.
 
+## MAVLink seam
+
+The web core owns one `MavTunnel` (`gs/src/mav_tunnel.h`) in GS mode, wired
+exactly like `maburgs`'s: tagged under the live session only, flushed once
+per `tick()`, sent through the same `RcfSlotter` as RCFs. Two
+`EMSCRIPTEN_KEEPALIVE` exports move raw packet bytes across the page/core
+thread boundary, both ways, with no parsing on either side of the seam:
+`webgs_mav_push(p, n)` queues bytes from a local MAVLink peer for the core
+to parse and tunnel to the drone (0 if the core is not running), and
+`webgs_mav_take(out, cap)` pops one whole packet (drone -> local peer) per
+call, up to `cap` bytes -- never split, and never more than one packet per
+call, so a caller loops it until it returns 0 to drain everything queued. A
+`cap` of at least `MAVLINK_MAX_PACKET_LEN` (~280 B) always succeeds; a
+smaller one just leaves a too-big packet queued. The inbound side sits in a
+bounded ring (`web/src/mav_ring.h`, 64 KiB): there is no JS parser and no UI
+for this yet, so nothing may ever call `webgs_mav_take`, and the drone's
+once-a-second heartbeat would otherwise grow an unbounded buffer for the
+page's whole session -- the ring drops the oldest queued packets instead. A
+page that wants to speak MAVLink pushes/pulls bytes through these two calls
+itself.
+
 ## Colour correction
 
 The drone flies the colortrans sensor file, which flattens the picture on

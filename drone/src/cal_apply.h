@@ -25,46 +25,23 @@
 //      whole kit exists to prevent, arriving through the back door, so it
 //      is checked explicitly and refused loudly (KeyNotFound) rather than
 //      left to slip through.
-//   3. write "<path>.new" + fsync -- a scratch file, not a publish. `path`
-//      itself is not touched yet.
-//   4. verify "<path>.new" with mabur::load_config (drone/src/config.h),
-//      the SAME function maburd boots with -- not mabur::toml::parse_toml_file.
-//      parse_toml_file only proves the bytes are syntactically valid TOML;
-//      everything that actually fails a boot -- unknown-key rejection,
-//      every per-section range/type check -- lives inside load_config,
-//      past that parse. Verifying with anything weaker would let a file
-//      through here that maburd then refuses, which is exactly the
-//      scenario this whole file exists to prevent. On failure, the
-//      scratch file is discarded and `path` was never touched.
-//   5. back up -- copy the original to "<path>.pre-cal" (the repo's
-//      ".pre-*" rollback convention), now purely an operator's undo copy,
-//      since nothing downstream of step 4 can produce a `path` that fails
-//      to load. Written through the same write-then-rename primitive as
-//      everything else, so a mid-write failure can't destroy the PREVIOUS
-//      session's rollback copy while producing nothing usable in its place.
-//   6. rename "<path>.new" onto `path` -- publishing bytes already proven
-//      loadable by the function that will load them for real.
+//   3-6. publish_config (config_write.h): write "<path>.new" + fsync,
+//      verify it with mabur::load_config -- the same function maburd boots
+//      with -- back the original up to "<path>.pre-cal", then rename the
+//      verified candidate into place. config_write.h's header explains why
+//      verification happens before publishing and why the backup goes
+//      through write-then-rename.
 //
-// Verifying before publishing (rather than publishing, then verifying,
-// then restoring on failure) is deliberate: publish-then-verify leaves a
-// crash window between the rename that makes a candidate live and the
-// check that would have caught it, and no restore logic run after the
-// fact can close a window that already passed. Verify-then-publish
-// removes the window instead of narrowing it -- every crash point leaves
-// either the untouched original or bytes already proven loadable, and
-// there is no operation left afterward that could still fail with a bad
-// file live.
-//
-// There is no TOML *writer* in this tree (mabur/toml.h declares only
-// parse_toml_file/parse_toml_string), and /etc/mabur.toml is
-// bundle/mabur.default.toml verbatim -- a heavily commented file a
-// re-serialize would flatten. patch_toml is therefore line-surgical: it
-// rewrites only the three keys this task owns, in place, preserving every
-// other line -- comments included -- byte for byte.
+// patch_toml is line-surgical for the same reason patch_toml_key is (see
+// config_write.h): /etc/mabur.toml is bundle/mabur.default.toml verbatim,
+// a heavily commented file a re-serialize would flatten, so it rewrites
+// only the three keys this file owns, in place, preserving every other
+// line -- comments included -- byte for byte.
 
 #include <array>
 #include <string>
 
+#include "config_write.h"
 #include "mabur/rc_proto.h"
 #include "mabur/toml.h"
 
@@ -153,14 +130,5 @@ ApplyResult apply_calibration(const std::string& path, const CalWrite& w,
 ApplyResult apply_calibration_for_test_with_corrupt_writer(
     const std::string& path, const CalWrite& w, double margin_db,
     std::string* err);
-
-// Counts how many times this process has attempted to PUBLISH (rename a
-// verified candidate onto) the most recently published config path,
-// successful or not -- keyed per path, so it reflects repeated calls
-// against the SAME file (in production, always /etc/mabur.toml) rather
-// than accumulating across unrelated paths. A past bug had the drone
-// saving config on every bitrate change and chewing through flash; a
-// calibration session must write at most once.
-int write_count_for_test();
 
 }  // namespace mabur

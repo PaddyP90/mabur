@@ -159,12 +159,12 @@ Config load_config(const std::string& path, std::vector<std::string>* defaulted,
   } clear_on_exit;
 
   check_keys(j, "", {"radio", "fec", "link", "video", "msp", "stats", "au_ring",
-                     "debug_log", "hop"});
+                     "debug_log", "hop", "mavlink"});
   // Same reason as the drone's: a missing section visits none of its keys.
   // Kept in the exact order of the check_keys list above -- if they drift a
   // section goes silently unreported.
   for (const char* sec : {"radio", "fec", "link", "video", "msp", "stats",
-                          "au_ring", "debug_log"})
+                          "au_ring", "debug_log", "mavlink"})
     if (!j.contains(sec)) note_default("", sec, "(section absent)");
   Config c;
 
@@ -697,6 +697,17 @@ Config load_config(const std::string& path, std::vector<std::string>* defaulted,
         get_int(r, "ctl_period_ms", 1000, 50, 60000, "debug_log"));
     c.debug_log.rung_period_s = static_cast<int>(
         get_int(r, "rung_period_s", 10, 1, 600, "debug_log"));
+  }
+
+  if (j.contains("mavlink")) {
+    const Value& r = j["mavlink"];
+    check_keys(r, "mavlink", {"enable", "bind", "port"});
+    c.mavlink.enable = get_bool(r, "enable", c.mavlink.enable, "mavlink");
+    c.mavlink.bind = get_str(r, "bind", "127.0.0.1", "mavlink");
+    in_addr a{};
+    if (inet_pton(AF_INET, c.mavlink.bind.c_str(), &a) != 1)
+      fail("mavlink.bind", "want a dotted IPv4 address, got \"" + c.mavlink.bind + "\"");
+    c.mavlink.port = static_cast<int>(get_int(r, "port", 14550, 1, 65535, "mavlink"));
   }
   return c;
 }

@@ -174,15 +174,14 @@ TEST(rcf_matches_golden_wire) {
   //   std::fprintf(stderr, "%s\n", mtest::hex(wire).c_str());
   // Reverting any pack_rcf() layout change without updating these fails
   // here, which is the point -- the format cannot drift silently.
-  // Re-pinned for the RC_VERSION 15 -> 16 bump and the snr_off field
-  // (RCF head 15 -> 17): version byte 2 and the head length both moved,
-  // re-deriving the tag + CRC over the changed body.
+  // Re-pinned for the RC_VERSION 16 -> 17 bump (T_MAV): version byte 2
+  // moved, re-deriving the tag + CRC over the changed body.
   const std::vector<std::string> GOLDEN = {
-      "43521001000700243232ff0000000000003fe22979b1ca1456c4a0",
-      "4352100100ffff006464ff00000300c800031566e6d4ee392ad094",
+      "43521101000700243232ff000000000000792237e541e59506a1b5",
+      "4352110100ffff006464ff00000300c8004ced8cff4f2030a72bdc",
       // Asym pair (base 1.0 / enh 0.5): ENH actually rides a different
       // literal overhead than BASE here, not a duplicated equal-pair scalar.
-      "43521001002a00086432060000025adbff18046eec6e79905933c3",
+      "43521101002a00086432060000025adbffa122eb3e6aeb773b9676",
   };
   auto j = mtest::load_json(std::string(MABUR_VECTOR_DIR) + "/rc.json");
   REQUIRE(j["rcf"].size() == GOLDEN.size());
@@ -213,9 +212,9 @@ TEST(disc_matches_golden_wire) {
   //   std::fprintf(stderr, "%s\n", mtest::hex(wire).c_str());
   // Reverting any pack_disc() layout change without updating this fails
   // here, which is the point -- the format cannot drift silently.
-  // Re-pinned for the RC_VERSION 15 -> 16 bump.
+  // Re-pinned for the RC_VERSION 16 -> 17 bump (T_MAV).
   const std::vector<std::string> GOLDEN = {
-      "43521002040100feca9514010000000200f553c20cceabffece5fc",
+      "43521102040100feca9514010000000200ec415c1db52a6b971401",
   };
   auto j = mtest::load_json(std::string(MABUR_VECTOR_DIR) + "/rc.json");
   REQUIRE(j["disc"].size() == GOLDEN.size());
@@ -246,9 +245,9 @@ TEST(disc_ack_matches_golden_wire) {
   //   std::fprintf(stderr, "%s\n", mtest::hex(wire).c_str());
   // Reverting any pack_disc_ack() layout change without updating this
   // fails here, which is the point -- the format cannot drift silently.
-  // Re-pinned for the RC_VERSION 15 -> 16 bump.
+  // Re-pinned for the RC_VERSION 16 -> 17 bump (T_MAV).
   const std::vector<std::string> GOLDEN = {
-      "43521003040100feca0200efbe03009514000100fbfa",
+      "43521103040100feca0200efbe03009514000100ca0a",
   };
   auto j = mtest::load_json(std::string(MABUR_VECTOR_DIR) + "/rc.json");
   REQUIRE(j["disc_ack"].size() == GOLDEN.size());
@@ -409,12 +408,12 @@ TEST(telem_round_trip_and_golden) {
   CHECK(back->rec_status == 0x16);
   CHECK(back->nack_rx == 0 && back->retx_syms == 0 && back->retx_refused == 0);
   // Golden pin: byte-exact wire so the format can never drift silently.
-  // Re-pinned for the RC_VERSION 15 -> 16 bump (version byte only; Telem's
+  // Re-pinned for the RC_VERSION 16 -> 17 bump (version byte only; Telem's
   // own layout is unchanged, so only the version byte and the CRC it feeds
   // moved).
   const std::string GOLDEN =
-      "43521004090201022d0034127766554433221100a0860100282307000000d2040200"
-      "333415163d48000d000e000f001600000000000083f3";
+      "43521104090201022d0034127766554433221100a0860100282307000000d2040200"
+      "333415163d48000d000e000f0016000000000000c388";
   CHECK(mtest::hex(wire) == GOLDEN);
   // Corrupt/truncate rejection, mirroring the disc_ack tests:
   auto trunc = wire; trunc.pop_back();
@@ -483,13 +482,13 @@ TEST(version_mismatch_rejected_both_directions) {
   CHECK(mabur::rc::parse_rcf(body.data(), body.size()).has_value());
 
   // Byte 2 is the version. Any other version must be refused outright —
-  // including 15, the version before the bump to 16.
+  // including 16, the version before the bump to 17.
   auto v_old = body;
-  v_old[2] = 15;
+  v_old[2] = 16;
   CHECK(!mabur::rc::parse_rcf(v_old.data(), v_old.size()).has_value());
 
   auto v_future = body;
-  v_future[2] = 17;
+  v_future[2] = 18;
   CHECK(!mabur::rc::parse_rcf(v_future.data(), v_future.size()).has_value());
 
   // The same guard must hold for telemetry, which travels the opposite
@@ -659,7 +658,7 @@ TEST(cal_result_sentinel_is_minus_128_and_minus_1_is_a_real_wall) {
 TEST(telem_ack_is_the_cal_active_bit_alone) {
   // The anchor never leaves the drone: the calibration ack is flags bit6 and
   // nothing else (dropping the anchor shrank TELEM_LEN by one byte).
-  // TELEM_LEN is 54 at RC_VERSION 16.
+  // TELEM_LEN is 54 at RC_VERSION 17.
   mabur::rc::Telem t;
   t.flags = 0x40;
   auto b = mabur::rc::pack_telem(t);
@@ -669,7 +668,7 @@ TEST(telem_ack_is_the_cal_active_bit_alone) {
   CHECK((got->flags & 0x40) != 0);
 }
 
-TEST(rc_version_is_sixteen) { CHECK(mabur::rc::RC_VERSION == 16); }
+TEST(rc_version_is_seventeen) { CHECK(mabur::rc::RC_VERSION == 17); }
 
 TEST(nack_final_layout_round_trip_and_tag) {
   using namespace mabur::rc;
@@ -719,6 +718,47 @@ TEST(rcf_snr_off_round_trips_signed) {
     REQUIRE(p.has_value());
     CHECK(p->snr_off == v);
   }
+}
+
+TEST(mav_tagged_round_trip_and_golden) {
+  Mav m; m.counter = 0x01020304u; m.payload = {0xFD, 0x00, 0x00, 0x00, 0x05, 0x01, 0xBF, 0x00, 0x00, 0x00, 0xAA, 0xBB};
+  TagCtx ctx{11, 22, 0x01020304u};
+  auto f = pack_mav(m, true, test_key(), ctx);
+  CHECK(f.size() == kMavFixedLen + m.payload.size() + kTagLen + 2);
+  CHECK(f[2] == RC_VERSION && f[3] == T_MAV && f[8] == 12 && f[9] == 0);
+  CHECK(frame_type(f.data(), f.size()) == T_MAV);
+  auto p = parse_mav(f.data(), f.size(), true);
+  REQUIRE(p.has_value());
+  CHECK(p->counter == 0x01020304u && p->payload == m.payload);
+  CHECK(verify_control(f.data(), f.size(), test_key(), ctx));
+  CHECK(!verify_control(f.data(), f.size(), test_key(), TagCtx{11, 22, 0x01020305u}));
+  CHECK(!verify_control(f.data(), f.size(), kDefaultLinkKey, ctx));
+  auto g = f; g[12] ^= 0xFF;                         // inside the payload: CRC fails
+  CHECK(!parse_mav(g.data(), g.size(), true).has_value());
+  auto fcs = f; fcs.insert(fcs.end(), {1, 2, 3, 4});  // trailing 802.11 FCS is ignored
+  CHECK(verify_control(fcs.data(), fcs.size(), test_key(), ctx));
+}
+TEST(mav_untagged_round_trip) {
+  Mav m; m.counter = 7; m.payload.assign(kMavMaxPayload, 0x5A);
+  auto f = pack_mav(m, false);
+  CHECK(f.size() == kMavFixedLen + kMavMaxPayload + 2);
+  auto p = parse_mav(f.data(), f.size(), false);
+  REQUIRE(p.has_value());
+  CHECK(p->counter == 7 && p->payload.size() == kMavMaxPayload);
+  CHECK(!parse_mav(f.data(), f.size(), true).has_value());   // wrong layout: CRC mismatch
+}
+TEST(mav_len_overrun_is_refused_without_reading_past_the_buffer) {
+  Mav m; m.counter = 1; m.payload = {1, 2, 3};
+  auto f = pack_mav(m, true, test_key(), TagCtx{1, 2, 1});
+  auto big = f; big[8] = 0xFF; big[9] = 0x03;        // len = 1023 > kMavMaxPayload
+  CHECK(!parse_mav(big.data(), big.size(), true).has_value());
+  CHECK(!verify_control(big.data(), big.size(), test_key(), TagCtx{1, 2, 1}));
+  auto over = f; over[8] = 0x20; over[9] = 0x00;     // len = 32 > bytes present
+  CHECK(!parse_mav(over.data(), over.size(), true).has_value());
+  CHECK(!verify_control(over.data(), over.size(), test_key(), TagCtx{1, 2, 1}));
+  Mav empty; empty.counter = 1;
+  auto e = pack_mav(empty, true, test_key(), TagCtx{1, 2, 1});
+  CHECK(parse_mav(e.data(), e.size(), true).has_value());   // len 0 is legal (a bare keepalive)
 }
 
 MTEST_MAIN

@@ -287,6 +287,16 @@ bool StatsExporter::poll(uint64_t now_ms, const StatsInput& in) {
     nk["settle_ms"] = in.nack.settle_ms;
     nk["late_ms_max"] = in.nack.win.late_ms_max;
   }
+  // MAVLink tunnel (docs/mavlink.md): cumulative T_MAV frame counts both
+  // ways, every packet the tunnel refused (unlinked, bad, oversize) summed,
+  // and whether a UDP client is attached to the endpoint.
+  if (in.mav.enabled) {
+    const auto& t = in.mav.t;
+    link["mav"] = {{"tx", t.tx_frames},
+                   {"rx", t.rx_frames},
+                   {"reject", t.drop_unlinked + t.drop_bad_packet + t.drop_oversize},
+                   {"peer", in.mav.peer}};
+  }
   // Demand refresh (docs/fec-nack.md "Demand refresh"): counters cumulative.
   if (in.refresh.present) {
     json& rf = link["refresh"];

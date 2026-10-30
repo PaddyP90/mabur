@@ -388,7 +388,8 @@ passing is not the same as boot succeeding. If validation fails, or the
 rewritten file somehow fails to reload, nothing is touched: the original config is copied
 to `/etc/mabur.toml.pre-cal` only once the new file has already proven
 loadable, and the rename that publishes it is atomic
-(`drone/src/cal_apply.h`). This is deliberately
+(`drone/src/cal_apply.h`, publishing through the shared
+`drone/src/config_write.h`). This is deliberately
 the same shape as every other config-load safety net in this codebase
 (`docs/deploy.md`): a config `maburd` cannot load makes its wrapper
 respawn it forever at 2 s, which turns a calibration run into a trip for a

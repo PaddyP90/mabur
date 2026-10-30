@@ -56,6 +56,8 @@
 #include "mabur/nack_tracker.h"
 #include "mabur/node.h"
 #include "mabur/rc_proto.h"
+#include "mav_ring.h"
+#include "mav_tunnel.h"
 #include "msp_sink.h"
 #include "osd_screen.h"
 #include "rcf_slot.h"
@@ -245,10 +247,24 @@ class WebGs {
   // Its low byte is the RCF idr_epoch; the drone serves one IDR per change.
   // Spotter: kept for stats only (no VrxController, nothing sent).
   void set_idr_requests(uint32_t n);
+  // MAVLink tunnel (mav_tunnel.h): Gs only -- a spotter has no session to
+  // tag frames under, so there is no tunnel and these are no-ops.
+  // Outbound: bytes from the local MAVLink peer, cut at any boundary
+  // (forwarded to the tunnel's parser; unlinked outbound is dropped and
+  // counted, never queued forever).
+  void mav_push_outbound(const uint8_t* p, size_t n);
+  // Inbound: pops one whole packet (drone -> local peer) into `out` if it
+  // fits in `cap` bytes -- never a split one, and never more than one per
+  // call (loop until this returns 0 to drain everything queued). A packet
+  // that doesn't fit is left queued for the next call with a bigger
+  // buffer; MAVLINK_MAX_PACKET_LEN (~280 B) always fits. Returns the bytes
+  // copied, 0 if nothing was.
+  size_t mav_take_inbound(uint8_t* out, size_t cap);
   Mode mode() const { return mode_; }
   // Test seams.
   const maburgs::VrxController* vrx() const { return vrx_.get(); }  // nullptr in Spotter
   maburgs::VrxController* vrx() { return vrx_.get(); }              // tests: on_video / test_set_move_edge
+  const maburgs::MavTunnel* mav() const { return mav_.get(); }      // nullptr in Spotter
   const maburgs::ChannelCore* channel_core() const { return chan_.get(); }   // nullptr without a core
   const maburgs::LinkHealthAssembler& health() const { return lha_; }
   uint64_t sends() const { return sends_; }
@@ -276,6 +292,11 @@ class WebGs {
   uint64_t msp_tick_ms_ = 0;
   std::unique_ptr<maburgs::VrxController> vrx_;   // Gs only
   std::unique_ptr<maburgs::RcfSlotter> slot_;     // Gs only
+  // MAVLink tunnel (mav_tunnel.h): Gs only, sent through the same slotter as
+  // RCFs. Inbound packets land here (DeliverFn, mav_ring.h) for the page
+  // to drain one at a time via mav_take_inbound.
+  std::unique_ptr<maburgs::MavTunnel> mav_;
+  MavRing mav_in_;
   // Software NACK (fec-nack): Gs only, and only with [link.nack] enable --
   // null otherwise, so a spotter has no tracker at all. The same poll block
   // as maburgs main.cpp, sent directly (never the slotter) through send_().

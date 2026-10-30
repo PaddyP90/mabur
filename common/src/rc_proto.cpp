@@ -1,5 +1,6 @@
 #include "mabur/rc_proto.h"
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <limits>
 #include "mabur/crc16.h"
@@ -429,6 +430,36 @@ std::optional<Nack> parse_nack(const uint8_t* buf, size_t len) {
   return n;
 }
 
+std::vector<uint8_t> pack_mav(const Mav& m, bool tagged, const LinkKey& key, const TagCtx& ctx) {
+  assert(m.payload.size() <= kMavMaxPayload);
+  const uint16_t plen = static_cast<uint16_t>(m.payload.size());
+  std::vector<uint8_t> body;
+  body.reserve(kMavFixedLen + plen + kTagLen + 2);
+  put16(body, RC_MAGIC);
+  body.push_back(RC_VERSION);
+  body.push_back(T_MAV);
+  put32(body, m.counter);
+  put16(body, plen);
+  body.insert(body.end(), m.payload.begin(), m.payload.end());
+  if (tagged) put_tag(body, key, ctx);
+  put_crc(body);
+  return body;
+}
+
+std::optional<Mav> parse_mav(const uint8_t* buf, size_t len, bool tagged) {
+  if (len < kMavFixedLen) return std::nullopt;
+  if (get16(buf, 0) != RC_MAGIC || buf[2] != RC_VERSION || buf[3] != T_MAV) return std::nullopt;
+  const uint16_t payload_len = get16(buf, 8);
+  if (payload_len > kMavMaxPayload) return std::nullopt;
+  const size_t plen = kMavFixedLen + payload_len + (tagged ? kTagLen : 0);
+  if (len < plen + 2) return std::nullopt;
+  if (get16(buf, plen) != crc16_ccitt(buf, plen)) return std::nullopt;
+  Mav m;
+  m.counter = get32(buf, 4);
+  m.payload.assign(buf + kMavFixedLen, buf + kMavFixedLen + payload_len);
+  return m;
+}
+
 bool verify_control(const uint8_t* buf, size_t len, const LinkKey& key, const TagCtx& ctx) {
   // The tag sits at the frame's STRUCTURAL end, never at len - 10: on
   // hardware the drone's body still carries devourer's trailing 4-byte
@@ -451,6 +482,13 @@ bool verify_control(const uint8_t* buf, size_t len, const LinkKey& key, const Ta
       const uint8_t n = buf[kCalCmdFixedLen - 1];
       if (n == 0 || n > kMaxCalWindows) return false;   // as parse_cal_cmd
       tag_at = kCalCmdFixedLen + static_cast<size_t>(n) * 4;
+      break;
+    }
+    case T_MAV: {
+      if (len < kMavFixedLen) return false;
+      const uint16_t len16 = get16(buf, 8);
+      if (len16 > kMavMaxPayload) return false;
+      tag_at = kMavFixedLen + len16;
       break;
     }
     default: return false;

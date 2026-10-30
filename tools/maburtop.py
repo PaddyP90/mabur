@@ -184,6 +184,15 @@ def _increased(cur, prev):
     return cur is not None and prev is not None and cur > prev
 
 
+def _mav_cell(link):
+    """MAVLink tunnel cell (link.mav): T_MAV frames sent / received. The
+    key is absent while maburgs' [mavlink] endpoint is off."""
+    mav = link.get("mav")
+    if not isinstance(mav, dict):
+        return "mav off"
+    return f"mav {_s(mav.get('tx'))}/{_s(mav.get('rx'))}"
+
+
 def _s(v, prec=None):
     """Loose, non-fixed-width scalar formatter for prose (top bar/compact
     fallback) cells: None -> '--'."""
@@ -292,7 +301,7 @@ def render_rows_compact(model, wall, width):
         state_s = state.upper() if isinstance(state, str) else "--"
         header = (
             f"maburgs   {state_s}   "
-            f"key {_s(link.get('key_fp'))}   "
+            f"key {_s(link.get('key_fp'))}   {_mav_cell(link)}   "
             f"ch {_s(chan)} scan {scan.get('state', '--')}:{_s(scan.get('rounds'))} "
             f"hop {hop.get('state', '--')}/{hop.get('verdict', '--')}   "
             f"tx c{_s(tx_card)}   "
@@ -555,7 +564,8 @@ def panel_topbar(model, wall):
 
     dot = "●"
     text = (
-        f" maburgs  {dot} {state_s}   key {_s(link.get('key_fp'))}   ch {_s(chan)}   "
+        f" maburgs  {dot} {state_s}   key {_s(link.get('key_fp'))}   "
+        f"{_mav_cell(link)}   ch {_s(chan)}   "
         f"cmd MCS {_s(mcs)}/{_s(bw)}  "
         f"{_ov_cmd_cell(cmd_ov_base, cmd_ov_enh)}   "
         f"air ~{_s(air, 0)}%      session {session_s}   "

@@ -129,7 +129,8 @@ everything past scanout start (HDMI + display processing) — see
 Counts how the RCF slotter released each control-frame send: `au` (at an AU
 completion with idle ahead, incl. the in-grace immediate sends), `probe` (at
 the probe body's arrival), `timeout` (hold reached `link.rcf_slot_hold_ms`),
-`passthru` (slotter off, or no AU in the last 100 ms). Cumulative.
+`passthru` (slotter off, or no AU in the last 100 ms). Cumulative; the
+counts include `T_MAV` sends, which the slotter releases like an RCF.
 `tail_ub_ms` is the slotter's learned completion→probe deadline (a lost
 probe's fallback release; ceil(decaying max) + 1). Healthy video = almost
 all `au`+`probe`; at a high duty cycle `timeout` climbs and phase-locks to
@@ -160,6 +161,23 @@ while `[link.nack] enable`. `lead_skipped`: seqs whose request was withheld
 by `link.nack.min_lead_ms` because the answer could not land before the
 deadline. The drone side is `drone.nack` (below). maburtop draws a `nack:`
 line in the LADDER panel. Design: `docs/fec-nack.md`.
+
+### `link.mav` — MAVLink tunnel
+
+`link.mav{tx, rx, reject, peer}`: the GS's `MavTunnel` and its UDP endpoint,
+counters cumulative since the daemon started; present only while
+`[mavlink] enable`. `tx` counts T_MAV frames sent to the drone, `rx` T_MAV
+frames received from it (each once: the second card's copy of a frame is
+not counted), `reject` the MAVLink packets the tunnel refused in either
+direction (outbound while unlinked; a bad CRC, MAVLink 1 or a partial; an
+outbound packet larger than a frame's payload; a drone T_MAV frame that
+fails to parse) -- the sum of `MavTunnelStats` `drop_unlinked +
+drop_bad_packet + drop_oversize`. The second card's copies (`rx_dup`) and
+the GS's own tagged T_MAV heard by its other card (`rx_uplink_heard`) are
+neither `rx` nor `reject` and are not exported. `peer` is true
+once a UDP client has sent the endpoint a datagram. maburtop draws a
+`mav <tx>/<rx>` cell (`mav off` without the key) on the top bar beside
+`key`. Design: `docs/mavlink.md`.
 
 ### `link.refresh` — demand refresh
 
@@ -1107,6 +1125,27 @@ trim's own rate); `rc: low_power ENTER/EXIT` lines mark transitions,
 `[sensor] cal:` lines the trim's rounds and lock, `[sensor] steer:` lines
 the phase lock's first offset, clamps and refusals) and the 5 s
 `frame_ring:` line (below).
+
+The MAVLink parameter component (T_MAV, `drone/src/mav_component.h`) logs
+to the same stderr. At boot: `maburd mav: component sys 1 comp 191,
+config <path>`. Per request, `[mav] ` lines: `list: <n> values`,
+`read <id>: no such parameter` (`read #<index>: no such parameter` for a
+read by index), `set <id>: no such parameter`, `set <id> = <value> (<toml key>)`, with
+`, unchanged)` when the file already held that line and nothing was
+written, `set <id> refused: <why>` (the loader's message when the result
+would not load), and `... config does not load: <why>` when the file on
+disk itself fails to load. The `stats:` line gains
+`mav rx=<frames>/<packets> tx=<frames>/<packets> drop=<n> reject=<n>`
+on the ticks where any of those moved since the last time they were
+printed; the values are cumulative since start. `rx` counts verified
+T_MAV frames and the MAVLink 2 packets parsed out of them, `tx` the
+uplink T_MAV frames and the packets they carried (replies and the 1 Hz
+HEARTBEAT, sent only while a session is published), `drop` the frames
+that failed to parse plus the packets the component dropped (another
+target, an unhandled message, bad CRC, MAVLink 1, a partial, and a reply
+dropped because the 64-packet outbound queue was full), and
+`reject` the frames that parsed but failed the tag or the counter (these
+also raise Telem's `auth_reject`).
 
 ## Frame loss inside the drone ("wire clean" ≠ no frame loss)
 

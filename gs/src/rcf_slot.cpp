@@ -70,6 +70,14 @@ bool RcfSlotter::offer(SlotFrame& f, uint64_t now_ms, bool bypass) {
   const bool enabled = cfg_.hold_max_ms > 0;
   const bool video = have_au_ && now_ms >= last_au_ms_ &&
                      now_ms - last_au_ms_ <= static_cast<uint64_t>(cfg_.video_recent_ms);
+  // Behind held frames, an offer queues whatever the slot looks like now:
+  // sending it at once would put it on air before the earlier frames, and a
+  // counter-ordered sender (T_MAV) would have its held frame refused by the
+  // drone. take_due releases the queue in order. Bypass stays immediate.
+  if (!bypass && !pending_.empty()) {
+    pending_.push_back(std::move(f));
+    return true;
+  }
   if (!enabled || bypass || !video) {
     ++passthru_;
     f.reason = SlotReason::Passthru;

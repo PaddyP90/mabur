@@ -29,6 +29,7 @@
 #include <string>
 #include <thread>
 #include <exception>
+#include <iterator>
 #include <vector>
 
 #include <unistd.h>  // _exit() — see the venc on_fault handler
@@ -51,6 +52,7 @@
 #include "debug_http.h"
 #include "frame_pipeline.h"
 #include "frame_source.h"
+#include "mav_component.h"
 #include "mabur/channel_file.h"
 #include "mabur/channel_set.h"
 #include "mabur/frame_wire.h"
@@ -1530,6 +1532,15 @@ int run_real_mode(const Config& cfg, uint8_t start_ch, const std::string& cfg_pa
   // caller is the TX writer thread), and RcAgent's on_rc_frame -- rc_queue's
   // consumer -- runs on the agent thread instead.
   RcQueue cal_queue;
+  // T_MAV lands here (RX callback, below), consumed by the MAV thread: a
+  // parameter set rewrites the config file, I/O that belongs on neither the
+  // RX nor the agent thread.
+  RcQueue mav_queue;
+  // MAV thread -> agent thread's stats line, cumulative. drop = frames that
+  // failed parse_mav plus packets the component dropped (not for us, bad
+  // MAVLink); reject = frames that parsed but failed the tag or the counter.
+  std::atomic<uint64_t> mav_rx_frames{0}, mav_rx_packets{0}, mav_tx_frames{0},
+      mav_tx_packets{0}, mav_drop{0}, mav_reject{0};
   std::atomic<uint64_t> rx_beat{0};
   // RX callback -> agent thread, per telemetry period (exchange(0) at each
   // Telem build): frames that were ours (CRC-clean RC from the GS), CRC-clean
@@ -1678,6 +1689,8 @@ int run_real_mode(const Config& cfg, uint8_t start_ch, const std::string& cfg_pa
         cal_queue.push(body, body_len);
       } else if (rc_type == rc::T_NACK) {
         if (nack_hook) nack_hook(body, body_len);  // RX thread (fec-nack)
+      } else if (rc_type == rc::T_MAV) {
+        mav_queue.push(body, body_len);
       } else {
         rc_queue.push(body, body_len);
       }
@@ -1783,6 +1796,70 @@ int run_real_mode(const Config& cfg, uint8_t start_ch, const std::string& cfg_pa
       }
     });
   }
+
+  // MAVLink parameter component. Verifies each T_MAV off mav_queue
+  // (RcAgent::check_mav), feeds the payload to the component, and sends its
+  // queued replies back as untagged T_MAV frames on the Telem path (control
+  // radiotap, the shared telem dot11 seq, the mutex-guarded dev_sink.send()),
+  // at most one frame per kMavUplinkMinMs so the tunnel never crowds Telem
+  // or the OSD stream. Uplink and the 1 Hz HEARTBEAT need a published
+  // session (nobody is listening without one), and both follow Telem's
+  // suppression while a calibration phase sweeps: replies wait queued. RcQueue has no
+  // condvar, so this polls at 5 ms, like cal_queue's consumer.
+  std::thread mav_thread([&]() {
+    name_thread("mbr-mav");
+    MavComponent comp(cfg_path, [](const std::string& line) {
+      std::fprintf(stderr, "%s\n", line.c_str());
+    });
+    std::fprintf(stderr, "maburd mav: component sys %u comp %u, config %s\n",
+                 static_cast<unsigned>(MavComponent::sys_id()),
+                 static_cast<unsigned>(MavComponent::comp_id()), cfg_path.c_str());
+    uint32_t up_counter = 0;   // the GS drops a repeat of the last one: the second card's copy
+    uint64_t last_hb = 0, last_up = 0, bad_parse = 0, rejected = 0;
+    std::vector<uint8_t> body;
+    while (!g_devourer_should_stop) {
+      while (mav_queue.pop(body)) {
+        rc::Mav m;
+        switch (agent.check_mav(body.data(), body.size(), &m)) {
+          case RcAgent::MavCheck::kOk:
+            mav_rx_frames.fetch_add(1, std::memory_order_relaxed);
+            comp.on_payload(m.payload.data(), m.payload.size());
+            break;
+          case RcAgent::MavCheck::kMalformed: ++bad_parse; break;
+          case RcAgent::MavCheck::kRejected: ++rejected; break;
+        }
+      }
+      const uint64_t now = now_steady_ms();
+      const bool linked = agent.has_published_session();
+      if (linked && !cal_sweeping.load(std::memory_order_relaxed) && now - last_hb >= 1000) {
+        comp.queue_heartbeat();
+        last_hb = now;
+      }
+      if (linked && !cal_sweeping.load(std::memory_order_relaxed) &&
+          comp.outbound_packets() > 0 && now - last_up >= kMavUplinkMinMs) {
+        rc::Mav m;
+        m.counter = up_counter++;
+        const int packets = comp.take_outbound(&m.payload);
+        const auto mav = rc::pack_mav(m, /*tagged=*/false);
+        std::vector<uint8_t> frame;
+        frame.reserve(telem_radiotap.size() + kDot11HeaderLen + mav.size());
+        frame.insert(frame.end(), telem_radiotap.begin(), telem_radiotap.end());
+        auto hdr = build_dot11_header(telem_dot11_seq.fetch_add(1, std::memory_order_relaxed) & 0xFFF);
+        frame.insert(frame.end(), hdr.begin(), hdr.end());
+        frame.insert(frame.end(), mav.begin(), mav.end());
+        dev_sink.send(frame.data(), frame.size());
+        mav_tx_frames.fetch_add(1, std::memory_order_relaxed);
+        mav_tx_packets.fetch_add(static_cast<uint64_t>(packets), std::memory_order_relaxed);
+        last_up = now;
+      }
+      const MavComponentStats& cs = comp.stats();
+      mav_rx_packets.store(cs.rx_packets, std::memory_order_relaxed);
+      mav_drop.store(bad_parse + cs.drop_not_for_us + cs.drop_bad_packet + cs.drop_queue_full,
+                     std::memory_order_relaxed);
+      mav_reject.store(rejected, std::memory_order_relaxed);
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+  });
 
   // TX body queue between the encode (hot) thread and the USB writer
   // thread: a bulk-OUT stall backs up HERE (bounded, drop-oldest =
@@ -2685,6 +2762,8 @@ int run_real_mode(const Config& cfg, uint8_t start_ch, const std::string& cfg_pa
     uint64_t last_hot_beat = 0, last_rx_beat = 0;
     uint64_t last_hot_change_ms = start, last_rx_change_ms = start;
     uint64_t last_stats_ms = start;
+    // The MAV counters as of the last stats line printed with them.
+    uint64_t mav_last[6] = {};
 
     // T_TELEM: sent at ~1 Hz on this same periodic path, on the mutex-guarded
     // dev_sink.send() the MSP thread also uses. Radiotap and the
@@ -2892,11 +2971,31 @@ int run_real_mode(const Config& cfg, uint8_t start_ch, const std::string& cfg_pa
             snr_off = vs.sensor_off_mfps;
           }
 #endif
+          // MAV fields only when a counter moved since they were last shown.
+          char mav_part[128] = "";
+          const uint64_t mav_now[6] = {
+              mav_rx_frames.load(std::memory_order_relaxed),
+              mav_rx_packets.load(std::memory_order_relaxed),
+              mav_tx_frames.load(std::memory_order_relaxed),
+              mav_tx_packets.load(std::memory_order_relaxed),
+              mav_drop.load(std::memory_order_relaxed),
+              mav_reject.load(std::memory_order_relaxed)};
+          if (!std::equal(std::begin(mav_now), std::end(mav_now), std::begin(mav_last))) {
+            std::copy(std::begin(mav_now), std::end(mav_now), std::begin(mav_last));
+            std::snprintf(mav_part, sizeof mav_part,
+                          " mav rx=%llu/%llu tx=%llu/%llu drop=%llu reject=%llu",
+                          static_cast<unsigned long long>(mav_now[0]),
+                          static_cast<unsigned long long>(mav_now[1]),
+                          static_cast<unsigned long long>(mav_now[2]),
+                          static_cast<unsigned long long>(mav_now[3]),
+                          static_cast<unsigned long long>(mav_now[4]),
+                          static_cast<unsigned long long>(mav_now[5]));
+          }
           std::fprintf(stderr,
                        "stats: state=%d hot_beat=%llu rx_beat=%llu seq=%u sent=%llu drops=%llu "
                        "txq=%zu txq_drop=%llu "
                        "thermal_delta=%d tx_failed=%llu venc_verb_fail=%llu "
-                       "enc_pk100=%uk lp=%d armed=%d snr_mhz=%u snr_off=%d\n",
+                       "enc_pk100=%uk lp=%d armed=%d snr_mhz=%u snr_off=%d%s\n",
                        static_cast<int>(agent.state()), static_cast<unsigned long long>(hb),
                        static_cast<unsigned long long>(rb), tx.seq(),
                        static_cast<unsigned long long>(tx.sent()),
@@ -2907,7 +3006,7 @@ int run_real_mode(const Config& cfg, uint8_t start_ch, const std::string& cfg_pa
                        static_cast<unsigned long long>(actuator.venc_verb_failures),
                        enc_peak.take_peak_kbps(),
                        static_cast<int>(agent.low_power()), static_cast<int>(agent.armed_latched()),
-                       snr_mhz, snr_off);
+                       snr_mhz, snr_off, mav_part);
         }
 
         // Telemetry suppression: non-sweep PPDUs in the airtime a calibration
@@ -3039,6 +3138,7 @@ int run_real_mode(const Config& cfg, uint8_t start_ch, const std::string& cfg_pa
   if (tx_thread.joinable()) tx_thread.join();
   if (agent_thread.joinable()) agent_thread.join();
   if (msp_thread.joinable()) msp_thread.join();
+  if (mav_thread.joinable()) mav_thread.join();
   tx_pool.stop();  // drain + join senders before device teardown
 
   vtx_rec.shutdown();   // close the file before the record channel is torn down

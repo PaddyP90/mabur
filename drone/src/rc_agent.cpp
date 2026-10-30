@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdio>
 #include <random>
+#include <utility>
 
 #include "mabur/link_key.h"
 #include "mabur/rc_proto.h"
@@ -85,20 +86,29 @@ bool RcAgent::accept_nack_counter(uint32_t counter) {
   return accept_nack_counter(counter, published_session_.load(std::memory_order_acquire));
 }
 
+bool RcAgent::accept_nack_counter(uint32_t counter, uint64_t session) {
+  return accept_session_counter_(nack_last_, counter, session);
+}
+
+bool RcAgent::accept_mav_counter(uint32_t counter, uint64_t session) {
+  return accept_session_counter_(mav_last_, counter, session);
+}
+
 // Keyed by the pair's vtx nonce rather than reset from publish_session_():
 // a reset store can never be ordered against an RX-thread CAS that verified
 // under the OLD pair and lands after it -- that would plant the old pair's
 // (possibly large) counter in the new pair's space and refuse the GS's
 // restarted counters until they overtake it. With the key in the same word,
 // a stale-keyed state just reads as "nothing accepted yet".
-bool RcAgent::accept_nack_counter(uint32_t counter, uint64_t session) {
+bool RcAgent::accept_session_counter_(std::atomic<uint64_t>& last_word, uint32_t counter,
+                                      uint64_t session) {
   if (session == 0 || session != published_session_.load(std::memory_order_acquire)) return false;
   const uint64_t key = session & 0xFFFFFFFFu;   // vtx_nonce
-  uint64_t cur = nack_last_.load(std::memory_order_relaxed);
+  uint64_t cur = last_word.load(std::memory_order_relaxed);
   for (;;) {
     const uint32_t last = (cur >> 32) == key ? static_cast<uint32_t>(cur) : 0;
     if (counter <= last) return false;
-    if (nack_last_.compare_exchange_weak(cur, (key << 32) | counter, std::memory_order_relaxed))
+    if (last_word.compare_exchange_weak(cur, (key << 32) | counter, std::memory_order_relaxed))
       return true;
   }
 }
@@ -114,6 +124,19 @@ RcAgent::NackCheck RcAgent::check_nack(const uint8_t* body, size_t len, rc::Nack
   }
   *out = *n;
   return NackCheck::kOk;
+}
+
+RcAgent::MavCheck RcAgent::check_mav(const uint8_t* body, size_t len, rc::Mav* out) {
+  auto m = rc::parse_mav(body, len, /*tagged=*/true);
+  if (!m) return MavCheck::kMalformed;
+  uint64_t session = 0;
+  if (!verify_session_tagged(body, len, m->counter, &session) ||
+      !accept_mav_counter(m->counter, session)) {
+    note_auth_reject();
+    return MavCheck::kRejected;
+  }
+  *out = std::move(*m);
+  return MavCheck::kOk;
 }
 
 bool RcAgent::verify_cal_frame(const uint8_t* body, size_t len, bool sweep_running) {
@@ -931,7 +954,10 @@ rc::DiscAck RcAgent::make_disc_ack(uint32_t vrx_nonce, uint32_t vtx_nonce, uint8
   // CAP_CALIBRATE: this build understands T_CAL_CMD/T_CAL_RESULT (main.cpp
   // wires them up) -- a real gate, unlike CAP_TELEMETRY:
   // gs/src/cal_session.cpp's start() refuses a session outright without it.
-  ack.chip_caps = rc::CAP_FRAME_WIRE | rc::CAP_TELEMETRY | rc::CAP_CALIBRATE;
+  // CAP_MAVLINK: this build answers T_MAV (main.cpp's MAV thread).
+  // Display-only, like CAP_TELEMETRY: the GS logs a peer without it once
+  // per session and gates nothing on it.
+  ack.chip_caps = rc::CAP_FRAME_WIRE | rc::CAP_TELEMETRY | rc::CAP_CALIBRATE | rc::CAP_MAVLINK;
   // agreed is member_(op_channel) ? the DISC's proposed op_channel : the
   // current channel -- computed by the caller, which also stores it in the
   // pending pair whose promotion drives the actual retune, so the ack and the

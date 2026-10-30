@@ -27,6 +27,7 @@
 #include "config.h"
 #include "frame_file_source.h"
 #include "mabur/raw_dvr.h"
+#include "mav_ring.h"
 #include "web_gs.h"
 #include "web_phase.h"
 #ifdef WEBGS_LIVE
@@ -92,6 +93,25 @@ struct LocalRecReq {
   bool on = false;
   std::string name;
 } g_lrec;
+
+// MAVLink tunnel (mav_tunnel.h, no UI yet): the page's webgs_mav_push /
+// webgs_mav_take exports hand raw bytes across the page/core thread
+// boundary (WebGs itself is single-threaded, so this mutex is the seam).
+// `out`: outbound bytes queued by the page, drained into
+// WebGs::mav_push_outbound once per loop iteration. `in`: inbound packets
+// the core drained out of WebGs::mav_take_inbound one at a time -- a
+// bounded MavRing (mav_ring.h), since nothing calls webgs_mav_take without
+// a page MAVLink UI and the drone's once-a-second heartbeat would
+// otherwise grow it for the module's whole lifetime.
+struct MavBridge {
+  std::mutex mu;
+  std::vector<uint8_t> out;
+  webgs::MavRing in;
+} g_mav;
+// False before the core exists and after it exits: webgs_mav_push then
+// has nothing to drain into, so it refuses rather than growing `out`
+// forever.
+std::atomic<bool> g_mav_running{false};
 
 // ---- page / console reporting --------------------------------------------
 
@@ -421,6 +441,14 @@ int live_loop(const LiveOpts& o, const maburgs::Config& cfg, uint8_t ch, int wid
   std::vector<maburgs::LinkCard*> ptrs;
   for (auto& c : cards) ptrs.push_back(c.get());
   webgs::WebGs g(cfg, o.mode, ch, width, ptrs, n_usb, std::move(io));
+  {
+    // Fresh buffers for this run: a page reconnect must not replay bytes
+    // queued against the previous core.
+    std::lock_guard<std::mutex> lk(g_mav.mu);
+    g_mav.out.clear();
+    g_mav.in.clear();
+  }
+  g_mav_running.store(true, std::memory_order_release);
 
 #ifndef WEBGS_PAGE
   std::signal(SIGINT, [](int) { g_stop.store(true); });
@@ -484,10 +512,32 @@ int live_loop(const LiveOpts& o, const maburgs::Config& cfg, uint8_t ch, int wid
         }
       }
     }
+    {
+      // Outbound MAVLink (webgs_mav_push): whatever the page queued since
+      // the last iteration, forwarded to the tunnel's parser once per
+      // tick -- flush() (inside g.tick()) is what actually sends it.
+      std::vector<uint8_t> mav_out;
+      { std::lock_guard<std::mutex> lk(g_mav.mu); mav_out.swap(g_mav.out); }
+      if (!mav_out.empty()) g.mav_push_outbound(mav_out.data(), mav_out.size());
+    }
     batch.clear();
     q.drain(batch, 5);
     for (const auto& m : batch) g.on_rx(m);
     g.tick(now_us());
+    {
+      // Inbound MAVLink (webgs_mav_take): drain whatever the tunnel
+      // delivered this tick into the bridge, one whole packet at a time
+      // (mav_take_inbound's own contract); the bridge's ring applies its
+      // own cap, dropping the oldest queued packet(s) if the page never
+      // calls webgs_mav_take to make room.
+      uint8_t mbuf[512];   // > MAVLINK_MAX_PACKET_LEN (~280 B)
+      for (;;) {
+        const size_t n = g.mav_take_inbound(mbuf, sizeof mbuf);
+        if (n == 0) break;
+        std::lock_guard<std::mutex> lk(g_mav.mu);
+        g_mav.in.push(mbuf, n);
+      }
+    }
     if (const uint32_t sq = g_phase_seq.load(std::memory_order_acquire); sq != phase_seq_seen) {
       phase_seq_seen = sq;
       phase_val = static_cast<int16_t>(g_phase_val.load(std::memory_order_acquire));
@@ -553,6 +603,9 @@ int live_loop(const LiveOpts& o, const maburgs::Config& cfg, uint8_t ch, int wid
   // Every exit (Disconnect, card lost) seals the local recording before the
   // module goes away, so the page can download it.
   seal_local_rec();
+  // WebGs (and `g`) is about to go out of scope: webgs_mav_push must stop
+  // accepting bytes it would never drain into a core again.
+  g_mav_running.store(false, std::memory_order_release);
   return rc;
 }
 
@@ -739,6 +792,28 @@ EMSCRIPTEN_KEEPALIVE void webgs_set_local_rec(int on, const char* name) {
   g_lrec.on = on != 0;
   g_lrec.name = (on && name) ? name : "";
   ++g_lrec.seq;
+}
+
+// MAVLink tunnel seam (no UI): raw packet bytes both ways. webgs_mav_push
+// queues bytes from a local MAVLink peer for the core to parse and tunnel
+// to the drone; webgs_mav_take pops one whole packet (drone -> local peer)
+// per call, up to `cap` bytes -- never split, and never more than one
+// packet per call (loop until it returns 0 to drain everything queued). A
+// `cap` of at least MAVLINK_MAX_PACKET_LEN (~280 B) always succeeds; a
+// smaller one leaves a too-big packet queued rather than returning a
+// partial one. The ring behind this is bounded (mav_ring.h): with no page
+// MAVLink UI yet, nothing may call this for the module's whole lifetime,
+// so unread packets age out oldest-first instead of growing forever.
+EMSCRIPTEN_KEEPALIVE int webgs_mav_push(const uint8_t* p, int n) {
+  if (!g_mav_running.load(std::memory_order_acquire) || n <= 0) return 0;
+  std::lock_guard<std::mutex> lk(g_mav.mu);
+  g_mav.out.insert(g_mav.out.end(), p, p + n);
+  return n;
+}
+EMSCRIPTEN_KEEPALIVE int webgs_mav_take(uint8_t* out, int cap) {
+  if (cap <= 0) return 0;
+  std::lock_guard<std::mutex> lk(g_mav.mu);
+  return static_cast<int>(g_mav.in.take(out, static_cast<size_t>(cap)));
 }
 
 // webgs_phase_*: the page's phase lock (web_phase.h). The page calls

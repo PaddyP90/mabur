@@ -1914,6 +1914,89 @@ TEST(nack_check_separates_malformed_from_rejected) {
   CHECK(agent.take_auth_reject());
 }
 
+// T_MAV's counter follows T_NACK's rule on its own state: strictly greater
+// than the last accepted one in this link session, restarting under a new
+// vtx nonce; no published session means nothing is accepted.
+TEST(mav_counter_is_monotonic_per_session) {
+  Config cfg = make_cfg();
+  MockActuator act;
+  RcAgent agent(cfg, act);
+  CHECK(!agent.has_published_session());
+  CHECK(!agent.accept_mav_counter(1, 0));                    // no session
+  const uint32_t vtx = link_agent(agent, act, cfg);
+  CHECK(agent.has_published_session());
+  const uint64_t s1 = (static_cast<uint64_t>(kVrx) << 32) | vtx;
+  CHECK(!agent.accept_mav_counter(1, 0));                    // session 0 refuses everything
+  CHECK(agent.accept_mav_counter(1, s1));
+  CHECK(agent.accept_mav_counter(2, s1));
+  CHECK(agent.accept_mav_counter(5, s1));
+  CHECK(!agent.accept_mav_counter(5, s1));                   // replay
+  CHECK(!agent.accept_mav_counter(3, s1));                   // stale
+  CHECK(!agent.accept_mav_counter(6, 0));
+  // Separate from the NACK counter space in both directions.
+  CHECK(agent.accept_nack_counter(100));
+  CHECK(agent.accept_mav_counter(6, s1));
+  CHECK(agent.accept_nack_counter(101));
+  // New session under a fresh vtx nonce: the counter space restarts, and the
+  // old pair is refused.
+  agent.tick(110 + cfg.link.failsafe_ms + 1, RadioHealth{});
+  REQUIRE(agent.state() == RcAgent::State::FAILSAFE);
+  CHECK(!agent.has_published_session());
+  const uint32_t vtx2 = ack_agent(agent, act, 136, kVrx, 2000);
+  auto first = make_rcf_wire(1, encode_profile(PhyMode::HT, 0, 20), 8, vtx2);
+  agent.on_rc_frame(first.data(), first.size(), 2010);
+  REQUIRE(agent.state() == RcAgent::State::LINKED);
+  REQUIRE(vtx2 != vtx);
+  const uint64_t s2 = (static_cast<uint64_t>(kVrx) << 32) | vtx2;
+  CHECK(!agent.accept_mav_counter(7, s1));                   // old pair
+  CHECK(agent.accept_mav_counter(1, s2));
+  CHECK(!agent.accept_mav_counter(1, s2));
+}
+
+// check_mav: a tagged GS->drone T_MAV verifies with its counter as seq32.
+// A parse failure is malformed (no auth_reject); a parsed frame failing the
+// tag or the counter is rejected and raises auth_reject.
+TEST(mav_check_separates_malformed_from_rejected) {
+  Config cfg = make_cfg();
+  MockActuator act;
+  RcAgent agent(cfg, act);
+  Mav m; m.counter = 4; m.payload = {0xFD, 0x01, 0x02, 0x03};
+  Mav out;
+  {
+    // Not linked yet: a well-formed frame has nothing to verify against.
+    auto early = pack_mav(m, true, mabur::kDefaultLinkKey, TagCtx{kVrx, 1, 4});
+    CHECK(agent.check_mav(early.data(), early.size(), &out) == RcAgent::MavCheck::kRejected);
+    CHECK(agent.take_auth_reject());
+  }
+  const uint32_t vtx = link_agent(agent, act, cfg);
+  CHECK(!agent.take_auth_reject());
+  auto good = pack_mav(m, true, mabur::kDefaultLinkKey, TagCtx{kVrx, vtx, 4});
+  // len16 claims more bytes than the buffer holds: malformed.
+  auto overrun = good;
+  overrun[8] = static_cast<uint8_t>(m.payload.size() + 20);
+  CHECK(agent.check_mav(overrun.data(), overrun.size(), &out) == RcAgent::MavCheck::kMalformed);
+  CHECK(!agent.take_auth_reject());
+  CHECK(agent.check_mav(good.data(), good.size() - 3, &out) == RcAgent::MavCheck::kMalformed);
+  CHECK(!agent.take_auth_reject());
+  // An untagged (drone->GS layout) frame fails the tagged parse: malformed.
+  auto untagged = pack_mav(m, false);
+  CHECK(agent.check_mav(untagged.data(), untagged.size(), &out) == RcAgent::MavCheck::kMalformed);
+  CHECK(!agent.take_auth_reject());
+  // Tagged with the wrong seq32: rejected.
+  auto wrongseq = pack_mav(m, true, mabur::kDefaultLinkKey, TagCtx{kVrx, vtx, 5});
+  CHECK(agent.check_mav(wrongseq.data(), wrongseq.size(), &out) == RcAgent::MavCheck::kRejected);
+  CHECK(agent.take_auth_reject());
+  // Good frame (plus a trailing FCS, as on hardware): accepted, out filled.
+  auto withfcs = good;
+  withfcs.insert(withfcs.end(), {0xAA, 0xBB, 0xCC, 0xDD});
+  CHECK(agent.check_mav(withfcs.data(), withfcs.size(), &out) == RcAgent::MavCheck::kOk);
+  CHECK(out.counter == 4 && out.payload == m.payload);
+  CHECK(!agent.take_auth_reject());
+  // Replay: rejected.
+  CHECK(agent.check_mav(good.data(), good.size(), &out) == RcAgent::MavCheck::kRejected);
+  CHECK(agent.take_auth_reject());
+}
+
 MTEST_MAIN
 
 // A restarted GS resets its RCF seq to ~1 while the drone's tracker holds
