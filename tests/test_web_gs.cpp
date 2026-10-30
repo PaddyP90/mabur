@@ -693,6 +693,52 @@ TEST(new_session_nonce_relists) {
   CHECK(count_param_list_requests(sent) == 2);
 }
 
+// A drone restart whose fresh DISC_ACK beats the video-silence timeout
+// adopts a new vtx_nonce without ever leaving SESSION: VrxRendezvous::
+// feed_disc_ack sets state_ = SESSION unconditionally on every unflagged
+// ack (rendezvous.cpp), so link_state() shows no edge here -- only the
+// nonce clause in WebGs::tick() catches it, and it must still re-list.
+TEST(vtx_nonce_change_while_linked_relists) {
+  std::vector<std::vector<uint8_t>> sent;
+  Io io;
+  io.on_au = [](Au&&) {};
+  io.send = [&](const std::vector<uint8_t>& b) { sent.push_back(b); };
+  WebGs g(cfg(), Mode::Gs, 136, 40, {}, 0, io);
+  uint64_t t = 1'000'000;
+  g.inject_disc_ack_for_replay(t);   // vtx_nonce 1 (inject_disc_ack_for_replay's constant)
+  g.tick(t);
+  REQUIRE(g.params() != nullptr);
+  CHECK(count_param_list_requests(sent) == 1);
+  char wire[128] = {};
+  std::strncpy(wire, "60@1920x1080", sizeof wire);
+  const auto pkt = param_ext_value_pkt(
+      "VENC_MODE", mabur::cfgparam::mav_type(mabur::cfgparam::Type::Str), wire,
+      mabur::cfgparam::kCount, static_cast<uint16_t>(mabur::cfgparam::kVencModeRow));
+  g.on_rx(mav_body(pkt, 1, t));
+  g.tick(t);
+  REQUIRE(g.params()->state().rows[mabur::cfgparam::kVencModeRow].have_value);
+
+  // A second, differently-nonced DISC_ACK, fed straight to VrxController as
+  // inject_disc_ack_for_replay does (replay has no drone to answer a real
+  // DISC): the rendezvous adopts the new nonce and stays in SESSION the
+  // whole time -- never BEACONING in between.
+  REQUIRE(g.vrx() != nullptr);
+  mabur::rc::DiscAck ack;
+  ack.vrx_nonce = g.vrx()->rz_nonce();
+  ack.vtx_nonce = 2;
+  ack.chip_caps = mabur::rc::CAP_FRAME_WIRE;
+  ack.agreed_channel = g.vrx()->proposal();
+  ack.seq = 2;
+  const auto wire2 = mabur::rc::pack_disc_ack(ack);
+  g.vrx()->on_rc_frame(wire2.data(), wire2.size(), static_cast<double>(t) / 1000.0);
+  REQUIRE(g.vrx()->link_state() == maburgs::VrxState::SESSION);   // no BEACONING edge
+
+  g.tick(t);
+  CHECK(g.vrx()->link_state() == maburgs::VrxState::SESSION);
+  CHECK(count_param_list_requests(sent) == 2);
+  CHECK(!g.params()->state().rows[mabur::cfgparam::kVencModeRow].have_value);   // cleared
+}
+
 // Spotter has no tunnel to list parameters over: params() is null and the
 // page's params_json falls back to the static table, every value null.
 TEST(spotter_has_no_param_client) {
