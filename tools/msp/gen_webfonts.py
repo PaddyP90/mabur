@@ -1,1 +1,105 @@
-s
+#!/usr/bin/env python3
+"""Convert a folder of `.mfont` OSD fonts into the web GS's selectable fonts.
+
+Usage:
+  gen_webfonts.py <dir-or-files...> [--out web/ui/public/fonts]
+
+Each `<name>.mfont` becomes `<out>/<slug>.png` (same 36x54, 32-per-row atlas
+as gen_webfont.py), and `<out>/index.json` lists them for the Display menu's
+"OSD font" picker. The shipped Betaflight atlas (font_btfl.png) is always
+offered by the page and is not listed here. Re-running regenerates the whole
+manifest from the inputs given.
+
+The `.mfont` spec says premultiplied alpha, but some tools write straight
+alpha. A pixel with a colour channel above its alpha cannot be premultiplied,
+so each font is checked: if any pixel violates that, the colours are taken as
+straight (and a warning is printed); otherwise they are un-premultiplied as
+gen_webfont.py does. Stdlib only.
+"""
+import glob
+import json
+import os
+import re
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+import gen_webfont as g  # noqa: E402
+
+ROOT = os.path.normpath(os.path.join(HERE, "..", ".."))
+COLS = g.COLS
+
+
+def is_straight(words):
+    for v in words:
+        a = v >> 24
+        if (v >> 16) & 255 > a or (v >> 8) & 255 > a or v & 255 > a:
+            return True
+    return False
+
+
+def to_rgba(v, straight):
+    a = v >> 24
+    if a == 0:
+        return (0, 0, 0, 0)
+    if straight:
+        return ((v >> 16) & 255, (v >> 8) & 255, v & 255, a)
+    return g.unpremult(v)
+
+
+def slugify(name):
+    s = re.sub(r"[^a-z0-9_-]+", "_", name.lower()).strip("_")
+    return (s or "font")[:32]
+
+
+def convert(src, dst):
+    gw, gh, n, words = g.read_mfont(src)
+    if (gw, gh, n) != (36, 54, 1024):
+        sys.exit("%s: %dx%d x%d glyphs; the web page needs 36x54 x1024" % (src, gw, gh, n))
+    straight = is_straight(words)
+    w, h = COLS * gw, ((n + COLS - 1) // COLS) * gh
+    img = bytearray(w * h * 4)
+    for gi in range(n):
+        ox, oy, base = (gi % COLS) * gw, (gi // COLS) * gh, gi * gw * gh
+        for y in range(gh):
+            o = ((oy + y) * w + ox) * 4
+            for x in range(gw):
+                img[o + 4 * x:o + 4 * x + 4] = bytes(to_rgba(words[base + y * gw + x], straight))
+    g.write_png(dst, w, h, img)
+    return straight
+
+
+def main(argv):
+    args, out = [], os.path.join(ROOT, "web/ui/public/fonts")
+    it = iter(argv[1:])
+    for a in it:
+        if a == "--out":
+            out = next(it)
+        else:
+            args.append(a)
+    files = []
+    for a in args or ["."]:
+        files += sorted(glob.glob(os.path.join(a, "*.mfont"))) if os.path.isdir(a) else [a]
+    if not files:
+        sys.exit("no .mfont files found")
+    os.makedirs(out, exist_ok=True)
+    entries, used = [], {"btfl"}
+    for src in files:
+        base = os.path.splitext(os.path.basename(src))[0]
+        slug, k = slugify(base), 2
+        while slug in used:
+            slug, k = "%s_%d" % (slugify(base)[:28], k), k + 1
+        used.add(slug)
+        straight = convert(src, os.path.join(out, slug + ".png"))
+        if straight:
+            print("%s: colours stored as straight alpha (taken as-is)" % base)
+        print("wrote %s.png" % slug)
+        entries.append({"id": slug, "name": base.replace("_", " "), "file": "fonts/%s.png" % slug})
+    with open(os.path.join(out, "index.json"), "w") as f:
+        json.dump(entries, f, indent=2)
+        f.write("\n")
+    print("wrote index.json (%d fonts)" % len(entries))
+
+
+if __name__ == "__main__":
+    main(sys.argv)
