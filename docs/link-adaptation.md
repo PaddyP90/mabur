@@ -566,29 +566,31 @@ This closes two holes:
   procedures that need an override to stick must re-POST inside that
   window.
 
-### Encoder faults are process faults — there is no in-process rebuild
+### Encoder faults are process faults — `maburd` does not rebuild in-process
 
 If the MI pipeline dies or has to be rebuilt (a resolution/sensor-mode
-change, a wedged ISP), `maburd` must **exit and let its init wrapper
-(`/etc/init.d/S00mabur`, repo file `bundle/S96mabur`) respawn it**. `venc_core_stop()` + `venc_core_start()` in the same PID can never
-recover it.
+change, a wedged ISP), `maburd` **exits and lets its init wrapper
+(`/etc/init.d/S00mabur`, repo file `bundle/S96mabur`) respawn it**: a
+cold bring-up of about 14–17 s with the link down. Nothing at HEAD calls
+`venc_core_stop()` followed by `venc_core_start()` in one process.
 
-Upstream implemented and bench-tested every in-process reset lever on this
-SoC, and each one either wedges or comes back with a dead stream
-(`ISP channel readiness timeout after 2000 ms` → `CmdLoadBinFile failed -1`
-→ `not sync err` floods → no frames). The levers were:
-- disabling userspace 3A before VPE destroy;
-- `MI_SYS_Exit`/`MI_SYS_Init` in the same PID;
-- closing the `/dev/mi_vif` and `/dev/mi_vpe` fds;
-- `dlclose`/`dlopen` of the whole MI vendor library set.
-
-The residual state is per-task VIF/VPE/ISP channel state in the kernel
-driver, released only by `execv`. The negative result is recorded in the
-sibling checkout,
-`../waybeam_venc/documentation/STAR6E_SINGLE_PID_REINIT_FINDINGS.md`. Do
-not re-attempt without new SigmaStar SDK/kernel insight. This is why a
-fold-in bring-up failure is fatal by design: exit, respawn, cold bring-up
-in about 14–17 s.
+That is a choice, not a hardware limit. The upstream waybeam record
+(`../waybeam_venc/documentation/STAR6E_SINGLE_PID_REINIT_FINDINGS.md`,
+imx335) found every in-process reset lever came back with a dead stream
+and concluded the VIF/VPE/ISP channel state is released only by `execv`.
+On this board that is contradicted:
+`docs/findings/2026-10-30-venc-inproc-reinit-spike.md` ran five pipeline
+bring-ups in one PID across three sensor modes (1728x972@100,
+1920x1080@90, 1728x816@120), each at the mode's exact rate with a real
+picture. A full stop and start costs about 8.5 s, almost all of it the
+per-module MI device re-open penalty
+(`docs/findings/2026-09-07-boot-time.md`); a pipeline-only restart under
+the same `MI_SYS_Init` (`star6e_pipeline_stop` then
+`star6e_pipeline_start`, the encoder thread rejoined and respawned)
+costs about 0.5 s with the first frame of the new mode 0.1 s later. What
+that spike did not cover (a rebuild inside a running `maburd` with the
+ring consumer and RcAgent live, a rebuild after a wedged ISP, long-run
+soak) is listed there.
 
 ### Low-power (disarmed) mode
 
