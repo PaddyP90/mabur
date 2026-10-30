@@ -1075,6 +1075,17 @@ refresh").
   inject, expect `Lossy`/`probe_holds`, no promote). Host build: `cmake -S .
   -B build-losssim -DDEVOURER_DIR=$PWD/../devourer -DMABUR_LOSS_SIM=ON`
   (gitignored dir, separate from the normal `build/`).
+- **Rebuild failure ladder → `MABUR_VENC_FAIL_RESTARTS=N`** in
+  `maburd`'s environment (start it by hand, not from the init wrapper):
+  the next `N` in-process pipeline restarts fail after the old pipeline
+  is stopped, before the SDK is touched, so a `VENC_*`/`REC_*` MAVLink set
+  walks the ladder's restore rungs (`N=1`: "previous pipeline restored",
+  `N=2`: "previous pipeline restored by a cold restart";
+  `docs/mavlink.md` "Applying a set"). Boot logs `venc:
+  MABUR_VENC_FAIL_RESTARTS=<N>: the next <N> pipeline restarts will fail`,
+  each forced failure `venc: injected pipeline start failure
+  (MABUR_VENC_FAIL_RESTARTS)`. Read once at the first encoder start and
+  only counted down; a respawn without the variable is clean.
 - **Radio/PHY bring-up below mabur → devourer's own tools** (`rxdemo` with
   `DEVOURER_RX_ALLPATHS=1`, `doctor`, etc. — see
   `third_party/devourer/CLAUDE.md`). Use these when the question is about
@@ -1151,8 +1162,11 @@ the loader check is handed to `ConfigApplier` (`docs/mavlink.md`
 "Applying a set") and logs two lines instead: `set <id> = <value>
 (<toml key>) in progress` at once, then — once the applier finishes —
 either `set <id> = <value> (<toml key>) applied <knob|reprogram|rebuild>
-<ms> ms` or `set <id> refused: <reason>`. The applier itself, on its own
-thread (`mbr-apply`), logs one line per attempt, `apply <id>
+<ms> ms` or `set <id> refused: <reason>`. A repeat of that set while it
+is still being applied logs `set <id> = <value> (<toml key>) in
+progress, repeat` and is resolved by the same final line. The applier
+itself, on its own thread (`mbr-apply`), logs one line per attempt, each
+prefixed `maburd config: `: `apply <id>
 <knob|reprogram|rebuild> ok <ms> ms` or `... failed: <reason> <ms> ms`,
 plus one line per rung for a rebuild that falls back: `rebuild <toml
 key>: new pipeline refused` / `previous pipeline restored` / `previous

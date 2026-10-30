@@ -148,11 +148,16 @@ agent and TX threads.
     `ACCEPTED` with the value read back from the now-published file,
     or `FAILED` with the current value and a `STATUSTEXT` reason. See
     "Applying a set" below.
-  - Only one set is ever being applied at a time: a set submitted while
-    an earlier one is still in progress is refused immediately,
-    `PARAM_ACK_FAILED` "apply in progress"; a set is refused the same
-    way, "calibration in progress", while a calibration session is
-    running.
+  - Only one set is ever being applied at a time. A set that arrives
+    while an earlier one is still being applied is answered at once,
+    before the config-write lock the apply holds is touched (so the MAV
+    thread keeps heartbeating through a rebuild): a repeat of the pending
+    set — same key, same value, as a ground end sends after losing the
+    `IN_PROGRESS` — gets `PARAM_ACK_IN_PROGRESS` again with the current
+    value, and the one final ack answers both; any other set is
+    `PARAM_ACK_FAILED` with the current value and a `STATUSTEXT`
+    "apply in progress". A set is refused `FAILED` "calibration in
+    progress" while a calibration session is running.
   - Each set is one or two `[mav] set ...` lines in `maburd`'s log
     (`docs/observability.md`).
 
@@ -193,21 +198,37 @@ column below:
   is recreated in its bind order; the GS's standing record wish restarts
   it (`docs/vtx-recorder.md`).
 
-**The rebuild failure ladder.** A rebuild tries the new config; if the
-pipeline refuses it, the ladder falls back to the previous config as the
-same pipeline-only restart; if that also fails, to a full
+**The rebuild failure ladder.** A rebuild tries the new config
+(`venc_core_restart`); if the pipeline refuses it, the ladder restarts
+the previous config the same way — a failed restart leaves the core
+stopped but the MI_SYS session open, and a restart is gated on that
+session, so the second restart builds on it; if that also fails, a full
 `venc_core_stop()` + `venc_core_start()` of the previous config (about
-8.5 s); and if that also fails, `maburd` exits for its init wrapper to
-respawn it from the unchanged file. Each rung logs one line. A set that
-falls to any rung but the first still answers `PARAM_ACK_FAILED` with
-the reason — `ACCEPTED` is only for the config that was actually asked
-for, never a fallback.
+8.5 s; the stop closes the session even though the core is not running,
+so the start opens a fresh one); and if that also fails, `maburd` exits
+for its init wrapper to respawn it from the unchanged file. Each rung
+logs one line. A set that falls to any rung but the first still answers
+`PARAM_ACK_FAILED` with the reason — `ACCEPTED` is only for the config
+that was actually asked for, never a fallback. The contract is written
+in `drone/venc/venc_core.h` and pinned on the host by `test_venc_core`
+(the real `venc_core.c` over a fake runtime).
 
-Only one apply runs at a time (`submit()` refuses a second with "apply
-in progress"), and an apply is refused outright while a calibration
-session is running ("calibration in progress") — calibration owns the
-TX-power table and the config-write lock during its sweep. Logging and
-the `stats:` line's `mav_apply=`/`mav_rebuild=` counters:
+To walk the restore rungs on a device, start `maburd` with
+`MABUR_VENC_FAIL_RESTARTS=N` in its environment: the next `N` pipeline
+restarts fail after the old pipeline is stopped and before the SDK is
+touched (`venc: injected pipeline start failure` in the log). `N=1`
+makes a rebuild set land on the "restored previous" rung, `N=2` on the
+cold rung. It is read once, by the process's first encoder start, and
+only counts down — a respawn without the variable, or a later start in
+the same process, never re-arms it.
+
+Only one apply runs at a time (a second set is answered as described
+under **Set** above), and an apply is refused outright while a
+calibration session is running ("calibration in progress") —
+calibration owns the TX-power table, and its file publish takes the
+same config-write lock. A host build of `maburd` (no encoder) refuses
+the rebuild keys at submit, "no encoder in this build". Logging and the
+`stats:` line's `mav_apply=`/`mav_rebuild=` counters:
 `docs/observability.md`. The undo, `.pre-param`: below.
 
 ### `.pre-param`

@@ -590,14 +590,19 @@ picture.
 
 **The rebuild failure ladder.** If the rebuilt pipeline refuses to come
 up, `ConfigApplier`'s ladder falls back to the previous config as the
-same pipeline-only restart; if that also fails, to a full
-`venc_core_stop()` + `venc_core_start()` of the previous config (about
-8.5 s, almost all of it the per-module MI device re-open penalty,
-`docs/findings/2026-09-07-boot-time.md`); and only if that also fails
+same pipeline-only restart — `venc_core_restart` is gated on the open
+`MI_SYS` session, not on the core running, and a failed restart leaves
+that session open, so the second restart builds on it; if that also
+fails, to a full `venc_core_stop()` + `venc_core_start()` of the
+previous config (about 8.5 s, almost all of it the per-module MI device
+re-open penalty, `docs/findings/2026-09-07-boot-time.md`; the stop runs
+`MI_SYS_Exit` for the session the failed restarts left open, so the
+start never initialises over a live one); and only if that also fails
 does `maburd` **exit and let its init wrapper**
 (`/etc/init.d/S00mabur`, repo file `bundle/S96mabur`) **respawn it**
 from the unchanged file — a cold bring-up of about 14–17 s with the
-link down.
+link down. `MABUR_VENC_FAIL_RESTARTS` forces the restore rungs on a
+device (`docs/mavlink.md` "Applying a set").
 
 **A pipeline that faults on its own is still a process fault.** The
 ladder above only ever rebuilds a pipeline that `ConfigApplier` itself
