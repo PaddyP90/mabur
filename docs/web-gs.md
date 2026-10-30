@@ -1157,12 +1157,36 @@ Alongside that raw seam the core also runs its own `ParamClient`
 tunnel: its outbound PARAM_EXT_* traffic goes in through
 `MavTunnel::push_outbound`, so it is tagged and slotted exactly like a
 local MAVLink peer's, and the tunnel's `DeliverFn` hands it every inbound
-packet alongside `mav_in_`. `WebGs::tick()` re-lists it (a fresh
-`PARAM_EXT_REQUEST_LIST`, every row cleared) whenever the session links,
-drops, or its `vtx_nonce` changes while still linked. `WebGs::params()` is
-the readout (`nullptr` in Spotter, which has no session to list over),
-`WebGs::param_set`/`param_refresh` drive a row edit or a fresh list round,
-and `webgs::params_json` renders the table for a page.
+packet to the client (`ParamClient::on_packet`) as well as to `mav_in_`.
+`WebGs::tick()` re-lists it (a fresh `PARAM_EXT_REQUEST_LIST`, every row
+cleared) whenever the session links, drops, or its `vtx_nonce` changes
+while still linked. `WebGs::params()` is the readout (`nullptr` in
+Spotter, which has no session to list over), `WebGs::param_set`/
+`param_refresh` drive a row edit or a fresh list round, and
+`webgs::params_json` renders the table for a page.
+
+Two more `EMSCRIPTEN_KEEPALIVE` exports move the page's side of that:
+`webgs_param_refresh()` queues a fresh list round and `webgs_param_set(id,
+text)` queues one row edit (both copy their arguments before returning, so
+the page may free them right after the call); each returns 0 queued or 1
+if the core is not running. The core loop drains both once per iteration
+and calls `WebGs::param_refresh`/`param_set` -- a set the client refuses on
+a known row (a bad value, one already in flight, or no session) lands on
+it as `state: "failed"` with `status` set to the reason, reported through
+the same push as everything else; an unknown id has no row to land on and
+is just dropped. After each iteration, if the
+client's `seq()` moved since the last push, the loop serialises
+`params_json` and calls `Module['onParams'](json)` the same way `onStats`
+is called; a native build prints a `PARAMS <json>` line instead. At most
+one push per iteration, none while nothing changed -- except Spotter,
+which has no client to move a seq at all, so the loop pushes its static
+table once at start instead. The JSON mirrors `stats_json`'s style:
+`{linked, alive, list, mismatch, pending, rows: [{id, section, key, type,
+apply, help, value, state, status, age_ms}, ...]}` (`list`:
+none|pending|complete|partial; `state`: idle|sending|in_progress|
+accepted|failed|unsupported|timeout; `age_ms` only for a terminal state),
+or in Spotter `{linked: false, mode: "spotter", rows: [...]}` with every
+row's `value`/`age_ms` null and `state` idle.
 
 ## Colour correction
 

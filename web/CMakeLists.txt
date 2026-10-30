@@ -84,7 +84,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     -pthread -sPROXY_TO_PTHREAD -sPTHREAD_POOL_SIZE=8 -sINITIAL_MEMORY=268435456
     -sASYNCIFY -sMODULARIZE -sEXPORT_NAME=createWebGs -sEXIT_RUNTIME
     -sENVIRONMENT=web,worker --bind
-    -sEXPORTED_FUNCTIONS=_main,_free,_malloc,_webgs_stop,_webgs_set_rec,_webgs_set_local_rec,_webgs_request_idr,_webgs_phase_reset,_webgs_phase_frame,_webgs_phase_discontinuity,_webgs_phase_tick,_webgs_phase_state,_webgs_phase_err_ms,_webgs_phase_centre,_webgs_phase_mismatch,_webgs_phase_src_hz,_webgs_mav_push,_webgs_mav_take
+    -sEXPORTED_FUNCTIONS=_main,_free,_malloc,_webgs_stop,_webgs_set_rec,_webgs_set_local_rec,_webgs_request_idr,_webgs_phase_reset,_webgs_phase_frame,_webgs_phase_discontinuity,_webgs_phase_tick,_webgs_phase_state,_webgs_phase_err_ms,_webgs_phase_centre,_webgs_phase_mismatch,_webgs_phase_src_hz,_webgs_mav_push,_webgs_mav_take,_webgs_param_refresh,_webgs_param_set
     -sEXPORTED_RUNTIME_METHODS=FS,stringToNewUTF8
     "--embed-file=${MABUR_DIR}/gs/bundle/maburgs.default.toml@/maburgs.toml")
   set_target_properties(webgs PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/dist)
