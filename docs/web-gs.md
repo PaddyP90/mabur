@@ -1231,15 +1231,17 @@ and calls `WebGs::param_refresh`/`param_set` -- a set the client refuses on
 a known row (a bad value, one already in flight, or no session) lands on
 it as `state: "failed"` with `status` set to the reason, reported through
 the same push as everything else; an unknown id has no row to land on and
-is just dropped. After each iteration, if the
-client's `seq()` moved since the last push, the loop serialises
-`params_json` and calls `Module['onParams'](json)` the same way `onStats`
-is called; a native build prints a `PARAMS <json>` line instead. At most
-one push per iteration, none while nothing changed -- except Spotter,
-which has no client to move a seq at all, so the loop pushes its static
-table once at start instead. The JSON mirrors `stats_json`'s style:
-`{linked, alive, list, mismatch, pending, rows: [{id, section, key, type,
-apply, help, value, state, status, age_ms}, ...]}` (`list`:
+is just dropped. The loop serialises `params_json` and calls
+`Module['onParams'](json)` the same way `onStats` is called (a native
+build prints a `PARAMS <json>` line instead) once when the core starts,
+in both modes, so the page has the table's rows before any session links;
+then, after each iteration, if the client's `seq()` moved since the last
+push. At most one push per iteration, none while nothing changed; Spotter
+has no client to move a seq, so its start push is its only one. The JSON
+mirrors `stats_json`'s style: `{linked, alive, list, mismatch, pending,
+rows: [{id, section, key, type, apply, help, value, state, status,
+age_ms}, ...]}` (`alive`: null until the drone's first `HEARTBEAT` on
+the current link, then whether one arrived within the last 3 s; `list`:
 none|pending|complete|partial; `state`: idle|sending|in_progress|
 accepted|failed|unsupported|timeout; `age_ms` only for a terminal state),
 or in Spotter `{linked: false, mode: "spotter", rows: [...]}` with every

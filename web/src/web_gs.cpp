@@ -831,7 +831,10 @@ std::string params_json(const WebGs& g, uint64_t now_ms) {
   }
   const auto& st = pc->state();
   j["linked"] = st.linked;
-  j["alive"] = pc->alive(now_ms);
+  // null until the drone's first HEARTBEAT on this link (set_linked
+  // clears alive_ms), so a page doesn't flag "no heartbeat" in the moment
+  // between link-up and the first one.
+  j["alive"] = st.alive_ms == 0 ? nlohmann::json(nullptr) : nlohmann::json(pc->alive(now_ms));
   j["list"] = param_list_name(st.list);
   j["mismatch"] = st.table_mismatch;
   j["pending"] = st.pending_row;

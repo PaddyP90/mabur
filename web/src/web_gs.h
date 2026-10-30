@@ -171,8 +171,10 @@ struct Stats {
 std::string stats_json(const Stats& s);
 
 // The parameter table readout: the ParamClient's state, every row keyed by
-// its MAVLink id. Spotter mode has no ParamClient (no session to list
-// over): static columns, every value null, every row "idle".
+// its MAVLink id. "alive" is null until the drone's first HEARTBEAT on the
+// current link, then whether one arrived within the last 3 s. Spotter mode
+// has no ParamClient (no session to list over): static columns, every
+// value null, every row "idle".
 std::string params_json(const WebGs& g, uint64_t now_ms);
 
 // Validates the page's channel set/start/width with the shared rules: width

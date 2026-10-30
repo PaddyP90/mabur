@@ -154,8 +154,8 @@ void report_stats(const std::string& json) {
 }
 
 // `PARAMS <json>` line: the ParamClient readout (webgs::params_json), pushed
-// whenever its seq() moves (see push_params_if_changed) plus once at start
-// in Spotter mode, where seq() never moves (there is no client to bump it).
+// once at start (push_params_at_start) and then whenever its seq() moves
+// (push_params_if_changed).
 void report_params(const std::string& json) {
 #ifdef WEBGS_PAGE
   MAIN_THREAD_ASYNC_EM_ASM({ if (Module['onParams']) Module['onParams'](UTF8ToString($0)); _free($0); },
@@ -166,11 +166,20 @@ void report_params(const std::string& json) {
 #endif
 }
 
+// The start-of-run push, in both modes: the page shows the table's rows
+// (greyed, values null) from the moment the core runs, not only once a GS
+// session links. Spotter has no client, so this is its only push; in GS
+// mode it also syncs the caller's seq cursor, so push_params_if_changed
+// only fires on what moves after it.
+void push_params_at_start(const webgs::WebGs& g, uint64_t now_ms, uint32_t& param_seq_seen) {
+  param_seq_seen = g.params() ? g.params()->seq() : 0;
+  report_params(webgs::params_json(g, now_ms));
+}
+
 // Pushes params_json to the page/console iff the client's seq moved since
 // the caller's own cursor -- never more than once per poll, never while
-// nothing changed. Spotter has no client (g.params() == nullptr): callers
-// push its static table once at start instead, directly through
-// report_params, never through this.
+// nothing changed. Spotter has no client (g.params() == nullptr): its only
+// push is push_params_at_start.
 void push_params_if_changed(const webgs::WebGs& g, uint64_t now_ms, uint32_t& param_seq_seen) {
   if (!g.params()) return;
   const uint32_t sq = g.params()->seq();
@@ -377,7 +386,7 @@ int run_replay(const ReplayOpts& o) {
   // driver of WebGs there is, so it is what a by-hand check of the `PARAMS`
   // line runs against (--fake-ack opens a GS session to list over).
   uint32_t param_seq_seen = 0;
-  if (o.mode == webgs::Mode::Spotter) report_params(webgs::params_json(g, 0));
+  push_params_at_start(g, 0, param_seq_seen);
 
   uint64_t last_us = 0;
   bool first = true;
@@ -524,10 +533,10 @@ int live_loop(const LiveOpts& o, const maburgs::Config& cfg, uint8_t ch, int wid
     g_mav.in.clear();
   }
   g_mav_running.store(true, std::memory_order_release);
-  // Spotter has no ParamClient (g.params() == nullptr), so its seq never
-  // moves: push its static table once now, or the page would otherwise
-  // never see any params state at all.
-  if (o.mode == webgs::Mode::Spotter) report_params(webgs::params_json(g, now_us() / 1000));
+  // The table's rows reach the page now, before any session (and, in
+  // Spotter, ever) gives the client a seq move to push on.
+  uint32_t param_seq_seen = 0;
+  push_params_at_start(g, now_us() / 1000, param_seq_seen);
 
 #ifndef WEBGS_PAGE
   std::signal(SIGINT, [](int) { g_stop.store(true); });
@@ -543,10 +552,9 @@ int live_loop(const LiveOpts& o, const maburgs::Config& cfg, uint8_t ch, int wid
   // The page's phase-lock offset, re-stamped on THIS clock (now_us(), not
   // the page's performance.now()) whenever webgs_phase_tick bumps the seq.
   uint32_t phase_seq_seen = 0;
-  // The ParamClient's last-pushed seq (push_params_if_changed), so the loop
-  // pushes a fresh PARAMS line at most once per iteration, only when
+  // param_seq_seen (above) is the ParamClient's last-pushed seq, so the
+  // loop pushes a fresh PARAMS line at most once per iteration, only when
   // something in it moved.
-  uint32_t param_seq_seen = 0;
   int16_t phase_val = 0;
   uint64_t phase_set_us = 0;   // 0: snr_off_to_send reads this as stale -> 0
   for (int s = 0; o.secs == 0 || s < o.secs;) {

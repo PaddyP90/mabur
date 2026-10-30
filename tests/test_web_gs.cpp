@@ -657,6 +657,27 @@ TEST(drone_values_reach_the_client) {
   CHECK(j.find("\"value\":\"60@1920x1080\"") != std::string::npos);
 }
 
+// "alive" is null between link-up and the drone's first HEARTBEAT (no
+// verdict yet, so a page shows no "no heartbeat" flash), then a bool.
+TEST(params_json_alive_is_null_until_the_first_heartbeat) {
+  Io io;
+  io.on_au = [](Au&&) {};
+  io.send = [](const std::vector<uint8_t>&) {};
+  WebGs g(cfg(), Mode::Gs, 136, 40, {}, 0, io);
+  uint64_t t = 1'000'000;
+  CHECK(params_json(g, t / 1000).find("\"alive\":null") != std::string::npos);   // unlinked
+  g.inject_disc_ack_for_replay(t);
+  g.tick(t);
+  REQUIRE(g.params()->state().linked);
+  CHECK(params_json(g, t / 1000).find("\"alive\":null") != std::string::npos);
+  const auto hb = mav_heartbeat_bytes(1, 191);
+  g.on_rx(mav_body(hb, 1, t));
+  g.tick(t);
+  CHECK(params_json(g, t / 1000).find("\"alive\":true") != std::string::npos);
+  t += 3'500'000;   // 3.5 s with no further heartbeat
+  CHECK(params_json(g, t / 1000).find("\"alive\":false") != std::string::npos);
+}
+
 // A session lost then re-acked (gs_session_loss_then_reack_resets_and_flows'
 // pattern) re-lists: the drop to BEACONING unlinks the client (clearing
 // every row) and the fresh ack links it again, sending a second

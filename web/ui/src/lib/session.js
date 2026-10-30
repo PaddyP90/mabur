@@ -137,8 +137,9 @@ export class Session {
   }
 
   // The drone's parameter-table push (ParamClient's params_json, docs/
-  // web-gs.md "MAVLink seam"): GS mode on every list change, once at start
-  // in Spotter. A malformed line is dropped rather than handed on.
+  // web-gs.md "MAVLink seam"): once when the core starts, in both modes, then
+  // in GS mode on every client change. A malformed line is dropped rather
+  // than handed on.
   handleParams(text) {
     let p;
     try { p = JSON.parse(text); } catch { return; }
