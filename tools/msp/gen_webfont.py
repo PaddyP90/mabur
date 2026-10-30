@@ -1,62 +1,71 @@
 #!/usr/bin/env python3
-"""Convert a folder of `.mfont` OSD fonts into the web GS's selectable fonts.
+"""Convert the player's `.mfont` MSP OSD atlas into the web GS's PNG atlas.
 
 Usage:
-  gen_webfonts.py <dir-or-files...> [--out web/ui/public/fonts]
+  gen_webfont.py [<in.mfont> [<out.png>]]
 
-Each `<name>.mfont` becomes `<out>/<slug>.png` (same 36x54, 32-per-row atlas
-as gen_webfont.py), and `<out>/index.json` lists them for the Display menu's
-"OSD font" picker. The shipped Betaflight atlas (font_btfl.png) is always
-offered by the page and is not listed here. Re-running regenerates the whole
-manifest from the inputs given.
+Defaults: gs/player/bundle/font_btfl.mfont -> web/ui/public/font_btfl.png.
 
-The `.mfont` spec says premultiplied alpha, but some tools write straight
-alpha. A pixel with a colour channel above its alpha cannot be premultiplied,
-so each font is checked: if any pixel violates that, the colours are taken as
-straight (and a warning is printed); otherwise they are un-premultiplied as
-gen_webfont.py does. Stdlib only.
+Layout: 32 glyphs per atlas row; glyph gi = char | (page << 8) sits at
+column gi % 32, row gi // 32 (the shipped 1024 glyphs of 36x54 give a
+1152x1728 image, a safe canvas size on phones). 8-bit RGBA with STRAIGHT
+alpha, which is what canvas drawImage expects (.mfont words are
+premultiplied). web/ui/src/lib/osd.js hardcodes 36x54 and 32 per row --
+web/tests/osd.test.mjs checks this file's size against those constants.
+
+Ends with a round-trip check: re-decode the PNG with gen_font's decoder
+(which re-premultiplies) and compare every pixel to the .mfont within 1 LSB
+per channel. Stdlib only.
 """
-import glob
-import json
 import os
-import re
+import struct
 import sys
+import zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-import gen_webfont as g  # noqa: E402
+from gen_font import decode_rgba_png  # noqa: E402
 
 ROOT = os.path.normpath(os.path.join(HERE, "..", ".."))
-COLS = g.COLS
+MAGIC = 0x544E464D
+COLS = 32
 
 
-def is_straight(words):
-    for v in words:
-        a = v >> 24
-        if (v >> 16) & 255 > a or (v >> 8) & 255 > a or v & 255 > a:
-            return True
-    return False
+def read_mfont(path):
+    d = open(path, "rb").read()
+    magic, ver, gw, gh, n = struct.unpack("<5I", d[:20])
+    assert magic == MAGIC and ver == 1, "not an .mfont v1: %s" % path
+    words = struct.unpack("<%dI" % (n * gw * gh), d[32:32 + 4 * n * gw * gh])
+    return gw, gh, n, words
 
 
-def to_rgba(v, straight):
-    a = v >> 24
+def unpremult(w):
+    a = w >> 24
     if a == 0:
         return (0, 0, 0, 0)
-    if straight:
-        return ((v >> 16) & 255, (v >> 8) & 255, v & 255, a)
-    return g.unpremult(v)
+    ch = [(w >> 16) & 255, (w >> 8) & 255, w & 255]
+    return tuple(min(255, (c * 255 + a // 2) // a) for c in ch) + (a,)
 
 
-def slugify(name):
-    s = re.sub(r"[^a-z0-9_-]+", "_", name.lower()).strip("_")
-    return (s or "font")[:32]
+def chunk(typ, data):
+    return (struct.pack(">I", len(data)) + typ + data
+            + struct.pack(">I", zlib.crc32(typ + data) & 0xFFFFFFFF))
 
 
-def convert(src, dst):
-    gw, gh, n, words = g.read_mfont(src)
-    if (gw, gh, n) != (36, 54, 1024):
-        sys.exit("%s: %dx%d x%d glyphs; the web page needs 36x54 x1024" % (src, gw, gh, n))
-    straight = is_straight(words)
+def write_png(path, w, h, img):
+    stride = w * 4
+    raw = b"".join(b"\x00" + bytes(img[y * stride:(y + 1) * stride]) for y in range(h))
+    with open(path, "wb") as f:
+        f.write(b"\x89PNG\r\n\x1a\n")
+        f.write(chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0)))
+        f.write(chunk(b"IDAT", zlib.compress(raw, 9)))
+        f.write(chunk(b"IEND", b""))
+
+
+def main(argv):
+    src = argv[1] if len(argv) > 1 else os.path.join(ROOT, "gs/player/bundle/font_btfl.mfont")
+    dst = argv[2] if len(argv) > 2 else os.path.join(ROOT, "web/ui/public/font_btfl.png")
+    gw, gh, n, words = read_mfont(src)
     w, h = COLS * gw, ((n + COLS - 1) // COLS) * gh
     img = bytearray(w * h * 4)
     for gi in range(n):
@@ -64,41 +73,22 @@ def convert(src, dst):
         for y in range(gh):
             o = ((oy + y) * w + ox) * 4
             for x in range(gw):
-                img[o + 4 * x:o + 4 * x + 4] = bytes(to_rgba(words[base + y * gw + x], straight))
-    g.write_png(dst, w, h, img)
-    return straight
+                img[o + 4 * x:o + 4 * x + 4] = bytes(unpremult(words[base + y * gw + x]))
+    write_png(dst, w, h, img)
 
-
-def main(argv):
-    args, out = [], os.path.join(ROOT, "web/ui/public/fonts")
-    it = iter(argv[1:])
-    for a in it:
-        if a == "--out":
-            out = next(it)
-        else:
-            args.append(a)
-    files = []
-    for a in args or ["."]:
-        files += sorted(glob.glob(os.path.join(a, "*.mfont"))) if os.path.isdir(a) else [a]
-    if not files:
-        sys.exit("no .mfont files found")
-    os.makedirs(out, exist_ok=True)
-    entries, used = [], {"btfl"}
-    for src in files:
-        base = os.path.splitext(os.path.basename(src))[0]
-        slug, k = slugify(base), 2
-        while slug in used:
-            slug, k = "%s_%d" % (slugify(base)[:28], k), k + 1
-        used.add(slug)
-        straight = convert(src, os.path.join(out, slug + ".png"))
-        if straight:
-            print("%s: colours stored as straight alpha (taken as-is)" % base)
-        print("wrote %s.png" % slug)
-        entries.append({"id": slug, "name": base.replace("_", " "), "file": "fonts/%s.png" % slug})
-    with open(os.path.join(out, "index.json"), "w") as f:
-        json.dump(entries, f, indent=2)
-        f.write("\n")
-    print("wrote index.json (%d fonts)" % len(entries))
+    w2, h2, px = decode_rgba_png(dst)
+    assert (w2, h2) == (w, h), "round trip: size %dx%d != %dx%d" % (w2, h2, w, h)
+    bad = 0
+    for gi in range(n):
+        ox, oy, base = (gi % COLS) * gw, (gi // COLS) * gh, gi * gw * gh
+        for y in range(gh):
+            for x in range(gw):
+                a, b = words[base + y * gw + x], px[(oy + y) * w + ox + x]
+                if any(abs(((a >> s) & 255) - ((b >> s) & 255)) > 1 for s in (0, 8, 16, 24)):
+                    bad += 1
+    assert bad == 0, "round trip: %d pixels differ by more than 1 LSB" % bad
+    print("wrote %s: %dx%d, %d glyphs of %dx%d, %d bytes; round-trip OK"
+          % (dst, w, h, n, gw, gh, os.path.getsize(dst)))
 
 
 if __name__ == "__main__":
