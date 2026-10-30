@@ -52,9 +52,19 @@
 #include <string>
 #include <vector>
 
+#include "config_apply.h"
 #include "mav_params.h"
 
 namespace mabur {
+
+// The slice of ConfigApplier a set needs: submit a patched row and poll for
+// its result. A real ConfigApplier's submit/take_result bind directly; a
+// test supplies a fake so it can drive the timing of a completion without a
+// second thread.
+struct ApplyPort {
+  std::function<bool(size_t row, const std::string& rendered, std::string* why)> submit;
+  std::function<bool(ConfigApplyResult*)> take_result;
+};
 
 // The drone sends a T_MAV frame (drone -> GS) at most this often, each
 // carrying one take_outbound() of queued packets: at kMavMaxPayload per
@@ -70,17 +80,19 @@ struct MavComponentStats {
   uint64_t rx_packets = 0,       // good MAVLink 2 packets, before routing
       drop_not_for_us = 0,       // another target, or a message this component doesn't handle
       drop_bad_packet = 0,       // bad CRC, MAVLink 1, a header the parser rejects, a partial
-      sets_ok = 0,               // PARAM_EXT_SET acked ACCEPTED
-      sets_refused = 0,          // PARAM_EXT_SET acked VALUE_UNSUPPORTED or FAILED
+      sets_in_progress = 0,      // PARAM_EXT_SET acked IN_PROGRESS and submitted to the applier
+      sets_ok = 0,               // a set's final outcome: PARAM_EXT_SET acked ACCEPTED
+      sets_refused = 0,          // a set's final outcome: acked VALUE_UNSUPPORTED or FAILED
       drop_queue_full = 0,       // an outbound packet dropped at kMavQueueCap
       list_coalesced = 0;        // a REQUEST_LIST answered by a list still queued
 };
 
 class MavComponent {
  public:
-  // cfg_path: the file maburd loaded. log: one line per event, prefixed
-  // "[mav] ", no trailing newline; may be null.
-  MavComponent(std::string cfg_path, std::function<void(const std::string&)> log);
+  // cfg_path: the file maburd loaded. port: ConfigApplier's submit/
+  // take_result. log: one line per event, prefixed "[mav] ", no trailing
+  // newline; may be null.
+  MavComponent(std::string cfg_path, ApplyPort port, std::function<void(const std::string&)> log);
 
   // Inbound T_MAV payload bytes (already tag-verified by the caller).
   // Parses, routes, and queues replies.
@@ -91,6 +103,10 @@ class MavComponent {
   // rc::kMavMaxPayload; a packet is never split. Returns packets taken.
   int take_outbound(std::vector<uint8_t>* out);
   size_t outbound_packets() const { return queue_.size(); }
+  // Drains the applier's result for the one set in flight, if any, and
+  // queues its final PARAM_EXT_ACK (plus a STATUSTEXT on failure). The MAV
+  // loop calls this every pass; a no-op when nothing is pending.
+  void poll_results();
   const MavComponentStats& stats() const { return stats_; }
   // The MAVLink identity this component answers as (mabur/mav.h's kSysId
   // and kCompId), for callers that don't include the MAVLink headers.
@@ -107,9 +123,14 @@ class MavComponent {
   void queue(const Msg& m, bool list_value = false);
   // A PARAM_EXT_VALUE for row idx; list_value marks one queued by a list.
   void queue_value(size_t idx, const mavparam::Value& v, bool list_value = false);
+  // A PARAM_EXT_ACK, shared by handle_set's immediate acks and poll_result's
+  // completion ack.
+  void queue_ack(const char id16[16], const mavparam::Value* v, uint8_t mav_type, uint8_t result);
+  void queue_status(const std::string& text);
   void log(const std::string& line) const;
 
   std::string cfg_path_;
+  ApplyPort port_;
   std::function<void(const std::string&)> log_;
   struct Out {
     std::vector<uint8_t> bytes;
@@ -118,6 +139,21 @@ class MavComponent {
   std::deque<Out> queue_;
   size_t list_queued_ = 0;   // list values in queue_
   MavComponentStats stats_;
+
+  // The one set submitted to the applier and not yet resolved: ConfigApplier
+  // itself allows only one apply in flight, so at most one of these is ever
+  // pending. Remembered so poll_results can ack with the row's identity and
+  // pre-set value without re-reading the file.
+  struct Pending {
+    size_t idx = 0;
+    char id16[16] = {};
+    uint8_t row_type = 0;
+    mavparam::Value cur{cfgparam::Type::Bool};
+    std::string rendered;
+    std::string field;
+  };
+  bool has_pending_ = false;
+  Pending pending_;
 };
 
 }  // namespace mabur

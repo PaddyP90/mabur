@@ -2,11 +2,13 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <cstring>
 #include <exception>
 #include <utility>
 
 #include "config.h"
+#include "config_apply.h"
 #include "config_write.h"
 #include "mabur/config_params.h"
 #include "mabur/mav.h"
@@ -59,10 +61,21 @@ bool current_value(const std::string& path, size_t idx, Value* out, std::string*
   }
 }
 
+// The applier's own log wording for a path, for the completion log line.
+const char* apply_path_name(ConfigApplyPath p) {
+  switch (p) {
+    case ConfigApplyPath::Knob: return "knob";
+    case ConfigApplyPath::Reprogram: return "reprogram";
+    case ConfigApplyPath::Rebuild: return "rebuild";
+  }
+  return "rebuild";
+}
+
 }  // namespace
 
-MavComponent::MavComponent(std::string cfg_path, std::function<void(const std::string&)> log)
-    : cfg_path_(std::move(cfg_path)), log_(std::move(log)) {
+MavComponent::MavComponent(std::string cfg_path, ApplyPort port,
+                           std::function<void(const std::string&)> log)
+    : cfg_path_(std::move(cfg_path)), port_(std::move(port)), log_(std::move(log)) {
   mavlink_reset_channel_status(kChanDroneRx);
 }
 
@@ -179,6 +192,25 @@ void MavComponent::queue_value(size_t idx, const Value& v, bool list_value) {
   queue(m, list_value);
 }
 
+void MavComponent::queue_ack(const char id16[16], const Value* v, uint8_t mav_type,
+                             uint8_t result) {
+  char wire[128] = {};
+  if (v) mavparam::encode_wire(*v, wire);
+  Msg m;
+  mavlink_msg_param_ext_ack_pack_chan(kSysId, kCompId, kChanDroneRx, &m.m, id16, wire, mav_type,
+                                      result);
+  queue(m);
+}
+
+void MavComponent::queue_status(const std::string& text) {
+  char buf[kStatusTextLen] = {};
+  std::memcpy(buf, text.data(), std::min(text.size(), kStatusTextLen));
+  Msg m;
+  mavlink_msg_statustext_pack_chan(kSysId, kCompId, kChanDroneRx, &m.m, MAV_SEVERITY_ERROR, buf, 0,
+                                   0);
+  queue(m);
+}
+
 void MavComponent::handle_list() {
   if (list_queued_ > 0) {
     ++stats_.list_coalesced;
@@ -219,21 +251,9 @@ void MavComponent::handle_read(const char id16[16], int16_t index) {
 void MavComponent::handle_set(const char id16[16], const char value[128], uint8_t type) {
   const std::string shown = printable_id(id16);
   auto ack = [&](const Value* v, uint8_t mav_type, uint8_t result) {
-    char wire[128] = {};
-    if (v) mavparam::encode_wire(*v, wire);
-    Msg m;
-    mavlink_msg_param_ext_ack_pack_chan(kSysId, kCompId, kChanDroneRx, &m.m, id16, wire,
-                                        mav_type, result);
-    queue(m);
+    queue_ack(id16, v, mav_type, result);
   };
-  auto status = [&](const std::string& text) {
-    char buf[kStatusTextLen] = {};
-    std::memcpy(buf, text.data(), std::min(text.size(), kStatusTextLen));
-    Msg m;
-    mavlink_msg_statustext_pack_chan(kSysId, kCompId, kChanDroneRx, &m.m, MAV_SEVERITY_ERROR,
-                                     buf, 0, 0);
-    queue(m);
-  };
+  auto status = [&](const std::string& text) { queue_status(text); };
 
   const int found = cfgparam::find(id16);
   if (found < 0) {
@@ -299,18 +319,71 @@ void MavComponent::handle_set(const char id16[16], const char value[128], uint8_
     log("set " + shown + " = " + rendered + " (" + field + ", unchanged)");
     return;
   }
-  const PublishResult pr = publish_config(cfg_path_, patched, "pre-param", &err);
-  if (pr != PublishResult::Ok) {
-    refuse(PARAM_ACK_FAILED, pr == PublishResult::ReparseFailed ? loader_reason(err) : err, true);
+  // The candidate as the boot loader would see it, before handing this row
+  // to the applier: a row the loader would refuse (an ordering rule, an
+  // out-of-range value past render_toml's own checks) is caught here, the
+  // same way publish_config's own verify step used to, so the applier is
+  // never asked to apply a candidate that can't boot. On success the file
+  // is left as-is; the applier re-reads, re-patches and publishes it under
+  // its own lock, so there's nothing to clean up here.
+  const std::string tmp = cfg_path_ + ".new";
+  if (!write_file_fsync(tmp, patched)) {
+    refuse(PARAM_ACK_FAILED, "failed to write " + tmp, true);
     return;
   }
-  // The ack reports what the published file loads as; the loader just
-  // accepted these bytes, so the fallback is only for a vanished file.
-  Value now = want;
-  (void)current_value(cfg_path_, idx, &now, &err);
-  ack(&now, row_type, PARAM_ACK_ACCEPTED);
-  ++stats_.sets_ok;
-  log("set " + shown + " = " + rendered + " (" + field + ")");
+  try {
+    (void)load_config(tmp);
+  } catch (const std::exception& e) {
+    std::remove(tmp.c_str());
+    refuse(PARAM_ACK_FAILED, loader_reason(e.what()), true);
+    return;
+  }
+
+  std::string why;
+  if (!port_.submit(idx, rendered, &why)) {
+    refuse(PARAM_ACK_FAILED, why, true);
+    return;
+  }
+  // The file hasn't changed yet -- the ack reports the value still on
+  // record until the applier's result lands in poll_results.
+  std::memcpy(pending_.id16, id16, cfgparam::kMaxIdLen);
+  pending_.idx = idx;
+  pending_.row_type = row_type;
+  pending_.cur = cur;
+  pending_.rendered = rendered;
+  pending_.field = field;
+  has_pending_ = true;
+  ack(&cur, row_type, PARAM_ACK_IN_PROGRESS);
+  ++stats_.sets_in_progress;
+  log("set " + shown + " = " + rendered + " (" + field + ") in progress");
+}
+
+void MavComponent::poll_results() {
+  ConfigApplyResult r;
+  if (!port_.take_result(&r)) return;
+  if (!has_pending_) {
+    log("applier result with no set pending, dropped");
+    return;
+  }
+  const Pending p = pending_;
+  has_pending_ = false;
+  const std::string shown = printable_id(p.id16);
+  if (r.ok) {
+    // The ack reports what the published file loads as; the applier just
+    // published these bytes, so the fallback is only for a vanished file.
+    Value now = p.cur;
+    std::string err;
+    (void)current_value(cfg_path_, p.idx, &now, &err);
+    queue_ack(p.id16, &now, p.row_type, PARAM_ACK_ACCEPTED);
+    ++stats_.sets_ok;
+    log("set " + shown + " = " + p.rendered + " (" + p.field + ") applied " +
+        apply_path_name(r.path) + " " + std::to_string(r.ms) + " ms");
+  } else {
+    queue_ack(p.id16, &p.cur, p.row_type, PARAM_ACK_FAILED);
+    queue_status(r.reason);
+    ++stats_.sets_refused;
+    log("set " + shown + " refused: " + r.reason);
+  }
 }
 
 }  // namespace mabur
