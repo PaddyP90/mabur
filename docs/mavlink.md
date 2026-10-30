@@ -27,7 +27,7 @@ MAVLink system on the network. There is no operator screen for it yet.
 | drone: MAV thread, tag and counter check | `drone/src/main.cpp` (`mbr-mav`), `RcAgent::check_mav` |
 | GS: the tunnel (shared GS core) | `gs/src/mav_tunnel.h` |
 | GS: the UDP endpoint | `gs/src/mav_endpoint.h` |
-| GS: the ground client (list/read/link state) | `gs/src/param_client.h` |
+| GS: the ground client (list/read/set, link and heartbeat state) | `gs/src/param_client.h` |
 
 ## The wire: `T_MAV`
 
@@ -341,9 +341,10 @@ Boot log: `maburgs: mavlink endpoint udp <bind>:<port>` or
 `ParamClient` (`gs/src/param_client.h`) is the ground-side PARAM_EXT_*
 protocol client: list, read, set and link/heartbeat state, driven only by
 a send callback and `on_packet`/`tick(now)` -- pure data handling, no
-socket or clock of its own. Not wired into `maburgs` or the web GS yet;
-either could feed it by fanning the tunnel's `deliver` callback out to it
-alongside `mav_endpoint`'s UDP bridge.
+socket or clock of its own. The web GS core owns one (`docs/web-gs.md`
+"MAVLink seam"), fed by the tunnel's `deliver` callback, and its VTX tab
+is the operator screen onto it. `maburgs` does not run one: it only
+bridges the tunnel to the UDP endpoint.
 
 - **Link.** `set_linked(true)` starts a fresh list: every row is cleared,
   `list` becomes `Pending`, and one `PARAM_EXT_REQUEST_LIST` goes to
@@ -354,25 +355,30 @@ alongside `mav_endpoint`'s UDP bridge.
   Independent of this is the drone heartbeat: `alive()` is true while a
   `HEARTBEAT` from 1/191 arrived within the last 3 s; a heartbeat that
   arrives while already alive only refreshes the timestamp.
-- **List.** While `list` is `Pending`, each row still missing a value is
-  re-read individually by `PARAM_EXT_REQUEST_READ` (`param_index` set, the
-  id left blank) once every 2 s, for up to 3 rounds; `list` reaches
-  `Complete` as soon as every row has a value, or `Partial` once the
-  rounds run out with rows still missing. A `PARAM_EXT_VALUE` whose
+- **List.** While `list` is `Pending`, each row that has not answered
+  since the round began (no `PARAM_EXT_VALUE` or ack carrying its value)
+  is re-read individually by `PARAM_EXT_REQUEST_READ` (`param_index` set,
+  the id left blank) once every 2 s, for up to 3 rounds; `list` reaches
+  `Complete` as soon as every row has answered, or `Partial` once the
+  rounds run out with rows still silent. A `PARAM_EXT_VALUE` whose
   `param_count` disagrees with the table's own row count flags
   `table_mismatch`, but the value is still stored when its id is known; an
   id the table doesn't have is dropped and counted. `refresh()` starts the
   same round again without clearing the rows already held, for a UI's
-  manual re-list.
+  manual re-list: a held row keeps its value on show but is re-read like a
+  missing one until it answers again, and so is every row after the
+  re-list a rebuild's `ACCEPTED` starts.
 - **Set.** `set(row, text, now, &why)` refuses (`false`, `*why`) while
   unlinked ("not linked"), while another set is already in flight
   ("apply in progress"), for an out-of-range row ("no such parameter"),
   or for text that doesn't parse for the row's type ("bad value for
   `<type>`"); a refusal on a row the table has marks that row `Failed`
-  with `*why` as its status. An accepted set sends one `PARAM_EXT_SET` and
-  marks the row `Sending`, then resends it every 2 s, up to 3 times, while
-  no ack for it has arrived; the row times out (one
-  `PARAM_EXT_REQUEST_READ` follows) if nothing ever answers. The row's
+  with `*why` as its status. An accepted set sends one `PARAM_EXT_SET`,
+  marks the row `Sending` and clears its status (so a reason from an
+  earlier set never shows against this one), then resends it every 2 s,
+  up to 3 times, while no ack for it has arrived; the row times out
+  (`result_ms` stamped, one `PARAM_EXT_REQUEST_READ` follows) if nothing
+  ever answers. The row's
   first `PARAM_ACK_IN_PROGRESS` moves it to `InProgress` and opens a 15 s
   deadline from that moment -- a repeated `IN_PROGRESS` updates the row's
   value but never pushes the deadline out, and the row times out the same

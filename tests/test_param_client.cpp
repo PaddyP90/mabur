@@ -393,6 +393,33 @@ TEST(failed_then_status_fills_status) {
   CHECK(r.c.state().rows[8].status == "record.fps: must be in [1, venc.fps]");
 }
 
+TEST(new_set_clears_the_previous_status) {
+  Rig r;
+  link_and_complete_list(r, 1000);
+  std::string why;
+  mabur::paramval::Value v{mabur::cfgparam::Type::Int32};
+  v.i = 30;
+  char wire[128];
+  mabur::paramval::encode_wire(v, wire);
+
+  REQUIRE(r.c.set(8, "5", 2000, &why));
+  Bytes fail = ack_pkt("REC_FPS", 6, wire, PARAM_ACK_FAILED);
+  r.c.on_packet(fail.data(), fail.size(), 2050);
+  Bytes s1 = status_pkt("record.fps: must be in [1, venc.fps]");
+  r.c.on_packet(s1.data(), s1.size(), 2060);
+  REQUIRE(r.c.state().rows[8].status == "record.fps: must be in [1, venc.fps]");
+
+  // A later set whose FAILED arrives with no STATUSTEXT (lost) must not
+  // show the first set's unrelated reason.
+  REQUIRE(r.c.set(8, "6", 5000, &why));
+  CHECK(r.c.state().rows[8].status.empty());
+  CHECK(r.c.state().rows[8].st == ParamRowState::Sending);
+  r.c.on_packet(fail.data(), fail.size(), 5050);
+  CHECK(r.c.state().rows[8].st == ParamRowState::Failed);
+  CHECK(r.c.state().rows[8].status.empty());
+  CHECK(r.c.state().rows[8].result_ms == 5050);
+}
+
 TEST(status_before_final_ack_lands_on_pending_row) {
   Rig r;
   link_and_complete_list(r, 1000);
@@ -431,6 +458,7 @@ TEST(resend_stops_at_first_ack) {
   r.c.tick(2000 + 8004);
   CHECK(r.sent.size() == 5);
   CHECK(r.c.state().rows[4].st == ParamRowState::Timeout);
+  CHECK(r.c.state().rows[4].result_ms == 2000 + 8004);  // stamped, so its age means something
   CHECK(r.c.state().pending_row == -1);
   CHECK(r.c.stats().timeouts == 1);
   {
@@ -488,6 +516,7 @@ TEST(final_deadline_from_first_in_progress) {
 
   r.c.tick(2000 + 15001);  // just after
   CHECK(r.c.state().rows[4].st == ParamRowState::Timeout);
+  CHECK(r.c.state().rows[4].result_ms == 2000 + 15001);
   CHECK(r.c.state().pending_row == -1);
   CHECK(r.c.stats().timeouts == 1);
   REQUIRE(r.sent.size() == 1);
@@ -517,6 +546,44 @@ TEST(accepted_rebuild_row_relists) {
   auto msgs = parse(r.sent[0]);
   REQUIRE(msgs.size() == 1);
   CHECK(msgs[0].msgid == MAVLINK_MSG_ID_PARAM_EXT_REQUEST_LIST);
+}
+
+// The re-list after a rebuild starts with every row already holding a
+// value. A row whose answer to that list is lost (here REC_SIZE, the one
+// a VENC_MODE set can move) must still be re-read by index -- its held
+// value stays displayed meanwhile, but it is not this round's answer.
+TEST(relist_rereads_rows_that_did_not_answer_this_round) {
+  Rig r;
+  link_and_complete_list(r, 1000);
+  std::string why;
+  REQUIRE(r.c.set(2, "120@1728x816", 2000, &why));
+  mabur::paramval::Value v{mabur::cfgparam::Type::Str};
+  v.s = "120@1728x816";
+  char wire[128];
+  mabur::paramval::encode_wire(v, wire);
+  Bytes a = ack_pkt("VENC_MODE", 11, wire, PARAM_ACK_ACCEPTED);
+  r.c.on_packet(a.data(), a.size(), 2050);
+  REQUIRE(r.c.state().list == ParamListState::Pending);
+  r.sent.clear();
+
+  for (size_t i = 0; i < mabur::cfgparam::kCount; ++i) {
+    if (i == 9) continue;  // REC_SIZE's value is lost on the way
+    feed_row(r.c, i, 2100);
+  }
+  CHECK(r.c.state().list == ParamListState::Pending);
+  CHECK(r.c.state().rows[9].have_value);  // the earlier value is still shown
+
+  r.c.tick(2050 + 2001);
+  REQUIRE(r.sent.size() == 1);
+  auto msgs = parse(r.sent[0]);
+  REQUIRE(msgs.size() == 1);
+  CHECK(msgs[0].msgid == MAVLINK_MSG_ID_PARAM_EXT_REQUEST_READ);
+  mavlink_param_ext_request_read_t p;
+  mavlink_msg_param_ext_request_read_decode(&msgs[0], &p);
+  CHECK(p.param_index == 9);
+
+  feed_row(r.c, 9, 4100);
+  CHECK(r.c.state().list == ParamListState::Complete);
 }
 
 TEST(accepted_knob_row_does_not_relist) {

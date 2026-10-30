@@ -63,6 +63,7 @@ void ParamClient::send_set_packet(size_t idx, const mabur::paramval::Value& v) {
 
 void ParamClient::begin_list(uint64_t now_ms) {
   state_.list = ParamListState::Pending;
+  for (bool& f : fresh_) f = false;
   list_last_req_ms_ = now_ms;
   list_rounds_ = 0;
   send_list_request();
@@ -75,9 +76,10 @@ void ParamClient::refuse(size_t row, const std::string& why, uint64_t now_ms) {
   state_.rows[row].result_ms = now_ms;
 }
 
-void ParamClient::timeout_pending() {
+void ParamClient::timeout_pending(uint64_t now_ms) {
   const size_t idx = static_cast<size_t>(state_.pending_row);
   state_.rows[idx].st = ParamRowState::Timeout;
+  state_.rows[idx].result_ms = now_ms;
   state_.pending_row = -1;
   set_in_progress_ = false;
   set_resends_ = 0;
@@ -98,6 +100,7 @@ void ParamClient::set_linked(bool linked, uint64_t now_ms) {
   state_ = ParamClientState{};
   state_.linked = linked;
   alive_cached_ = false;
+  for (bool& f : fresh_) f = false;
   list_rounds_ = 0;
   list_last_req_ms_ = now_ms;
   if (linked) {
@@ -153,11 +156,12 @@ void ParamClient::on_packet(const uint8_t* p, size_t n, uint64_t now_ms) {
       }
       state_.rows[idx].value = val;
       state_.rows[idx].have_value = true;
+      fresh_[idx] = true;
       changed = true;
       if (state_.list == ParamListState::Pending || state_.list == ParamListState::Partial) {
         bool all = true;
         for (size_t i = 0; i < kCount; ++i) {
-          if (!state_.rows[i].have_value) {
+          if (!fresh_[i]) {
             all = false;
             break;
           }
@@ -183,6 +187,7 @@ void ParamClient::on_packet(const uint8_t* p, size_t n, uint64_t now_ms) {
       ParamRow& row = state_.rows[idx];
       row.value = val;
       row.have_value = true;
+      fresh_[idx] = true;  // an ack carries the drone's value as of now too
       changed = true;
       if (static_cast<int>(idx) != state_.pending_row) break;  // not the row waiting on an ack
       switch (a.param_result) {
@@ -267,7 +272,7 @@ void ParamClient::tick(uint64_t now_ms) {
   if (state_.pending_row != -1) {
     if (set_in_progress_) {
       if (now_ms >= set_deadline_ms_) {
-        timeout_pending();
+        timeout_pending(now_ms);
         changed = true;
       }
     } else if (now_ms - set_send_ms_ >= kParamSetRetryMs) {
@@ -277,7 +282,7 @@ void ParamClient::tick(uint64_t now_ms) {
         set_send_ms_ = now_ms;
         // A resend changes nothing observable through state(): no bump.
       } else {
-        timeout_pending();
+        timeout_pending(now_ms);
         changed = true;
       }
     }
@@ -290,7 +295,7 @@ void ParamClient::tick(uint64_t now_ms) {
     } else {
       bool any_missing = false;
       for (size_t i = 0; i < kCount; ++i) {
-        if (!state_.rows[i].have_value) {
+        if (!fresh_[i]) {
           send_read_request(i);
           any_missing = true;
         }
@@ -333,6 +338,10 @@ bool ParamClient::set(size_t row, const std::string& text, uint64_t now_ms, std:
     } else {
       send_set_packet(row, v);
       state_.rows[row].st = ParamRowState::Sending;
+      // A new set owns the row's result: an earlier reason must not
+      // survive onto an answer that brings none of its own.
+      state_.rows[row].status.clear();
+      state_.rows[row].result_ms = 0;
       state_.pending_row = static_cast<int>(row);
       set_value_ = v;
       set_send_ms_ = now_ms;

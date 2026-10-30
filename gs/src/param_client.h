@@ -6,26 +6,29 @@
 // tunnel and the clock.
 //
 // List. set_linked(true) clears every row, sets list = Pending and sends
-// one PARAM_EXT_REQUEST_LIST. While Pending, every row still missing a
-// value is re-read individually by PARAM_EXT_REQUEST_READ (param_index set,
-// id left blank) once every kParamListRetryMs, for at most kParamListRounds
-// rounds; list reaches Complete as soon as every row has a value (checked
-// as values arrive, not only on tick) or Partial once the rounds run out
-// with rows still missing. A PARAM_EXT_VALUE whose param_count disagrees
-// with the table's own row count flags table_mismatch, but the value is
-// still stored when its id is known; an id the table doesn't have is
-// dropped and counted (drop_unknown). refresh() starts the same round
-// again without clearing the rows already held. set_linked(false) drops
-// every row back to the unlinked defaults.
+// one PARAM_EXT_REQUEST_LIST. While Pending, every row that no value has
+// reached since the round began is re-read individually by
+// PARAM_EXT_REQUEST_READ (param_index set, id left blank) once every
+// kParamListRetryMs, for at most kParamListRounds rounds; list reaches
+// Complete as soon as every row has answered this round (checked as
+// values arrive, not only on tick) or Partial once the rounds run out with
+// rows still silent. A PARAM_EXT_VALUE whose param_count disagrees with
+// the table's own row count flags table_mismatch, but the value is still
+// stored when its id is known; an id the table doesn't have is dropped and
+// counted (drop_unknown). refresh() starts the same round again without
+// clearing the rows already held: they keep their values (have_value stays
+// true) but are re-read like missing ones until they answer again.
+// set_linked(false) drops every row back to the unlinked defaults.
 //
 // Set. One set is ever in flight: set() refuses a second one ("apply in
 // progress"), an unknown row ("no such parameter"), a value that doesn't
 // parse for the row's type ("bad value for <type>"), or any set while
 // unlinked ("not linked") -- a refusal on a known row also records it
 // (rows[row].st = Failed, status = the refusal, result_ms = now). An
-// accepted set sends one PARAM_EXT_SET and marks the row Sending; while
-// Sending, tick() resends it every kParamSetRetryMs, at most
-// kParamSetRetries times, giving up with Timeout (and one
+// accepted set sends one PARAM_EXT_SET, marks the row Sending and clears
+// its status, so an earlier reason never outlives the set that replaced
+// it; while Sending, tick() resends it every kParamSetRetryMs, at most
+// kParamSetRetries times, giving up with Timeout (result_ms = now, and one
 // PARAM_EXT_REQUEST_READ of the row) if nothing ever answers. The first
 // PARAM_ACK_IN_PROGRESS for the pending row moves it to InProgress and
 // starts a kParamFinalMs deadline from that moment -- a repeated
@@ -145,7 +148,7 @@ class ParamClient {
   void send_set_packet(size_t idx, const mabur::paramval::Value& v);
   void begin_list(uint64_t now_ms);  // the shared body of refresh() and an ACCEPTED Rebuild row
   void refuse(size_t row, const std::string& why, uint64_t now_ms);
-  void timeout_pending();  // Timeout from either tick() path: resends exhausted or the final deadline
+  void timeout_pending(uint64_t now_ms);  // Timeout from either tick() path: resends exhausted or the final deadline
 
   SendFn send_;
   uint8_t sysid_, compid_;
@@ -155,6 +158,10 @@ class ParamClient {
   bool alive_cached_ = false;      // alive() as of the end of the last call, to detect a flip
   uint64_t list_last_req_ms_ = 0;  // when the list request, or the last retry round, went out
   int list_rounds_ = 0;            // retry rounds sent for the current list
+  // Per row: a value (PARAM_EXT_VALUE or an ack) arrived since the current
+  // list round began. The round's completion and its re-reads go by this,
+  // not have_value, so a row held from an earlier round is still re-read.
+  bool fresh_[mabur::cfgparam::kCount] = {};
 
   // The one set in flight, if any (state_.pending_row is the public half).
   mabur::paramval::Value set_value_{};  // re-sent verbatim by every resend
