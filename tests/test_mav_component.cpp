@@ -2,9 +2,11 @@
 // thirteen cfgparam::kTable keys, against a real copy of the bundle config
 // and the real loader.
 #include <array>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <future>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -201,7 +203,9 @@ mavlink_param_ext_ack_t ack_of(const mavlink_message_t& m) {
 }
 
 // A fake ConfigApplier port: submit() records the row and rendered value and
-// refuses with refuse_with when set; complete() makes the next take_result()
+// refuses with refuse_with when set; an accepted submit leaves it busy until
+// take_result() hands the result over, as the real applier is; complete()
+// makes the next take_result()
 // return {ok, reason} and, for ok, also does the publish the real applier
 // would -- read, patch_toml_key the submitted row, publish_config under
 // lock_config_writes() -- so file-content assertions made after a set
@@ -215,6 +219,7 @@ struct FakeApply {
   std::vector<Submit> submits;
   std::string refuse_with;
   bool has_result = false;
+  bool busy = false;
   ConfigApplyResult result{};
 
   bool submit(size_t row, const std::string& rendered, std::string* why) {
@@ -223,6 +228,7 @@ struct FakeApply {
       if (why) *why = refuse_with;
       return false;
     }
+    busy = true;
     return true;
   }
 
@@ -230,6 +236,7 @@ struct FakeApply {
     if (!has_result) return false;
     *out = result;
     has_result = false;
+    busy = false;
     return true;
   }
 
@@ -255,6 +262,7 @@ struct FakeApply {
           return submit(row, rendered, why);
         },
         [this](ConfigApplyResult* out) { return take_result(out); },
+        [this] { return busy; },
     };
   }
 };
@@ -928,6 +936,90 @@ TEST(loader_refusal_never_submits) {
   auto c = make(b.path());
   auto r = do_set(c, set_str("VENC_SIZE", "1x"));
   CHECK(r.ack.param_result == PARAM_ACK_FAILED && fake.submits.empty());
+}
+
+// Holds lock_config_writes() on its own thread until release(): a set that
+// tried to take the lock would block behind it.
+struct LockHolder {
+  std::promise<void> held, go;
+  std::thread t;
+  LockHolder() {
+    t = std::thread([this] {
+      auto lock = lock_config_writes();
+      held.set_value();
+      go.get_future().wait();
+    });
+    held.get_future().wait();
+  }
+  void release() {
+    if (t.joinable()) {
+      go.set_value();
+      t.join();
+    }
+  }
+  ~LockHolder() { release(); }
+};
+
+// Runs one set against `c` on a worker thread while another thread holds
+// the config-write lock; false when the set did not return within 2 s (it
+// blocked on the lock).
+bool set_without_lock(MavComponent& c, const mavlink_message_t& set, SetReply* r) {
+  LockHolder holder;
+  auto done = std::async(std::launch::async, [&] { feed(c, set); });
+  const bool returned = done.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+  holder.release();
+  done.wait();
+  auto msgs = drain(c);
+  REQUIRE(!msgs.empty());
+  r->ack = ack_of(msgs[0]);
+  r->rest.assign(msgs.begin() + 1, msgs.end());
+  return returned;
+}
+
+TEST(set_while_busy_is_refused_without_taking_the_lock) {
+  ScratchBundle b;
+  auto c = make(b.path());
+  REQUIRE(do_set(c, set_int("REC_FPS", 30)).ack.param_result == PARAM_ACK_IN_PROGRESS);
+  const std::string before = slurp(b.path());
+  SetReply r;
+  CHECK(set_without_lock(c, set_int("REC_BITRATE", 25000), &r));
+  CHECK(r.ack.param_result == PARAM_ACK_FAILED);
+  REQUIRE(r.rest.size() == 1);
+  CHECK(statustext_of(r.rest[0]) == "apply in progress");
+  CHECK(fake.submits.size() == 1);   // never reached the applier
+  CHECK(slurp(b.path()) == before);
+  // A different value for the pending row is a different set: refused too.
+  CHECK(set_without_lock(c, set_int("REC_FPS", 45), &r));
+  CHECK(r.ack.param_result == PARAM_ACK_FAILED && wire_i32(r.ack.param_value) == 60);
+  CHECK(fake.submits.size() == 1);
+  // The pending set still resolves normally.
+  fake.complete(true, "");
+  c.poll_results();
+  auto msgs = drain(c);
+  REQUIRE(msgs.size() == 1);
+  CHECK(ack_of(msgs[0]).param_result == PARAM_ACK_ACCEPTED);
+  CHECK(wire_i32(ack_of(msgs[0]).param_value) == 30);
+}
+
+TEST(repeat_of_the_pending_set_is_acked_in_progress_again) {
+  ScratchBundle b;
+  auto c = make(b.path());
+  REQUIRE(do_set(c, set_int("REC_FPS", 30)).ack.param_result == PARAM_ACK_IN_PROGRESS);
+  const std::string before = slurp(b.path());
+  SetReply r;
+  CHECK(set_without_lock(c, set_int("REC_FPS", 30), &r));
+  CHECK(r.ack.param_result == PARAM_ACK_IN_PROGRESS && wire_i32(r.ack.param_value) == 60);
+  CHECK(r.rest.empty());   // no STATUSTEXT
+  CHECK(fake.submits.size() == 1);
+  CHECK(slurp(b.path()) == before);
+  CHECK(!exists(b.path() + ".new"));
+  CHECK(c.stats().sets_refused == 0);
+  // One final ack answers both: the first completion resolves the set.
+  fake.complete(true, "");
+  c.poll_results();
+  auto msgs = drain(c);
+  REQUIRE(msgs.size() == 1);
+  CHECK(ack_of(msgs[0]).param_result == PARAM_ACK_ACCEPTED);
 }
 
 MTEST_MAIN

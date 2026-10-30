@@ -267,6 +267,38 @@ void MavComponent::handle_set(const char id16[16], const char value[128], uint8_
   const uint8_t row_type = cfgparam::mav_type(row.type);
   const std::string field = std::string(row.section) + "." + row.key;
 
+  // An apply in flight holds lock_config_writes() until it publishes, so
+  // this is answered before the lock is touched: waiting for it would stop
+  // the MAV loop's heartbeat and drain for the length of the apply. A repeat
+  // of the pending set (a ground app re-sending after a lost IN_PROGRESS)
+  // is told IN_PROGRESS again and is resolved by the one final ack; any
+  // other set is refused, with the value the file holds, read without the
+  // lock (the file is only ever replaced by rename).
+  if (port_.busy && port_.busy()) {
+    Value want;
+    std::string rendered;
+    const bool decoded =
+        mavparam::decode_wire(idx, type, value, &want) && mavparam::render_toml(want, &rendered);
+    if (decoded && has_pending_ && pending_.idx == idx && pending_.rendered == rendered) {
+      ack(&pending_.cur, row_type, PARAM_ACK_IN_PROGRESS);
+      log("set " + shown + " = " + rendered + " (" + field + ") in progress, repeat");
+      return;
+    }
+    Value cur{row.type};
+    bool have_cur = true;
+    if (has_pending_ && pending_.idx == idx) {
+      cur = pending_.cur;
+    } else {
+      std::string err;
+      have_cur = current_value(cfg_path_, idx, &cur, &err);
+    }
+    ack(have_cur ? &cur : nullptr, row_type, PARAM_ACK_FAILED);
+    status("apply in progress");
+    ++stats_.sets_refused;
+    log("set " + shown + " refused: apply in progress");
+    return;
+  }
+
   // Held from the read of the current file through the candidate write and
   // load and the hand-off to the applier, so the applier's own use of
   // <cfg_path>.new and a concurrent calibration publish can't interleave

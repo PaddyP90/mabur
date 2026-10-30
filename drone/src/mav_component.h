@@ -6,23 +6,25 @@
 //
 // The failure mode this file exists to prevent is the one config_write.h
 // guards against: a config maburd cannot load is a drone stuck in a 2 s
-// respawn loop with no console. A set therefore never writes anything the
-// real loader would refuse. It reads the file, patches the one key's line
-// (patch_toml_key, so every comment survives), and hands the result to
-// publish_config, which verifies the candidate with mabur::load_config
-// before it replaces the file. Cross-key rules (record.fps <= venc.fps,
-// venc.size against the fps mode, low_power.enable needs msp.enable) are
-// the loader's, not this file's: a set that breaks one is answered
-// PARAM_ACK_FAILED with the loader's message in a STATUSTEXT, so the
-// operator learns which key must move first. The read-patch-publish
-// sequence holds lock_config_writes() throughout, so a calibration write on
-// another thread can't be lost between this read and this publish.
+// respawn loop with no console. A set therefore never hands on anything the
+// real loader would refuse. Under lock_config_writes() it reads the file,
+// patches the one key's line (patch_toml_key, so every comment survives)
+// and loads the candidate with mabur::load_config; cross-key rules
+// (record.fps <= venc.fps, venc.size against the fps mode, low_power.enable
+// needs msp.enable) are the loader's, not this file's, so a set that breaks
+// one is answered PARAM_ACK_FAILED with the loader's message in a
+// STATUSTEXT and the operator learns which key must move first. A candidate
+// that loads is submitted to ConfigApplier (ApplyPort), acked
+// PARAM_ACK_IN_PROGRESS, and resolved by poll_results once the applier has
+// applied it to the running daemon and published the file, or refused it.
 //
-// A set changes the file, not the running daemon's Config. Reads and acks
-// report the file: the ack carries the value read back from the published
-// file, and a set whose rendered line is already the one in the file, or
-// whose value equals what the file loads as, is acked without writing (no
-// flash wear for a ground app that re-sends).
+// Reads and acks report the file: the final ack carries the value read
+// back from the published file, and a set whose rendered line is already
+// the one in the file, or whose value equals what the file loads as, is
+// acked without submitting (no flash wear for a ground app that re-sends).
+// While an apply is in flight a repeat of the pending set is acked
+// IN_PROGRESS again and any other set is refused "apply in progress",
+// both without taking the lock the applier holds.
 //
 // Packets: inbound is MAVLink 2 only; a v1 packet, a bad CRC or a packet
 // cut off at the end of a payload is dropped and counted, and the parser
@@ -57,13 +59,18 @@
 
 namespace mabur {
 
-// The slice of ConfigApplier a set needs: submit a patched row and poll for
-// its result. A real ConfigApplier's submit/take_result bind directly; a
-// test supplies a fake so it can drive the timing of a completion without a
-// second thread.
+// The slice of ConfigApplier a set needs: submit a patched row, poll for
+// its result, and ask whether an apply is in flight. A real ConfigApplier's
+// submit/take_result/busy bind directly; a test supplies a fake so it can
+// drive the timing of a completion without a second thread.
 struct ApplyPort {
   std::function<bool(size_t row, const std::string& rendered, std::string* why)> submit;
   std::function<bool(ConfigApplyResult*)> take_result;
+  // True from an accepted submit until take_result hands its result over.
+  // The applier holds lock_config_writes() for the whole apply, so a set
+  // checks this before taking the lock: the MAV thread never waits out an
+  // apply (a rebuild, or the cold rung's several seconds).
+  std::function<bool()> busy;
 };
 
 // The drone sends a T_MAV frame (drone -> GS) at most this often, each

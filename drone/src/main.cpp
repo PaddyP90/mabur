@@ -1991,9 +1991,18 @@ int run_real_mode(const Config& cfg, uint8_t start_ch, const std::string& cfg_pa
     name_thread("mbr-mav");
     ApplyPort port;
     port.submit = [&applier](size_t row, const std::string& rendered, std::string* why) {
+#ifndef MABUR_HAVE_VENC
+      // No encoder in this build: every rung of the rebuild ladder would
+      // fail and end in the exit rung, so a rebuild row is refused here.
+      if (apply_path_for(row) == ConfigApplyPath::Rebuild) {
+        if (why) *why = "no encoder in this build";
+        return false;
+      }
+#endif
       return applier.submit(row, rendered, why);
     };
     port.take_result = [&applier](ConfigApplyResult* out) { return applier.take_result(out); };
+    port.busy = [&applier] { return applier.busy(); };
     MavComponent comp(cfg_path, std::move(port), [](const std::string& line) {
       std::fprintf(stderr, "%s\n", line.c_str());
     });
