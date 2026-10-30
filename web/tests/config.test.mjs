@@ -5,7 +5,7 @@ import {
   connectBlocker, toOverlayToml, chipChannels, applyEdit, applyRungEdit, describeEdit,
   describeRungEdit, parseKeyText, loadKey, saveKey, KEY_STORE, DEFAULT_KEY_HEX,
   toggleChannel, checkChannelSet, CHANNEL_STORE, loadRememberedChannel, saveRememberedChannel,
-  // startChannel,
+  startChannel,
 } from '../ui/src/lib/config.js';
 
 const mem = (init = {}) => {
