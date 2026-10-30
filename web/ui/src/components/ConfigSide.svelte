@@ -12,7 +12,7 @@
       </div>
       <span class="dim4" style="font-size:12px">{subtitle}</span>
     </div>
-    <button class="btn btn-ghost" type="button" title="Close" aria-label="Close configuration" style="width:32px;height:32px;padding:0" onclick={onClose}><Icon name="x" size="16px" /></button>
+    <button class="btn btn-ghost" type="button" title="Close" aria-label="Close configuration" style="width:32px;height:32px;padding:0;align-self:flex-start;margin-top:2px" onclick={onClose}><Icon name="x" size="16px" /></button>
   </div>
   <div class="body scroll-thin">{#if tab === 'vtx'}{@render vtx?.()}{:else}{@render config?.()}{/if}</div>
 </div>

@@ -5,7 +5,7 @@
   let { tab, onTab, v, spark, groups, onCopy, copyMsg, config, vtx } = $props();
 </script>
 <aside class="side rule-v mono">
-  <div class="seg" style="flex:none">
+  <div class="seg tabs" style="flex:none">
     <label class="seg-opt"><input type="radio" name="webgs-tab" checked={tab === 'stats'} onchange={() => onTab('stats')}><Icon name="chart-line-up" />Stats</label>
     <label class="seg-opt"><input type="radio" name="webgs-tab" checked={tab === 'config'} onchange={() => onTab('config')}><Icon name="sliders-horizontal" />Config</label>
     <label class="seg-opt"><input type="radio" name="webgs-tab" checked={tab === 'vtx'} onchange={() => onTab('vtx')}><Icon name="broadcast" />VTX</label>
@@ -27,5 +27,8 @@
 </aside>
 <style>
   .side { width: 336px; flex: none; display: flex; flex-direction: column; gap: var(--space-4); min-height: 0; padding-left: var(--space-6); }
+  /* Four icon+label tabs in the mono font: the shared segment padding would
+     run Debug past the border at this width. */
+  .tabs .seg-opt { min-width: 0; padding: 7px 6px; gap: 5px; white-space: nowrap; overflow: hidden; }
   .scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; margin-right: -9px; }
 </style>
