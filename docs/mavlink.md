@@ -129,6 +129,10 @@ agent and TX threads.
     non-finite REAL32, or a CUSTOM value with no NUL in its 128 bytes or a
     non-printable byte: `PARAM_ACK_VALUE_UNSUPPORTED` with the current
     value; there is no cross-type coercion;
+  - a `VENC_MODE` value that is not `<fps>@<W>x<H>` — each number a run
+    of 1 to 6 digits, nothing before or after:
+    `PARAM_ACK_VALUE_UNSUPPORTED` with the current value. A well-formed
+    value out of range is the loader's `FAILED`, below;
   - a set to the value the file already holds writes nothing and answers
     `ACCEPTED` immediately, so a ground end may re-send a set whose ack
     it lost;

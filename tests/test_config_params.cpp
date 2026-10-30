@@ -29,6 +29,13 @@ TEST(parse_mode_text_shape) {
   CHECK(!parse_mode_text("100", &f, &w, &h));  CHECK(!parse_mode_text("100@", &f, &w, &h));
   CHECK(!parse_mode_text("100@1728", &f, &w, &h));  CHECK(!parse_mode_text("abc@1x1", &f, &w, &h));
   CHECK(!parse_mode_text("100@1728x972 ", &f, &w, &h));  CHECK(!parse_mode_text("@1x1", &f, &w, &h));
+  // Six digits per number at most: a longer run is a shape refusal, never
+  // a value wrapped back into range.
+  CHECK(parse_mode_text("999999@999999x999999", &f, &w, &h) && f == 999999 && h == 999999);
+  CHECK(!parse_mode_text("1000000@1x1", &f, &w, &h));
+  CHECK(!parse_mode_text("60@1x1000000", &f, &w, &h));
+  CHECK(!parse_mode_text("60@1000000x1", &f, &w, &h));
+  CHECK(!parse_mode_text("4294967356@1x1", &f, &w, &h));
 }
 TEST(ids_unique_and_at_most_16_chars_with_help) {
   std::set<std::string> ids;

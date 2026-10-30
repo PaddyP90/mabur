@@ -183,8 +183,18 @@ bool ConfigApplier::apply_locked(const Job& job, const std::string& field, std::
       return false;
     }
   }
+  // patch_row's record.size follow reads the config this text loads as --
+  // the source handle_set checked the same set against -- never live_,
+  // which an ssh edit the daemon has not reloaded leaves behind the file.
+  Config on_disk;
+  try {
+    on_disk = load_config(cfg_path_);
+  } catch (const std::exception& e) {
+    *reason = "config does not load: " + loader_reason(e.what());
+    return false;
+  }
   std::string patched = text;
-  if (!mavparam::patch_row(&patched, job.row, job.value, live_, followed, reason)) return false;
+  if (!mavparam::patch_row(&patched, job.row, job.value, on_disk, followed, reason)) return false;
   // The candidate is the patched text as the boot loader reads it: the
   // process is never handed a config maburd would refuse to start from.
   const std::string tmp = cfg_path_ + ".new";

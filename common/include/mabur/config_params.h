@@ -1,7 +1,6 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
 #include <cstring>
 #include <string>
 
@@ -63,17 +62,27 @@ inline constexpr int kMaxIdLen = 16;
 // two config keys (venc.fps and venc.size) instead of one.
 inline constexpr size_t kVencModeRow = 2;
 
+// At most this many digits per VENC_MODE number: every value fits an int
+// with room to spare, so the text never overflows on its way in.
+inline constexpr size_t kModeMaxDigits = 6;
+
 // Splits a VENC_MODE text value "<fps>@<WxH>" into its three integers.
-// Shape only: each of fps/w/h is a non-empty run of digits, separated by
-// a literal '@' and 'x', with nothing else before or after -- no range
-// check, that is the loader's job once the pieces land in the config.
+// Shape only: each of fps/w/h is a run of 1..kModeMaxDigits digits,
+// separated by a literal '@' and 'x', with nothing else before or after --
+// no range check, that is the loader's job once the pieces land in the
+// config. A longer run is a shape refusal, never a wrapped value.
 inline bool parse_mode_text(const std::string& text, int* fps, int* w, int* h) {
   size_t i = 0;
   auto digits = [&](int* out) {
     const size_t start = i;
-    while (i < text.size() && text[i] >= '0' && text[i] <= '9') ++i;
+    int v = 0;
+    while (i < text.size() && text[i] >= '0' && text[i] <= '9') {
+      if (i - start >= kModeMaxDigits) return false;
+      v = v * 10 + (text[i] - '0');
+      ++i;
+    }
     if (i == start) return false;
-    *out = std::atoi(text.substr(start, i - start).c_str());
+    *out = v;
     return true;
   };
   if (!digits(fps)) return false;

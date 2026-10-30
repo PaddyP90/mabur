@@ -437,6 +437,34 @@ TEST(external_rewrite_refreshes_live_before_next_apply) {
   CHECK(g.a.live().radio.wall_margin_db == 3.0);
 }
 
+TEST(venc_mode_follow_reads_the_file_not_the_live_config) {
+  // The daemon started with the recorder off; an ssh edit then turned it
+  // on with an explicit 16:9 record.size, never reloaded into live_. An
+  // aspect-changing VENC_MODE must still carry record.size along, as the
+  // file it patches demands, or the candidate fails the loader's aspect
+  // check after the set was already answered IN_PROGRESS.
+  ScratchBundle b;
+  std::string text = slurp(b.path());
+  REQUIRE(patch_toml_key(&text, "record", "enable", "false"));
+  spit(b.path(), text);
+  Fake f;
+  std::vector<std::string> lines;
+  ConfigApplier a{b.path(), load_config(b.path()), f.hooks(),
+                  [&lines](const std::string& l) { lines.push_back(l); }};
+  REQUIRE(!a.live().record.enable);
+  REQUIRE(patch_toml_key(&text, "record", "enable", "true"));
+  spit(b.path(), text);
+  REQUIRE(load_config(b.path()).record.width == 1920);
+
+  const ConfigApplyResult r = apply(a, kVencMode, Value{Type::Str, false, 0, 0, "120@1728x816"});
+  CHECK(r.ok);
+  const Config now = load_config(b.path());
+  CHECK(now.venc.core.fps == 120);
+  CHECK(now.record.width == 1728 && now.record.height == 816);
+  REQUIRE(!lines.empty());
+  CHECK(lines.back().find(" +record.size ") != npos);
+}
+
 TEST(unknown_row_is_refused) {
   Rig g;
   std::string why;
