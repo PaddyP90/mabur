@@ -28,7 +28,59 @@ int round_to_100(double v) { return static_cast<int>(std::lround(v / 100.0) * 10
 RcAgent::RcAgent(const Config& cfg, Actuator& act, OvOverride* ovr, uint8_t start_ch)
     : cfg_(cfg), act_(act), ovr_(ovr),
       channel_(mabur::channel_set_member(cfg.radio.channels, start_ch) ? start_ch
-                                                                        : cfg.radio.channels.front()) {}
+                                                                        : cfg.radio.channels.front()) {
+  // Seed the live knobs from boot config -- a daemon that never calls
+  // set_live_knobs reads exactly what cfg_ would have given it.
+  knob_bitrate_max_kbps_.store(cfg.encoder.bitrate_max_kbps, std::memory_order_relaxed);
+  knob_airtime_budget_milli_.store(
+      static_cast<int>(std::lround(cfg.encoder.airtime_budget * 1000.0)), std::memory_order_relaxed);
+  knob_low_power_enable_.store(cfg.low_power.enable, std::memory_order_relaxed);
+  knob_venc_fps_.store(static_cast<int>(cfg.venc.core.fps), std::memory_order_relaxed);
+  ldpc_live_ = cfg.radio.ldpc;
+}
+
+void RcAgent::set_live_knobs(int bitrate_max_kbps, double airtime_budget, bool low_power_enable,
+                              int venc_fps) {
+  knob_bitrate_max_kbps_.store(bitrate_max_kbps, std::memory_order_relaxed);
+  knob_airtime_budget_milli_.store(static_cast<int>(std::lround(airtime_budget * 1000.0)),
+                                    std::memory_order_relaxed);
+  knob_low_power_enable_.store(low_power_enable, std::memory_order_relaxed);
+  knob_venc_fps_.store(venc_fps, std::memory_order_relaxed);
+}
+
+bool RcAgent::low_power_enabled() const {
+  return knob_low_power_enable_.load(std::memory_order_relaxed);
+}
+
+void RcAgent::note_pipeline_rebuilt() {
+  rebuilt_pending_.store(true, std::memory_order_relaxed);
+}
+
+void RcAgent::note_ldpc_changed(bool ldpc) {
+  ldpc_pending_.store(ldpc ? 1 : 0, std::memory_order_relaxed);
+}
+
+std::array<LayerTxSpec, 2> RcAgent::ladder_live_(PhyMode mode, uint8_t mcs, uint8_t bw) const {
+  return rc::ladder_from(mode, mcs, bw, ldpc_live_);
+}
+
+// note_ldpc_changed's agent-thread consumption: the current op's rung is
+// read back off applied_.ladder[1] (the scored slot every ladder build
+// stamps with the op's own mode/mcs/bw -- see ladder_from), rebuilt under
+// the new flag, and republished. The probe slot, if active, is rebuilt the
+// same way apply_ladder_op built it. shed is untouched: this is the same
+// operating point with a new flag, not a new one, so generation is not
+// bumped either -- reapply_with_shed's rule for an unchanged rung.
+void RcAgent::rebuild_current_op_ldpc_() {
+  const LayerTxSpec rung = applied_.ladder[1];
+  applied_.ladder = ladder_live_(rung.mode, rung.mcs, rung.bw);
+  if (applied_.probe_profile != rc::kNoProbeProfile) {
+    PhyMode pm; uint8_t pmcs, pbw;
+    rc::decode_profile(applied_.probe_profile, pm, pmcs, pbw);
+    applied_.probe = ladder_live_(applied_.ladder[1].mode, pmcs, pbw)[1];
+  }
+  act_.apply_op(applied_);
+}
 
 uint32_t RcAgent::fresh_vtx_nonce_() {
   static thread_local std::mt19937 rng{std::random_device{}()};
@@ -225,7 +277,8 @@ void RcAgent::intake_arm_state_(uint64_t now_ms) {
   // What did NOT change is fail open: `fresh` still gates everything, so
   // silence, a dead UART or an FC that lost power all mean FULL power. A
   // crash that kills the FC therefore gives full-rate video, not this mode.
-  const bool want = cfg_.low_power.enable && fresh && !last_armed_;
+  const bool want =
+      knob_low_power_enable_.load(std::memory_order_relaxed) && fresh && !last_armed_;
   if (want == low_power_active_) return;
   low_power_active_ = want;
   if (want)
@@ -265,7 +318,7 @@ bool RcAgent::idr_due(uint64_t now_ms, bool chain) {
 // hysteresis — failsafe means robust MCS + floor bitrate, and
 // a degraded radio link must never keep flooding at the last LINKED rate.
 void RcAgent::apply_max_range(uint64_t now_ms) {
-  auto ladder = rc::ladder_from(PhyMode::HT, 0, 20, cfg_.radio.ldpc);
+  auto ladder = ladder_live_(PhyMode::HT, 0, 20);
 
   // Forced shed while MAX_RANGE is the operating point (BOOT/RENDEZVOUS or a
   // LINKED->FAILSAFE entry) — held sticky in failsafe_shed_ until an
@@ -321,7 +374,7 @@ void RcAgent::apply_ladder_op(const std::array<LayerTxSpec, 2>& ladder,
     // over it.
     PhyMode pm; uint8_t pmcs, pbw;
     rc::decode_profile(probe_profile, pm, pmcs, pbw);
-    applied_.probe = rc::ladder_from(ladder[1].mode, pmcs, pbw, cfg_.radio.ldpc)[1];
+    applied_.probe = ladder_live_(ladder[1].mode, pmcs, pbw)[1];
   }
   applied_.shed[0] = false;
   // shed_level_ still counts 0..3 (congestion semantics untouched — see
@@ -453,13 +506,14 @@ void RcAgent::run_bitrate_policy(uint64_t now_ms, bool force) {
   // gone. (A probe's different MCS is deliberately NOT a term: see rate_e.)
   const double denom = kShareBase * (1.0 + ovb) / rate_b +
                        (1.0 - kShareBase) * (1.0 + ove) / rate_e;
-  double kbps = 1000.0 * cfg_.encoder.airtime_budget / denom;
+  const double airtime_budget = knob_airtime_budget_milli_.load(std::memory_order_relaxed) / 1000.0;
+  double kbps = 1000.0 * airtime_budget / denom;
   // NOTE the encoder has its own floor below this one: venc's apply_bitrate
   // rails at VENC_BITRATE_MIN_KBPS (1000), so a configured bitrate_min_kbps
   // under 1000 is silently re-clamped there and this policy's "structural
   // minimum" would not be the one in force.
   kbps = std::clamp(kbps, static_cast<double>(cfg_.encoder.bitrate_min_kbps),
-                     static_cast<double>(cfg_.encoder.bitrate_max_kbps));
+                     static_cast<double>(knob_bitrate_max_kbps_.load(std::memory_order_relaxed)));
   // Low-power cap: min(), so FAILSAFE's floor and the
   // cap compose; config validation keeps the cap inside the encoder clamp.
   if (low_power_active_)
@@ -482,13 +536,21 @@ void RcAgent::run_bitrate_policy(uint64_t now_ms, bool force) {
   // forever after.
   bool failed = false;
   // Frame rate, fps BEFORE bitrate: the bitrate write's IDR then seeds the
-  // stream at the new rate. Only when the mode is configured on -- a
-  // disabled mode never touches the encoder's boot fps. Latched on
-  // success only, like every other verb; no 1 Hz throttle (that exists
-  // for the bitrate hysteresis case).
-  if (cfg_.low_power.enable) {
+  // stream at the new rate. Latched on success only, like every other verb;
+  // no 1 Hz throttle (that exists for the bitrate hysteresis case).
+  //
+  // Gated on the live enable knob, like before -- a disabled mode never
+  // touches the encoder's boot fps (whatever the FC says). The second
+  // disjunct (commanded_fps_ != 0, i.e. this policy has written fps at
+  // least once before) exists only for a live knob flip: turning the mode
+  // off WHILE it is active must still get the one write that returns the
+  // encoder to full power, even though the knob that gates entry is now
+  // off. A plain disarm/re-arm cycle with the mode left on never needs it
+  // -- the first disjunct already covers that.
+  const bool low_power_enabled = knob_low_power_enable_.load(std::memory_order_relaxed);
+  if (low_power_enabled || commanded_fps_ != 0) {
     const int target_fps = low_power_active_ ? cfg_.low_power.fps
-                                             : static_cast<int>(cfg_.venc.core.fps);
+                                             : knob_venc_fps_.load(std::memory_order_relaxed);
     if (force || commanded_fps_ != target_fps) {
       if (act_.set_fps(target_fps)) commanded_fps_ = target_fps;
       else failed = true;
@@ -685,7 +747,7 @@ void RcAgent::on_rc_frame(const uint8_t* body, size_t len, uint64_t now_ms) {
     PhyMode mode;
     uint8_t mcs, bw;
     rc::decode_profile(r->profile, mode, mcs, bw);
-    auto ladder = rc::ladder_from(mode, mcs, bw, cfg_.radio.ldpc);
+    auto ladder = ladder_live_(mode, mcs, bw);
 
     State prev_state = state_;
     apply_ladder_op(ladder, r->fec_overhead_base, r->fec_overhead_enh, r->probe_profile);
@@ -878,6 +940,22 @@ void RcAgent::tick(uint64_t now_ms, const RadioHealth& health) {
     }
   }
 
+  // note_pipeline_rebuilt's handoff: a known record wish in the next RCF
+  // must re-issue set_record (the rebuilt pipeline has no memory of what
+  // the old one last took), and the forced policy run below reasserts
+  // fps/bitrate immediately rather than waiting for kReassertMs.
+  const bool force_policy = rebuilt_pending_.exchange(false, std::memory_order_relaxed);
+  if (force_policy) rec_applied_ = -1;
+
+  // note_ldpc_changed's handoff: adopt the new flag and republish the
+  // current op (same rung) under it before anything else this tick reads
+  // ldpc_live_.
+  const int ldpc_req = ldpc_pending_.exchange(-1, std::memory_order_relaxed);
+  if (ldpc_req >= 0) {
+    ldpc_live_ = ldpc_req != 0;
+    rebuild_current_op_ldpc_();
+  }
+
   // Arm-state intake sits HERE — below the unconfirmed-move and
   // failsafe-entry branches, directly above the re-assert — so that its
   // forced policy run is the LAST one of the tick. Both of those branches
@@ -893,6 +971,12 @@ void RcAgent::tick(uint64_t now_ms, const RadioHealth& health) {
   // tick nothing else has run the policy, and the re-assert must see the
   // arm state this tick, not next.
   intake_arm_state_(now_ms);
+
+  // A pending rebuild forces its own policy run here -- unless intake_arm_state_
+  // (or an earlier branch this same tick) already ran one, in which case that
+  // run already carried the live knobs and this would be a redundant repeat.
+  if (force_policy && !(have_last_policy_ && last_policy_ms_ == now_ms))
+    run_bitrate_policy(now_ms, /*force=*/true);
 
   // Periodic re-assert of the encoder verbs (kReassertMs). run_bitrate_policy
   // otherwise runs ONLY on an RCF, a DISC, or a max-range entry, which makes

@@ -3218,3 +3218,107 @@ TEST(hop_order_to_a_non_member_is_ignored_and_not_reevaluated) {
   REQUIRE(act.retunes.size() == n + 1);
   CHECK(act.retunes.back() == 161 && act.retune_reasons.back() == "hop");
 }
+
+// ---- MAVLink hot-reload: RcAgent's live knobs and the two notifications --
+
+// Resends the SAME mcs5 RCF (fec ov 0.5/0.5) link_up_mcs5 linked under,
+// tagged with a fresh seq -- a steady-state RCF that drives a policy
+// re-evaluation without a session or rung change.
+static uint64_t send_rcf_mcs5(RcAgent& agent, MockActuator& act, uint64_t t) {
+  const uint32_t vtx = last_ack_vtx(act);
+  const uint16_t seq = static_cast<uint16_t>(agent.rcf_accepted() + 1);
+  auto rcf = make_rcf_wire(seq, encode_profile(PhyMode::HT, 5, 20), 8, vtx);
+  agent.on_rc_frame(rcf.data(), rcf.size(), t);
+  return t;
+}
+
+TEST(bitrate_ceiling_knob_applies_on_next_policy_run) {
+  Config cfg = make_cfg();   // cfg.encoder.bitrate_max_kbps = 20000
+  MockActuator act;
+  RcAgent agent(cfg, act);
+  link_up_mcs5(agent, act, cfg);
+  REQUIRE(!act.bitrates.empty());
+  REQUIRE(act.bitrates.back() > 3000);   // unclamped baseline, well above the new ceiling
+
+  agent.set_live_knobs(/*bitrate_max_kbps=*/3000, 0.65, true, 60);
+  send_rcf_mcs5(agent, act, 1100);        // > 1 s throttle, no rung change
+  CHECK(!act.bitrates.empty() && act.bitrates.back() <= 3000);
+}
+
+TEST(airtime_knob_lowers_bitrate_without_rung_change) {
+  Config cfg = make_cfg();   // cfg.encoder.airtime_budget = 0.65
+  MockActuator act;
+  RcAgent agent(cfg, act);
+  link_up_mcs5(agent, act, cfg);
+  REQUIRE(!act.bitrates.empty());
+  const int before = act.bitrates.back();
+
+  agent.set_live_knobs(20000, /*airtime_budget=*/0.10, true, 60);
+  send_rcf_mcs5(agent, act, 1100);
+  CHECK(act.bitrates.back() < before);
+}
+
+TEST(low_power_knob_off_exits_low_power_on_next_tick) {
+  Config cfg = make_cfg();
+  MockActuator act;
+  RcAgent agent(cfg, act);
+  link_up_mcs5(agent, act, cfg);
+  agent.note_arm_state(false, 150);
+  agent.tick(200, RadioHealth{});
+  REQUIRE(agent.low_power());
+
+  agent.set_live_knobs(20000, 0.65, /*low_power_enable=*/false, 60);
+  agent.tick(300, RadioHealth{});
+  CHECK(!agent.low_power());
+  CHECK(act.fps.back() == 60);          // full-power target = live venc fps
+}
+
+TEST(venc_fps_knob_is_the_full_power_target) {
+  Config cfg = make_cfg();
+  MockActuator act;
+  RcAgent agent(cfg, act);
+  link_up_mcs5(agent, act, cfg);
+  agent.set_live_knobs(20000, 0.65, true, 100);
+  agent.note_pipeline_rebuilt();
+  agent.tick(200, RadioHealth{});
+  CHECK(act.fps.back() == 100);
+}
+
+TEST(pipeline_rebuilt_reissues_record_wish_and_reasserts_verbs) {
+  Config cfg = make_cfg();
+  MockActuator act;
+  RcAgent agent(cfg, act);
+  const uint32_t vtx = link_agent(agent, act, cfg);
+  auto w1 = make_rcf_wire_rec(2, kRecKnown | kRecOn, vtx);
+  agent.on_rc_frame(w1.data(), w1.size(), 200);
+  REQUIRE(act.records.size() == 1);
+  CHECK(act.records[0] == true);
+
+  const size_t nb = act.bitrates.size();
+  agent.note_pipeline_rebuilt();
+  agent.tick(300, RadioHealth{});
+  CHECK(act.bitrates.size() == nb + 1);             // forced re-assert, not 5 s later
+
+  auto w2 = make_rcf_wire_rec(3, kRecKnown | kRecOn, vtx);
+  agent.on_rc_frame(w2.data(), w2.size(), 310);
+  REQUIRE(act.records.size() == 2);
+  CHECK(act.records.back() == true);
+}
+
+TEST(ldpc_change_reapplies_current_op_next_tick) {
+  Config cfg = make_cfg();   // cfg.radio.ldpc defaults true
+  MockActuator act;
+  RcAgent agent(cfg, act);
+  link_up_mcs5(agent, act, cfg);
+  const size_t na = act.applied.size();
+  const AppliedOp prev = act.applied.back();
+  CHECK(prev.ladder[0].ldpc);
+
+  agent.note_ldpc_changed(false);
+  agent.tick(200, RadioHealth{});
+  REQUIRE(act.applied.size() == na + 1);
+  CHECK(act.applied.back().ladder[0].ldpc == false);
+  CHECK(act.applied.back().ladder[1].ldpc == false);
+  CHECK(act.applied.back().ladder[1].mcs == prev.ladder[1].mcs);  // same rung
+  CHECK(act.applied.back().generation == prev.generation);       // not a new op
+}

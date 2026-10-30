@@ -343,6 +343,33 @@ class RcAgent {
     return v;
   }
 
+  // Live config knobs: a MAVLink parameter set applies these without a
+  // daemon restart. Any thread (plain atomics); seeded from `cfg` in the
+  // constructor, so an RcAgent that never gets a set_live_knobs call behaves
+  // exactly as if it only ever read the matching Config field.
+  void set_live_knobs(int bitrate_max_kbps, double airtime_budget, bool low_power_enable,
+                       int venc_fps);
+
+  // The live low-power-enable knob (the MSP thread reads it to decide
+  // whether polling arm state still matters). Any thread.
+  bool low_power_enabled() const;
+
+  // The in-process encoder pipeline was just rebuilt (a fresh MI_VENC
+  // session under the same PID, e.g. after a venc.fps/size change): on the
+  // next tick, a known record wish carried by the next RCF re-issues
+  // set_record (the new pipeline has no memory of the old one's recorder
+  // state), and the fps/bitrate verbs are reasserted immediately instead of
+  // waiting for the periodic kReassertMs cadence. Any thread; a bare atomic
+  // flag, consumed on the agent thread.
+  void note_pipeline_rebuilt();
+
+  // The LDPC flag changed (radio.ldpc hot-reload): on the next tick the
+  // agent rebuilds the current operating point's ladder -- and its probe
+  // spec, if one is active -- for the SAME rung under the new flag and
+  // republishes it; every ladder built from then on uses it too. Any
+  // thread; a one-slot pending value, consumed on the agent thread.
+  void note_ldpc_changed(bool ldpc);
+
  private:
   const Config& cfg_;
   Actuator& act_;
@@ -475,6 +502,38 @@ class RcAgent {
   int rec_applied_ = -1;
   int16_t snr_off_sent_ = 0;  // last offset handed to the actuator
   void intake_arm_state_(uint64_t now_ms);
+
+  // Live config knobs (set_live_knobs): any thread may write, the agent
+  // thread reads them wherever this file used to read the matching Config
+  // field. int, not atomic<double>, for airtime_budget: std::atomic<double>
+  // is not guaranteed lock-free on armv7 (is_always_lock_free), and the
+  // policy's own 100 kbps rounding grid already swallows milli-scale error.
+  std::atomic<int> knob_bitrate_max_kbps_{0};
+  std::atomic<int> knob_airtime_budget_milli_{0};  // airtime_budget * 1000
+  std::atomic<bool> knob_low_power_enable_{false};
+  std::atomic<int> knob_venc_fps_{0};
+
+  // note_pipeline_rebuilt's handoff: consumed at the top of tick(), the
+  // same bare-flag shape as chain_break_pending_/arm_report_ above.
+  std::atomic<bool> rebuilt_pending_{false};
+  // note_ldpc_changed's handoff: -1 = none pending, else the new flag as
+  // 0/1 (an atomic<bool> can't also carry "nothing pending").
+  std::atomic<int> ldpc_pending_{-1};
+  // Agent-thread copy of the live LDPC flag every ladder build reads
+  // instead of cfg_.radio.ldpc; seeded from it in the constructor and
+  // updated only by tick()'s consumption of ldpc_pending_.
+  bool ldpc_live_ = true;
+
+  // Builds the 2-slot ladder for (mode, mcs, bw) under the live LDPC flag
+  // -- the one construction both the RCF path (on_rc_frame/apply_ladder_op)
+  // and note_ldpc_changed's rebuild share, so neither can forget it.
+  std::array<rc::LayerTxSpec, 2> ladder_live_(rc::PhyMode mode, uint8_t mcs, uint8_t bw) const;
+  // note_ldpc_changed's agent-thread half: rebuilds the current op's ladder
+  // (and probe spec, if one is active) for its own rung under the new flag
+  // and republishes. Not a new operating point -- the rung is unchanged --
+  // so generation is not bumped, the same rule reapply_with_shed follows
+  // for an unchanged rung.
+  void rebuild_current_op_ldpc_();
 
   // GS-requested IDR. The last RCF
   // idr_epoch seen this session (0 at every session edge) and whether a
