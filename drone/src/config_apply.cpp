@@ -60,12 +60,15 @@ ConfigApplier::ConfigApplier(std::string cfg_path, Config live, ConfigApplyHooks
       hooks_(std::move(hooks)),
       log_(std::move(log)) {}
 
-ConfigApplier::~ConfigApplier() {
+ConfigApplier::~ConfigApplier() { shutdown(); }
+
+void ConfigApplier::shutdown() {
   {
     std::lock_guard<std::mutex> l(mu_);
     stop_ = true;
   }
   cv_.notify_all();
+  // submit() refuses once stop_ is set, so thread_ no longer changes.
   if (thread_.joinable()) thread_.join();
 }
 
@@ -80,6 +83,7 @@ bool ConfigApplier::submit(size_t row, const std::string& rendered_value, std::s
   };
   if (row >= cfgparam::kCount) return refuse("no such parameter");
   std::lock_guard<std::mutex> l(mu_);
+  if (stop_) return refuse("shutting down");
   if (busy_.load()) return refuse("apply in progress");
   if (hooks_.calibration_active && hooks_.calibration_active())
     return refuse("calibration in progress");

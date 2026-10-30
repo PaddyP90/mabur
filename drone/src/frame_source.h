@@ -25,9 +25,10 @@ class FrameSource {
  public:
   // attach_backoff_ms: how long to wait between attach attempts while the
   // ring does not exist yet (or right after a detected producer restart).
-  // Exposed mainly so tests can shorten the default ~1 s production
-  // backoff.
-  explicit FrameSource(std::string shm_name, int attach_backoff_ms = 1000);
+  // A live pipeline rebuild recreates the ring, and every millisecond of
+  // backoff after that is video the link does not carry, so the default
+  // is short; tests shorten it further.
+  explicit FrameSource(std::string shm_name, int attach_backoff_ms = 200);
   ~FrameSource();
 
   FrameSource(const FrameSource&) = delete;

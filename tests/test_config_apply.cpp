@@ -438,4 +438,27 @@ TEST(unknown_row_is_refused) {
   CHECK(!g.a.busy());
 }
 
+// Teardown: shutdown() waits for the apply in flight, joins the thread and
+// refuses every later submit, so no apply can start against a daemon that
+// is tearing down. A second call (and the destructor's) is a no-op.
+TEST(shutdown_finishes_the_apply_in_flight_then_refuses_submits) {
+  Rig g;
+  g.f.restart_block = true;
+  std::string why;
+  REQUIRE(g.a.submit(kVencSlices, "2", &why));
+  std::thread releaser([&] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    g.f.release();
+  });
+  g.a.shutdown();
+  releaser.join();
+  CHECK(g.f.pipeline_restart.size() == 1);
+  ConfigApplyResult r{};
+  CHECK(g.a.take_result(&r) && r.ok);
+  CHECK(!g.a.submit(kBitrateMax, "9000", &why));
+  CHECK(why == "shutting down");
+  CHECK(g.f.set_knobs.empty());
+  g.a.shutdown();
+}
+
 MTEST_MAIN

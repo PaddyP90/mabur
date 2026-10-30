@@ -81,7 +81,7 @@ class ConfigApplier {
   // `log`, when set, receives one line per apply and one per ladder rung.
   ConfigApplier(std::string cfg_path, Config live, ConfigApplyHooks hooks,
                 std::function<void(const std::string&)> log);
-  ~ConfigApplier();  // waits for an apply in progress, then joins the thread
+  ~ConfigApplier();  // shutdown()
   ConfigApplier(const ConfigApplier&) = delete;
   ConfigApplier& operator=(const ConfigApplier&) = delete;
 
@@ -103,6 +103,10 @@ class ConfigApplier {
   // calibrated values rather than the ones this applier last saw.
   void note_file_rewritten_externally();
   ConfigApplierStats stats() const;
+  // Teardown: waits for an apply in progress (its result stays takeable),
+  // joins the thread, and from then on refuses every submit ("shutting
+  // down"). Idempotent; call it from one thread.
+  void shutdown();
 
  private:
   struct Job {
