@@ -37,4 +37,12 @@ TEST(find_compares_at_most_16_bytes) {
 TEST(mav_type_values) {
   CHECK(mav_type(Type::Bool) == 1 && mav_type(Type::Int32) == 6 && mav_type(Type::Real32) == 9 && mav_type(Type::Str) == 11);
 }
+TEST(apply_column_matches_the_mavlink_doc) {
+  CHECK(kTable[0].apply == Apply::Reprogram && kTable[1].apply == Apply::Reprogram);   // RADIO_*
+  CHECK(kTable[2].apply == Apply::Rebuild && kTable[3].apply == Apply::Rebuild && kTable[4].apply == Apply::Rebuild);
+  CHECK(kTable[5].apply == Apply::Knob && kTable[6].apply == Apply::Knob);
+  for (size_t i = 7; i <= 10; ++i) CHECK(kTable[i].apply == Apply::Rebuild);          // REC_*
+  CHECK(kTable[11].apply == Apply::Knob && kTable[12].apply == Apply::Reprogram);
+  CHECK(!std::strcmp(apply_name(Apply::Rebuild), "rebuild"));
+}
 MTEST_MAIN

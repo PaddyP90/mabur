@@ -265,12 +265,14 @@ quoted string).
 | 11 | `LOWPWR_ENABLE` | `low_power.enable` | Bool | knob | Lower bitrate and frame rate while disarmed to keep the VTX cool; needs msp.enable for arm state |
 | 12 | `MSP_ENABLE` | `msp.enable` | Bool | reprogram | Flight-controller link for the OSD and arm state |
 
-"apply" is how the set reaches the running process (`apply_path_for` in
-`drone/src/config_apply.h`; "Applying a set" above): knob is a live
-atomic `RcAgent` reads on its next tick, reprogram changes a radio or
-peripheral setting in place, rebuild restarts the encoder pipeline
-in-process. Ranges are the loader's, not repeated here: whatever
-`maburd` refuses to boot on, a set refuses.
+"apply" comes from each row's `Apply` value in the table itself
+(`cfgparam::apply_name`, `common/include/mabur/config_params.h`) — how the
+set reaches the running process (`apply_path_for` in
+`drone/src/config_apply.h` maps it to the same three paths for drone-side
+dispatch; "Applying a set" above): knob is a live atomic `RcAgent` reads on
+its next tick, reprogram changes a radio or peripheral setting in place,
+rebuild restarts the encoder pipeline in-process. Ranges are the loader's,
+not repeated here: whatever `maburd` refuses to boot on, a set refuses.
 
 ### Ordering rules
 

@@ -16,23 +16,17 @@ namespace mabur {
 
 namespace {
 
-constexpr ConfigApplyPath kPaths[] = {
-    ConfigApplyPath::Reprogram,  // RADIO_WALL_MARGN: the TX-power plan is recomputed in place
-    ConfigApplyPath::Reprogram,  // RADIO_LDPC: the radiotap flag
-    ConfigApplyPath::Rebuild,    // VENC_FPS
-    ConfigApplyPath::Rebuild,    // VENC_SIZE
-    ConfigApplyPath::Rebuild,    // VENC_SLICES
-    ConfigApplyPath::Knob,       // ENC_BITRATE_MAX
-    ConfigApplyPath::Knob,       // ENC_AIRTIME
-    ConfigApplyPath::Rebuild,    // REC_ENABLE: the recorder's encode channel is part of the pipeline
-    ConfigApplyPath::Rebuild,    // REC_BITRATE
-    ConfigApplyPath::Rebuild,    // REC_FPS
-    ConfigApplyPath::Rebuild,    // REC_SIZE
-    ConfigApplyPath::Knob,       // LOWPWR_ENABLE
-    ConfigApplyPath::Reprogram,  // MSP_ENABLE: the MSP thread starts or stops
-};
-static_assert(sizeof(kPaths) / sizeof(kPaths[0]) == cfgparam::kCount,
-              "every parameter row needs an apply path");
+// cfgparam::Apply and ConfigApplyPath are the same three values under
+// different names (the table is shared code with no MAVLink/ConfigApplyPath
+// dependency); this converts one to the other.
+ConfigApplyPath from_cfgparam(cfgparam::Apply a) {
+  switch (a) {
+    case cfgparam::Apply::Knob: return ConfigApplyPath::Knob;
+    case cfgparam::Apply::Reprogram: return ConfigApplyPath::Reprogram;
+    case cfgparam::Apply::Rebuild: return ConfigApplyPath::Rebuild;
+  }
+  return ConfigApplyPath::Rebuild;
+}
 
 const char* path_name(ConfigApplyPath p) {
   switch (p) {
@@ -50,7 +44,7 @@ bool is(const cfgparam::Row& row, const char* section, const char* key) {
 }  // namespace
 
 ConfigApplyPath apply_path_for(size_t row) {
-  return row < cfgparam::kCount ? kPaths[row] : ConfigApplyPath::Rebuild;
+  return row < cfgparam::kCount ? from_cfgparam(cfgparam::kTable[row].apply) : ConfigApplyPath::Rebuild;
 }
 
 ConfigApplier::ConfigApplier(std::string cfg_path, Config live, ConfigApplyHooks hooks,
