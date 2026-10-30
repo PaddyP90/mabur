@@ -705,17 +705,19 @@ its own Apply button enabled only once the pair differs from the live
 value. Crossing a sensor-mode boundary while typing the rate re-selects
 the first size of the new mode, since the old size may not fit it.
 
-While a set is in flight, that row shows a busy state ("sending…" /
-"applying…") and every other row is disabled — the core applies one set at
-a time. The result line that follows reads "accepted" (fading 3 s after
+While a set is in flight, that row shows a small CSS spinner next to its
+busy state ("sending…" / "applying…", including the VENC_MODE row's Apply
+button) and every other row is disabled — the core applies one set at a
+time. The result line that follows reads "accepted" (fading 3 s after
 the push that reported it), "failed: `<reason>`", "unsupported: `<reason>`"
 to a row whose value or type the drone's loader refused, or "no answer" on
 a request that timed out. A badge next to the label reads "live" for a
-knob applied at once, or "restarts encoder ~0.6 s" for a rebuild (venc/record
-rows); a reprogram row (e.g. RADIO_LDPC, MSP_ENABLE) carries no badge, since
-nothing visible marks the change. A handful of rows also carry a one-line
-hint next to the badge (VENC_MODE/REC_FPS/REC_SIZE/LOWPWR_ENABLE/MSP_ENABLE)
-about another row it interacts with.
+reprogram row (e.g. RADIO_LDPC, MSP_ENABLE), or "restarts encoder ~0.6 s"
+for a rebuild (venc/record rows); a knob row (e.g. ENC_BITRATE_MAX,
+ENC_AIRTIME, LOWPWR_ENABLE) carries no badge, since it takes effect at
+once with nothing on the row to show for it. A handful of rows also carry
+a one-line hint next to the badge (VENC_MODE/REC_FPS/REC_SIZE/
+LOWPWR_ENABLE/MSP_ENABLE) about another row it interacts with.
 
 The tab lives both on the windowed sidebar's **VTX** segment (see "Stats
 panel" below) and on the immersive layout's Config|VTX panel (see "Config

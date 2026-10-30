@@ -135,7 +135,9 @@
                 </select>
                 <button class="btn btn-secondary" type="button" style="font-size:12px"
                   disabled={greyed || v.disabled || v.busy || vencText === (vencRow?.value ?? null)}
-                  onclick={applyVenc}>{v.busy ? 'applying…' : 'Apply'}</button>
+                  onclick={applyVenc}>
+                  {#if v.busy}<span class="spinner" aria-hidden="true"></span>applying…{:else}Apply{/if}
+                </button>
               </div>
             {:else if row.type === 'bool'}
               <label class="vswitch" aria-labelledby="{uid}{row.id}-label">
@@ -151,7 +153,11 @@
             {/if}
 
             {#if HINTS[row.id]}<div class="hint">{HINTS[row.id]}</div>{/if}
-            {#if !spotter && v.result}<div class="result result-{v.resultKind}">{v.result}</div>{/if}
+            {#if !spotter && v.result}
+              <div class="result result-{v.resultKind}">
+                {#if v.resultKind === 'busy'}<span class="spinner" aria-hidden="true"></span>{/if}{v.result}
+              </div>
+            {/if}
           </div>
         {/each}
       </div>
@@ -170,6 +176,13 @@
   .result-ok { color: var(--color-accent); }
   .result-err { color: var(--color-status-critical); }
   .result-busy { color: var(--color-neutral-500); }
+  .spinner { display: inline-block; width: 9px; height: 9px; margin-right: 5px; vertical-align: -1px;
+    border-radius: 50%; border: 2px solid var(--color-neutral-700); border-top-color: var(--color-neutral-300);
+    animation: vspin .7s linear infinite; }
+  @keyframes vspin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) {
+    .spinner { animation: none; }
+  }
   .mode-row { display: flex; gap: 6px; align-items: center; }
   .mode-row select { flex: 1; min-width: 0; }
   .fs { border: 0; padding: 0; margin: 0; min-width: 0; display: flex; flex-direction: column; gap: var(--space-4); transition: opacity .15s; }

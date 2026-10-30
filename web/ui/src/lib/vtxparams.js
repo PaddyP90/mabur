@@ -94,11 +94,12 @@ export const HINTS = {
   MSP_ENABLE: 'Turn low power off first',
 };
 
-// docs/mavlink.md "Applying a set": a knob takes effect at once, a reprogram
-// changes a setting in place with nothing to show for it, a rebuild stops
-// and restarts the encoder pipeline (about 0.5 s + ~0.1 s to first frame).
+// docs/mavlink.md "Applying a set": a knob takes effect at once with
+// nothing on the row to show for it; a reprogram changes a radio or
+// peripheral setting in place and is badged "live"; a rebuild stops and
+// restarts the encoder pipeline (about 0.5 s + ~0.1 s to first frame).
 export function applyBadge(apply) {
-  if (apply === 'knob') return 'live';
+  if (apply === 'reprogram') return 'live';
   if (apply === 'rebuild') return 'restarts encoder ~0.6 s';
   return '';
 }

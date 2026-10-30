@@ -149,8 +149,8 @@ test('rowView result/resultKind for the remaining states', () => {
 });
 
 test('applyBadge per apply path', () => {
-  assert.equal(applyBadge('knob'), 'live');
-  assert.equal(applyBadge('reprogram'), '');
+  assert.equal(applyBadge('knob'), '');
+  assert.equal(applyBadge('reprogram'), 'live');
   assert.equal(applyBadge('rebuild'), 'restarts encoder ~0.6 s');
 });
 
