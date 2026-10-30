@@ -107,7 +107,7 @@ agent and TX threads.
   `PARAM_EXT_REQUEST_READ`, `PARAM_EXT_SET`. Anything else, or anything
   for another target, is dropped and counted.
 - **List.** One `PARAM_EXT_VALUE` per table row, in table order,
-  `param_count` 13 and `param_index` = the row. Values are read by loading
+  `param_count` 12 and `param_index` = the row. Values are read by loading
   the file with the boot loader (`mabur::load_config`) on every request,
   so a list shows a set made a moment ago or an ssh edit. A file that no
   longer loads answers nothing and logs the loader's reason. A list
@@ -190,7 +190,7 @@ column below:
   control radiotaps and `RcAgent` re-applies the current operating point
   with the new flag on its next tick (every ladder it builds from then
   on uses it too); `MSP_ENABLE` starts or stops the MSP thread.
-- **Rebuild** (`VENC_FPS`, `VENC_SIZE`, `VENC_SLICES`, `REC_ENABLE`,
+- **Rebuild** (`VENC_MODE`, `VENC_SLICES`, `REC_ENABLE`,
   `REC_BITRATE`, `REC_FPS`, `REC_SIZE`): the encoder pipeline is rebuilt
   in-process (`docs/link-adaptation.md` "Rebuilding the encoder pipeline
   in-process"), about 0.5 s plus ~0.1 s to the first frame of the new
@@ -253,17 +253,16 @@ quoted string).
 |---|---|---|---|---|---|
 | 0 | `RADIO_WALL_MARGN` | `radio.wall_margin_db` | Real32 | reprogram | Safety margin below the calibrated TX-power walls; raise to lower TX power |
 | 1 | `RADIO_LDPC` | `radio.ldpc` | Bool | reprogram | LDPC coding on every frame; turn off only for a ground card that cannot decode it |
-| 2 | `VENC_FPS` | `venc.fps` | Int32 | rebuild | Camera frame rate, which also selects the sensor's field-of-view mode |
-| 3 | `VENC_SIZE` | `venc.size` | Str | rebuild | Encoder output resolution, must match the fps mode's aspect ratio |
-| 4 | `VENC_SLICES` | `venc.slices` | Int32 | rebuild | H.265 row slices on the link channel; 1 disables slice salvage |
-| 5 | `ENC_BITRATE_MAX` | `encoder.bitrate_max_kbps` | Int32 | knob | Bitrate ceiling, kbps |
-| 6 | `ENC_AIRTIME` | `encoder.airtime_budget` | Real32 | knob | Share of the link's real capacity the video may use |
-| 7 | `REC_ENABLE` | `record.enable` | Bool | rebuild | Enable the onboard microSD recorder |
-| 8 | `REC_BITRATE` | `record.bitrate_kbps` | Int32 | rebuild | Constant bitrate of the onboard recording |
-| 9 | `REC_FPS` | `record.fps` | Int32 | rebuild | Onboard recording frame rate, at most the camera's fps |
-| 10 | `REC_SIZE` | `record.size` | Str | rebuild | Onboard recording resolution, same aspect ratio as the camera's |
-| 11 | `LOWPWR_ENABLE` | `low_power.enable` | Bool | knob | Lower bitrate and frame rate while disarmed to keep the VTX cool; needs msp.enable for arm state |
-| 12 | `MSP_ENABLE` | `msp.enable` | Bool | reprogram | Flight-controller link for the OSD and arm state |
+| 2 | `VENC_MODE` | `venc.fps` | Str | rebuild | Camera frame rate and encoder size, <fps>@<WxH>; the rate picks the sensor's field-of-view mode and the size must fit it |
+| 3 | `VENC_SLICES` | `venc.slices` | Int32 | rebuild | H.265 row slices on the link channel; 1 disables slice salvage |
+| 4 | `ENC_BITRATE_MAX` | `encoder.bitrate_max_kbps` | Int32 | knob | Bitrate ceiling, kbps |
+| 5 | `ENC_AIRTIME` | `encoder.airtime_budget` | Real32 | knob | Share of the link's real capacity the video may use |
+| 6 | `REC_ENABLE` | `record.enable` | Bool | rebuild | Enable the onboard microSD recorder |
+| 7 | `REC_BITRATE` | `record.bitrate_kbps` | Int32 | rebuild | Constant bitrate of the onboard recording |
+| 8 | `REC_FPS` | `record.fps` | Int32 | rebuild | Onboard recording frame rate, at most the camera's fps |
+| 9 | `REC_SIZE` | `record.size` | Str | rebuild | Onboard recording resolution, same aspect ratio as the camera's |
+| 10 | `LOWPWR_ENABLE` | `low_power.enable` | Bool | knob | Lower bitrate and frame rate while disarmed to keep the VTX cool; needs msp.enable for arm state |
+| 11 | `MSP_ENABLE` | `msp.enable` | Bool | reprogram | Flight-controller link for the OSD and arm state |
 
 "apply" comes from each row's `Apply` value in the table itself
 (`cfgparam::apply_name`, `common/include/mabur/config_params.h`) — how the
@@ -281,27 +280,20 @@ stands, so keys that depend on each other must be set in a working order.
 A set out of order is refused with the loader's reason and changes
 nothing; send the other key first. The rules the loader enforces:
 
-- `REC_FPS` ≤ `VENC_FPS` (while the recorder is on): lower `REC_FPS`
-  before lowering `VENC_FPS`; raise `VENC_FPS` before raising `REC_FPS`.
-- `VENC_SIZE` must fit the camera mode `VENC_FPS` selects
-  (`docs/camera-modes.md`: up to 90 fps 1920x1080, 91-100 1728x972,
-  101-120 1728x816; same aspect ratio, no larger). Going above 90 fps,
-  set the smaller `VENC_SIZE` first; coming back down, set `VENC_FPS`
-  first.
-- `REC_SIZE` above 1920x1080 needs `VENC_FPS` ≤ 30 first.
+- `REC_FPS` ≤ `VENC_MODE`'s fps (while the recorder is on): lower
+  `REC_FPS` before lowering `VENC_MODE`'s fps; raise `VENC_MODE`'s fps
+  before raising `REC_FPS`.
+- `REC_SIZE` above 1920x1080 needs `VENC_MODE`'s fps ≤ 30 first.
 - `LOWPWR_ENABLE = 1` needs `MSP_ENABLE = 1` first; `MSP_ENABLE = 0` needs
   `LOWPWR_ENABLE = 0` first.
 
 Two loader rules involve keys the table does not expose:
 
-- With `LOWPWR_ENABLE = 1`, `VENC_FPS` cannot drop below `low_power.fps`
-  and `ENC_BITRATE_MAX` cannot drop below `low_power.bitrate_kbps`.
-- `REC_SIZE` must keep `VENC_SIZE`'s aspect ratio while the recorder is on.
-
-The 101-120 fps mode (1728x816) has a different aspect ratio from the
-16:9 modes below it, so moving between 100 fps or less and 101 fps or more
-needs `VENC_FPS` and `VENC_SIZE` to change together. No single set can do
-that, so that move is an ssh edit of `/etc/mabur.toml`.
+- With `LOWPWR_ENABLE = 1`, `VENC_MODE`'s fps cannot drop below
+  `low_power.fps` and `ENC_BITRATE_MAX` cannot drop below
+  `low_power.bitrate_kbps`.
+- `REC_SIZE` must keep `VENC_MODE`'s size's aspect ratio while the
+  recorder is on.
 
 ## The GS endpoint
 
@@ -360,7 +352,7 @@ default:
 
 ```
 GS=<gs-ip> PORT=14550 nix-shell -p python3Packages.pymavlink --run "python3 tools/bench/mavparam.py list"
-GS=<gs-ip> PORT=14550 nix-shell -p python3Packages.pymavlink --run "python3 tools/bench/mavparam.py get VENC_FPS"
+GS=<gs-ip> PORT=14550 nix-shell -p python3Packages.pymavlink --run "python3 tools/bench/mavparam.py get VENC_MODE"
 GS=<gs-ip> PORT=14550 nix-shell -p python3Packages.pymavlink --run "python3 tools/bench/mavparam.py set REC_ENABLE 0"
 ```
 
@@ -374,7 +366,7 @@ one subcommand:
   non-zero exit.
 - `get ID` reads one parameter by id (1 s timeout, 3 retries) and prints
   its `id  type  value` row.
-- `set ID VALUE` looks `ID` up in its own copy of the 13-row table (ids
+- `set ID VALUE` looks `ID` up in its own copy of the 12-row table (ids
   and types mirrored from `common/include/mabur/config_params.h`) to
   encode `VALUE` for the wire and sends the set (2 s timeout, 3 retries).
   A set the drone applies (a real change past a loader check) answers

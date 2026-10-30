@@ -568,7 +568,7 @@ This closes two holes:
 
 ### Rebuilding the encoder pipeline in-process
 
-A `VENC_FPS`/`VENC_SIZE`/`VENC_SLICES`/`REC_*` MAVLink parameter set
+A `VENC_MODE`/`VENC_SLICES`/`REC_*` MAVLink parameter set
 (`docs/mavlink.md` "Applying a set") rebuilds the MI sensor→ISP→VENC
 pipeline inside the running `maburd` — it does not restart the process.
 `ConfigApplier` (`drone/src/config_apply.h`) calls `venc_core_restart`,

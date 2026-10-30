@@ -176,16 +176,16 @@ ConfigApplyResult apply(ConfigApplier& a, size_t row, const std::string& value) 
   return r;
 }
 
-constexpr size_t kWallMargin = 0, kVencSize = 3, kVencSlices = 4, kBitrateMax = 5, kMsp = 12;
+constexpr size_t kWallMargin = 0, kVencMode = 2, kVencSlices = 3, kBitrateMax = 4, kMsp = 11;
 
 }  // namespace
 
 TEST(every_row_has_the_path_from_the_table) {
   using P = ConfigApplyPath;
-  const ConfigApplyPath want[13] = {P::Reprogram, P::Reprogram, P::Rebuild, P::Rebuild, P::Rebuild,
-                              P::Knob,      P::Knob,      P::Rebuild, P::Rebuild, P::Rebuild,
-                              P::Rebuild,   P::Knob,      P::Reprogram};
-  REQUIRE(cfgparam::kCount == 13);
+  const ConfigApplyPath want[12] = {P::Reprogram, P::Reprogram, P::Rebuild, P::Rebuild,
+                              P::Knob,      P::Knob,      P::Rebuild, P::Rebuild,
+                              P::Rebuild,   P::Rebuild,   P::Knob,    P::Reprogram};
+  REQUIRE(cfgparam::kCount == 12);
   for (size_t i = 0; i < cfgparam::kCount; ++i) CHECK(apply_path_for(i) == want[i]);
 }
 
@@ -264,7 +264,7 @@ TEST(second_submit_during_apply_is_refused) {
   Rig g;
   g.f.restart_block = true;  // the fake blocks on a latch
   std::string why;
-  REQUIRE(g.a.submit(kVencSize, "\"1920x1080\"", &why));
+  REQUIRE(g.a.submit(kVencMode, "\"60@1920x1080\"", &why));
   CHECK(g.a.busy());
   CHECK(!g.a.submit(kBitrateMax, "9000", &why) && why == "apply in progress");
   g.f.release();
@@ -347,7 +347,9 @@ TEST(publish_failure_after_apply_reverts) {
 
 TEST(loader_refusal_applies_nothing) {
   Rig g;
-  const ConfigApplyResult r = apply(g.a, kVencSize, "\"1x\"");
+  // Shape-valid (parse_mode_text passes) but semantically refused: 100 fps
+  // is the 1728x972 mode, so 1920x1080 is too large for it.
+  const ConfigApplyResult r = apply(g.a, kVencMode, "\"100@1920x1080\"");
   CHECK(!r.ok && g.f.pipeline_restart.empty() && r.reason.find("venc.size") != npos);
   CHECK(r.reason.find("config: ") == npos && r.reason.find(g.path()) == npos);
   CHECK(g.f.order.empty());

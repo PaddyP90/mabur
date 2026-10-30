@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstring>
 #include <exception>
+#include <string>
 #include <system_error>
 #include <utility>
 
@@ -39,6 +40,28 @@ const char* path_name(ConfigApplyPath p) {
 
 bool is(const cfgparam::Row& row, const char* section, const char* key) {
   return std::strcmp(row.section, section) == 0 && std::strcmp(row.key, key) == 0;
+}
+
+// Every row but VENC_MODE is one key, one line. VENC_MODE's Str value
+// spells both venc.fps and venc.size, so it patches both lines together.
+// `rendered` is the TOML-quoted "<fps>@<WxH>" text (render_toml's own
+// quoting of the Str value, the same text MavComponent::handle_set
+// already proved loads); stripping the quotes recovers the plain text
+// cfgparam::parse_mode_text splits.
+bool patch_row_value(std::string* patched, size_t row_idx, const cfgparam::Row& row,
+                      const std::string& rendered) {
+  if (row_idx != cfgparam::kVencModeRow) {
+    return patch_toml_key(patched, row.section, row.key, rendered);
+  }
+  std::string raw = rendered;
+  if (raw.size() >= 2 && raw.front() == '"' && raw.back() == '"') {
+    raw = raw.substr(1, raw.size() - 2);
+  }
+  int fps = 0, w = 0, h = 0;
+  return cfgparam::parse_mode_text(raw, &fps, &w, &h) &&
+         patch_toml_key(patched, "venc", "fps", std::to_string(fps)) &&
+         patch_toml_key(patched, "venc", "size",
+                         "\"" + std::to_string(w) + "x" + std::to_string(h) + "\"");
 }
 
 }  // namespace
@@ -181,7 +204,7 @@ bool ConfigApplier::apply_locked(const Job& job, const std::string& field,
     }
   }
   std::string patched = text;
-  if (!patch_toml_key(&patched, row.section, row.key, job.value)) {
+  if (!patch_row_value(&patched, job.row, row, job.value)) {
     *reason = field + ": key not found";
     return false;
   }

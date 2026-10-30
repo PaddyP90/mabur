@@ -248,7 +248,22 @@ struct FakeApply {
       std::string text;
       REQUIRE(read_text_file(path, &text));
       const cfgparam::Row& row = cfgparam::kTable[s.row];
-      REQUIRE(patch_toml_key(&text, row.section, row.key, s.rendered));
+      if (s.row == cfgparam::kVencModeRow) {
+        // VENC_MODE's one Str value spells both venc.fps and venc.size;
+        // s.rendered is the TOML-quoted "<fps>@<WxH>" text, same as the
+        // real applier sees.
+        std::string raw = s.rendered;
+        if (raw.size() >= 2 && raw.front() == '"' && raw.back() == '"') {
+          raw = raw.substr(1, raw.size() - 2);
+        }
+        int fps = 0, w = 0, h = 0;
+        REQUIRE(cfgparam::parse_mode_text(raw, &fps, &w, &h));
+        REQUIRE(patch_toml_key(&text, "venc", "fps", std::to_string(fps)));
+        REQUIRE(patch_toml_key(&text, "venc", "size",
+                               "\"" + std::to_string(w) + "x" + std::to_string(h) + "\""));
+      } else {
+        REQUIRE(patch_toml_key(&text, row.section, row.key, s.rendered));
+      }
       std::string err;
       REQUIRE(publish_config(path, text, "pre-param", &err) == PublishResult::Ok);
     }
@@ -280,7 +295,7 @@ MavComponent make(const std::string& path) {
 
 }  // namespace
 
-TEST(list_returns_13_values_in_table_order) {
+TEST(list_returns_every_row_in_table_order) {
   ScratchBundle b;
   auto c = make(b.path());
   feed(c, list_msg());
@@ -296,9 +311,9 @@ TEST(list_returns_13_values_in_table_order) {
     CHECK(v.param_index == i);
     CHECK(id_of(v.param_id) == cfgparam::kTable[i].id);
     CHECK(v.param_type == cfgparam::mav_type(cfgparam::kTable[i].type));
-    if (id_of(v.param_id) == "VENC_FPS") {
-      CHECK(v.param_type == MAV_PARAM_EXT_TYPE_INT32);
-      CHECK(wire_i32(v.param_value) == 60);
+    if (id_of(v.param_id) == "VENC_MODE") {
+      CHECK(v.param_type == MAV_PARAM_EXT_TYPE_CUSTOM);
+      CHECK(std::string(v.param_value) == "60@1920x1080");
     }
   }
   CHECK(c.stats().rx_packets == 1);
@@ -322,27 +337,27 @@ TEST(list_for_another_component_is_ignored) {
 TEST(read_by_index_and_by_id) {
   ScratchBundle b;
   auto c = make(b.path());
-  feed(c, read_msg("", 9));
+  feed(c, read_msg("", 8));
   auto msgs = drain(c);
   REQUIRE(msgs.size() == 1);
   mavlink_param_ext_value_t v;
   mavlink_msg_param_ext_value_decode(&msgs[0], &v);
   CHECK(id_of(v.param_id) == "REC_FPS");
-  CHECK(v.param_index == 9 && v.param_count == cfgparam::kCount);
+  CHECK(v.param_index == 8 && v.param_count == cfgparam::kCount);
   CHECK(wire_i32(v.param_value) == 60);
 
-  feed(c, read_msg("VENC_SIZE", -1));
+  feed(c, read_msg("VENC_MODE", -1));
   msgs = drain(c);
   REQUIRE(msgs.size() == 1);
   mavlink_msg_param_ext_value_decode(&msgs[0], &v);
-  CHECK(id_of(v.param_id) == "VENC_SIZE");
-  CHECK(v.param_index == 3);
+  CHECK(id_of(v.param_id) == "VENC_MODE");
+  CHECK(v.param_index == 2);
   CHECK(v.param_type == MAV_PARAM_EXT_TYPE_CUSTOM);
-  CHECK(std::string(v.param_value) == "1920x1080");
+  CHECK(std::string(v.param_value) == "60@1920x1080");
 
   feed(c, read_msg("NOPE", -1));
   CHECK(drain(c).empty());
-  feed(c, read_msg("", 13));   // one past the table
+  feed(c, read_msg("", 12));   // one past the table
   CHECK(drain(c).empty());
   feed(c, read_msg("", 32767));
   CHECK(drain(c).empty());
@@ -392,10 +407,10 @@ TEST(set_type_mismatch_is_value_unsupported_with_current_value) {
   ScratchBundle b;
   const std::string before = slurp(b.path());
   auto c = make(b.path());
-  auto r = do_set(c, set_real("VENC_FPS", 30.0f));
+  auto r = do_set(c, set_real("VENC_MODE", 30.0f));
   CHECK(r.ack.param_result == PARAM_ACK_VALUE_UNSUPPORTED);
-  CHECK(r.ack.param_type == MAV_PARAM_EXT_TYPE_INT32);
-  CHECK(wire_i32(r.ack.param_value) == 60);
+  CHECK(r.ack.param_type == MAV_PARAM_EXT_TYPE_CUSTOM);
+  CHECK(std::string(r.ack.param_value) == "60@1920x1080");
   CHECK(slurp(b.path()) == before);
   // A bool byte other than 0/1 is malformed too.
   char w[128] = {};
@@ -412,10 +427,10 @@ TEST(set_refused_by_loader_sends_failed_ack_then_statustext) {
   const std::string before = slurp(b.path());
   const int writes = write_count_for_test();
   auto c = make(b.path());
-  auto r = do_set(c, set_str("VENC_SIZE", "1x"));
+  auto r = do_set(c, set_str("VENC_MODE", "100@1920x1080"));
   CHECK(r.ack.param_result == PARAM_ACK_FAILED);
   CHECK(r.ack.param_type == MAV_PARAM_EXT_TYPE_CUSTOM);
-  CHECK(std::string(r.ack.param_value) == "1920x1080");
+  CHECK(std::string(r.ack.param_value) == "60@1920x1080");
   REQUIRE(r.rest.size() == 1);
   uint8_t sev = 0;
   const std::string text = statustext(r.rest[0], &sev);
@@ -445,13 +460,12 @@ TEST(ordering_rules_are_enforced_by_the_loader) {
     return ack_of(msgs[0]).param_result;
   };
   // Bundle defaults: record.fps 60, so venc.fps can't drop below it first.
-  CHECK(result(set_int("VENC_FPS", 30)) == PARAM_ACK_FAILED);
+  CHECK(result(set_str("VENC_MODE", "30@1920x1080")) == PARAM_ACK_FAILED);
   CHECK(result(set_int("REC_FPS", 30)) == PARAM_ACK_ACCEPTED);
-  CHECK(result(set_int("VENC_FPS", 30)) == PARAM_ACK_ACCEPTED);
-  // 100 fps is the 1728x972 mode: the size must move first.
-  CHECK(result(set_int("VENC_FPS", 100)) == PARAM_ACK_FAILED);
-  CHECK(result(set_str("VENC_SIZE", "1728x972")) == PARAM_ACK_ACCEPTED);
-  CHECK(result(set_int("VENC_FPS", 100)) == PARAM_ACK_ACCEPTED);
+  CHECK(result(set_str("VENC_MODE", "30@1920x1080")) == PARAM_ACK_ACCEPTED);
+  // 100 fps is the 1728x972 mode: size exceeds it at 1920x1080.
+  CHECK(result(set_str("VENC_MODE", "100@1920x1080")) == PARAM_ACK_FAILED);
+  CHECK(result(set_str("VENC_MODE", "100@1728x972")) == PARAM_ACK_ACCEPTED);
   // low_power needs msp for the arm state.
   CHECK(result(set_bool("LOWPWR_ENABLE", true)) == PARAM_ACK_ACCEPTED);
   CHECK(result(set_bool("MSP_ENABLE", false)) == PARAM_ACK_FAILED);
@@ -551,8 +565,7 @@ TEST(every_row_sets_reads_back_and_restores) {
   const Case cases[] = {
       {"RADIO_WALL_MARGN", Value{Type::Real32, false, 0, 2.0f}},
       {"RADIO_LDPC", Value{Type::Bool, false}},
-      {"VENC_FPS", Value{Type::Int32, false, 90}},
-      {"VENC_SIZE", Value{Type::Str, false, 0, 0, "1280x720"}},
+      {"VENC_MODE", Value{Type::Str, false, 0, 0, "90@1280x720"}},
       {"VENC_SLICES", Value{Type::Int32, false, 2}},
       {"ENC_BITRATE_MAX", Value{Type::Int32, false, 20000}},
       {"ENC_AIRTIME", Value{Type::Real32, false, 0, 0.5f}},
@@ -600,7 +613,9 @@ TEST(every_row_sets_reads_back_and_restores) {
     REQUIRE(now_lines.size() == bundle_lines.size());
     int changed = 0;
     for (size_t i = 0; i < now_lines.size(); ++i) changed += now_lines[i] != bundle_lines[i];
-    CHECK(changed == 1);
+    // VENC_MODE's one Str value spells both venc.fps and venc.size, so it
+    // patches two lines; every other row still patches exactly one.
+    CHECK(changed == (idx == cfgparam::kVencModeRow ? 2 : 1));
     CHECK(same(file_value(b.path(), idx), k.other));
     char want[128];
     mavparam::encode_wire(k.other, want);
@@ -707,12 +722,12 @@ TEST(custom_value_with_quote_or_no_nul_never_reaches_the_file) {
   ScratchBundle b;
   const std::string before = slurp(b.path());
   auto c = make(b.path());
-  auto r = do_set(c, set_str("VENC_SIZE", "19\"20x1080"));
+  auto r = do_set(c, set_str("REC_SIZE", "19\"20x1080"));
   CHECK(r.ack.param_result == PARAM_ACK_VALUE_UNSUPPORTED);
   CHECK(std::string(r.ack.param_value) == "1920x1080");
   char w[128];
   std::memset(w, 'A', sizeof w);   // no NUL anywhere
-  r = do_set(c, set_raw("VENC_SIZE", w, MAV_PARAM_EXT_TYPE_CUSTOM));
+  r = do_set(c, set_raw("REC_SIZE", w, MAV_PARAM_EXT_TYPE_CUSTOM));
   CHECK(r.ack.param_result == PARAM_ACK_VALUE_UNSUPPORTED);
   CHECK(slurp(b.path()) == before);
   CHECK(!exists(b.path() + ".pre-param"));
@@ -775,7 +790,7 @@ TEST(outbound_queue_is_capped_and_drops_the_new_packet) {
   for (size_t i = 0; i < kMavQueueCap + 6; ++i) c.queue_heartbeat();
   CHECK(c.outbound_packets() == kMavQueueCap);
   CHECK(c.stats().drop_queue_full == 6);
-  feed(c, read_msg("VENC_FPS", -1));
+  feed(c, read_msg("VENC_MODE", -1));
   CHECK(c.outbound_packets() == kMavQueueCap);
   CHECK(c.stats().drop_queue_full == 7);
   // A set on a full queue is still submitted; only its acks are dropped --
@@ -864,7 +879,7 @@ TEST(log_lines_are_prefixed_and_null_log_is_allowed) {
   logs.clear();
   auto c = make(b.path());
   (void)do_set(c, set_int("REC_FPS", 30));
-  (void)do_set(c, set_str("VENC_SIZE", "1x"));
+  (void)do_set(c, set_str("VENC_MODE", "1x"));
   REQUIRE(!logs.empty());
   for (const auto& l : logs) {
     CHECK(l.rfind("[mav] ", 0) == 0);
@@ -887,7 +902,7 @@ TEST(set_acks_in_progress_then_accepted_on_completion) {
   auto c = make(b.path());
   auto r = do_set(c, set_int("REC_FPS", 30));
   CHECK(r.ack.param_result == PARAM_ACK_IN_PROGRESS && wire_i32(r.ack.param_value) == 60);
-  CHECK(fake.submits.size() == 1 && fake.submits[0].row == 9 && fake.submits[0].rendered == "30");
+  CHECK(fake.submits.size() == 1 && fake.submits[0].row == 8 && fake.submits[0].rendered == "30");
   // handle_set's own candidate check writes and removes <path>.new; nothing
   // is left behind for a submit the applier is about to take over.
   CHECK(!exists(b.path() + ".new"));
@@ -931,11 +946,11 @@ TEST(unchanged_value_never_submits) {
   CHECK(r.ack.param_result == PARAM_ACK_ACCEPTED && fake.submits.empty());
 }
 
-TEST(loader_refusal_never_submits) {
+TEST(decode_rejected_set_never_submits) {
   ScratchBundle b;
   auto c = make(b.path());
-  auto r = do_set(c, set_str("VENC_SIZE", "1x"));
-  CHECK(r.ack.param_result == PARAM_ACK_FAILED && fake.submits.empty());
+  auto r = do_set(c, set_str("VENC_MODE", "1x"));
+  CHECK(r.ack.param_result == PARAM_ACK_VALUE_UNSUPPORTED && fake.submits.empty());
 }
 
 // Holds lock_config_writes() on its own thread until release(): a set that

@@ -72,6 +72,22 @@ const char* apply_path_name(ConfigApplyPath p) {
   return "rebuild";
 }
 
+// Every row but VENC_MODE is one key, one line. VENC_MODE's Str value
+// spells both venc.fps and venc.size, so it patches both lines together;
+// `want.s` already passed cfgparam::parse_mode_text in decode_wire, so
+// the split here cannot fail.
+bool patch_row_value(std::string* patched, size_t idx, const cfgparam::Row& row, const Value& want,
+                      const std::string& rendered) {
+  if (idx != cfgparam::kVencModeRow) {
+    return patch_toml_key(patched, row.section, row.key, rendered);
+  }
+  int fps = 0, w = 0, h = 0;
+  return cfgparam::parse_mode_text(want.s, &fps, &w, &h) &&
+         patch_toml_key(patched, "venc", "fps", std::to_string(fps)) &&
+         patch_toml_key(patched, "venc", "size",
+                         "\"" + std::to_string(w) + "x" + std::to_string(h) + "\"");
+}
+
 }  // namespace
 
 MavComponent::MavComponent(std::string cfg_path, ApplyPort port,
@@ -339,7 +355,7 @@ void MavComponent::handle_set(const char id16[16], const char value[128], uint8_
     return;
   }
   std::string patched = text;
-  if (!patch_toml_key(&patched, row.section, row.key, rendered)) {
+  if (!patch_row_value(&patched, idx, row, want, rendered)) {
     refuse(PARAM_ACK_FAILED, field + ": key not found", true);
     return;
   }

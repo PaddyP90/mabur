@@ -1,7 +1,9 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <string>
 
 // Schema for the drone config keys exposed as MAVLink extended parameters.
 // Shared code: no MAVLink include here, so a future UI can compile this
@@ -33,10 +35,8 @@ inline constexpr Row kTable[] = {
      "Safety margin below the calibrated TX-power walls; raise to lower TX power"},  // the TX-power plan is recomputed in place
     {"RADIO_LDPC", "radio", "ldpc", Type::Bool, Apply::Reprogram,
      "LDPC coding on every frame; turn off only for a ground card that cannot decode it"},  // the radiotap flag
-    {"VENC_FPS", "venc", "fps", Type::Int32, Apply::Rebuild,
-     "Camera frame rate, which also selects the sensor's field-of-view mode"},
-    {"VENC_SIZE", "venc", "size", Type::Str, Apply::Rebuild,
-     "Encoder output resolution, must match the fps mode's aspect ratio"},
+    {"VENC_MODE", "venc", "fps", Type::Str, Apply::Rebuild,
+     "Camera frame rate and encoder size, <fps>@<WxH>; the rate picks the sensor's field-of-view mode and the size must fit it"},
     {"VENC_SLICES", "venc", "slices", Type::Int32, Apply::Rebuild,
      "H.265 row slices on the link channel; 1 disables slice salvage"},
     {"ENC_BITRATE_MAX", "encoder", "bitrate_max_kbps", Type::Int32, Apply::Knob,
@@ -58,6 +58,33 @@ inline constexpr Row kTable[] = {
 };
 inline constexpr size_t kCount = sizeof(kTable) / sizeof(kTable[0]);
 inline constexpr int kMaxIdLen = 16;
+
+// kTable's row index for VENC_MODE -- the one row whose Str value packs
+// two config keys (venc.fps and venc.size) instead of one.
+inline constexpr size_t kVencModeRow = 2;
+
+// Splits a VENC_MODE text value "<fps>@<WxH>" into its three integers.
+// Shape only: each of fps/w/h is a non-empty run of digits, separated by
+// a literal '@' and 'x', with nothing else before or after -- no range
+// check, that is the loader's job once the pieces land in the config.
+inline bool parse_mode_text(const std::string& text, int* fps, int* w, int* h) {
+  size_t i = 0;
+  auto digits = [&](int* out) {
+    const size_t start = i;
+    while (i < text.size() && text[i] >= '0' && text[i] <= '9') ++i;
+    if (i == start) return false;
+    *out = std::atoi(text.substr(start, i - start).c_str());
+    return true;
+  };
+  if (!digits(fps)) return false;
+  if (i >= text.size() || text[i] != '@') return false;
+  ++i;
+  if (!digits(w)) return false;
+  if (i >= text.size() || text[i] != 'x') return false;
+  ++i;
+  if (!digits(h)) return false;
+  return i == text.size();
+}
 
 // Index of the row with this id, or -1. `id16` is a wire-format field: only
 // an id of the full 16 chars is guaranteed to lack a NUL, so strncmp's own

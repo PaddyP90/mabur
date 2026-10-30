@@ -33,27 +33,27 @@ TEST(reads_every_row_of_the_default_bundle) {
   Config c = load_config(bundle_path());
   CHECK(rd(c, 0).f == 1.0f);            // radio.wall_margin_db
   CHECK(rd(c, 1).b == true);            // radio.ldpc
-  CHECK(rd(c, 2).i == 60);              // venc.fps
-  CHECK(rd(c, 3).s == "1920x1080");     // venc.size
-  CHECK(rd(c, 4).i == 4);               // venc.slices
-  CHECK(rd(c, 5).i == 24000);           // encoder.bitrate_max_kbps
-  CHECK(std::fabs(rd(c, 6).f - 0.65f) < 1e-6f);
-  CHECK(rd(c, 7).b == true);            // record.enable
-  CHECK(rd(c, 8).i == 40000 && rd(c, 9).i == 60 && rd(c, 10).s == "1920x1080");
-  CHECK(rd(c, 11).b == false && rd(c, 12).b == true);
+  CHECK(rd(c, 2).s == "60@1920x1080");  // venc.fps + venc.size
+  CHECK(rd(c, 3).i == 4);               // venc.slices
+  CHECK(rd(c, 4).i == 24000);           // encoder.bitrate_max_kbps
+  CHECK(std::fabs(rd(c, 5).f - 0.65f) < 1e-6f);
+  CHECK(rd(c, 6).b == true);            // record.enable
+  CHECK(rd(c, 7).i == 40000 && rd(c, 8).i == 60 && rd(c, 9).s == "1920x1080");
+  CHECK(rd(c, 10).b == false && rd(c, 11).b == true);
 }
 
-TEST(rec_size_falls_back_to_venc_size_when_record_size_is_zero) {
+TEST(rec_size_falls_back_to_venc_mode_size_when_record_size_is_zero) {
   Config c = load_config(bundle_path());
   c.record.width = 0;
   c.record.height = 0;
-  CHECK(rd(c, 10).s == rd(c, 3).s);
+  const std::string mode = rd(c, 2).s;
+  CHECK(rd(c, 9).s == mode.substr(mode.find('@') + 1));
 }
 
 TEST(read_rejects_idx_out_of_range) {
   Config c = load_config(bundle_path());
   Value v;
-  CHECK(!read(c, 13, &v));                    // cfgparam::kCount == 13
+  CHECK(!read(c, 12, &v));                    // cfgparam::kCount == 12
   CHECK(!read(c, static_cast<size_t>(-1), &v));
 }
 
@@ -83,10 +83,18 @@ TEST(decode_wire_rejects_type_mismatch_and_bad_bytes) {
   w[0] = 1; CHECK(decode_wire(1, 1, w, &v) && v.b);           // RADIO_LDPC UINT8 1
   w[0] = 2; CHECK(!decode_wire(1, 1, w, &v));                  // not 0/1
   CHECK(!decode_wire(1, 6, w, &v));                            // INT32 sent for a Bool row
-  std::memset(w, 'x', 128); CHECK(!decode_wire(3, 11, w, &v)); // no NUL
-  std::memcpy(w, "1280x720", 9); CHECK(decode_wire(3, 11, w, &v) && v.s == "1280x720");
-  std::memcpy(w, "12\x01", 4); CHECK(!decode_wire(3, 11, w, &v));
-  int32_t x = 90; std::memcpy(w, &x, 4); CHECK(decode_wire(2, 6, w, &v) && v.i == 90);
+  std::memset(w, 'x', 128); CHECK(!decode_wire(9, 11, w, &v)); // no NUL (REC_SIZE)
+  std::memcpy(w, "1280x720", 9); CHECK(decode_wire(9, 11, w, &v) && v.s == "1280x720");
+  std::memcpy(w, "12\x01", 4); CHECK(!decode_wire(9, 11, w, &v));
+  int32_t x = 90; std::memcpy(w, &x, 4); CHECK(decode_wire(3, 6, w, &v) && v.i == 90);  // VENC_SLICES
+}
+
+TEST(decode_wire_venc_mode_checks_the_shape) {
+  char w[128]; Value v;
+  std::memset(w, 0, 128); std::strcpy(w, "100@1728x972");
+  CHECK(decode_wire(2, 11, w, &v) && v.s == "100@1728x972");
+  std::strcpy(w, "100@1728");  CHECK(!decode_wire(2, 11, w, &v));
+  std::strcpy(w, "1000@1x1");  CHECK(decode_wire(2, 11, w, &v));
 }
 
 TEST(decode_wire_rejects_non_finite_real32) {
@@ -114,7 +122,7 @@ TEST(encode_wire_round_trips) {
     Value out;
     CHECK(decode_wire(1, 1, w, &out) && out.b == true);
   }
-  // Int32: row 2 (VENC_FPS), MAV_PARAM_EXT_TYPE_INT32 == 6.
+  // Int32: row 3 (VENC_SLICES), MAV_PARAM_EXT_TYPE_INT32 == 6.
   {
     char w[128];
     Value v{Type::Int32, false, -1234};
@@ -124,7 +132,7 @@ TEST(encode_wire_round_trips) {
     CHECK(raw == -1234);
     for (int k = 4; k < 128; ++k) CHECK(w[k] == 0);
     Value out;
-    CHECK(decode_wire(2, 6, w, &out) && out.i == -1234);
+    CHECK(decode_wire(3, 6, w, &out) && out.i == -1234);
   }
   // Real32: row 0 (RADIO_WALL_MARGN), MAV_PARAM_EXT_TYPE_REAL32 == 9.
   {
@@ -138,7 +146,7 @@ TEST(encode_wire_round_trips) {
     Value out;
     CHECK(decode_wire(0, 9, w, &out) && out.f == 1.5f);
   }
-  // Str: row 3 (VENC_SIZE), MAV_PARAM_EXT_TYPE_CUSTOM == 11.
+  // Str: row 9 (REC_SIZE), MAV_PARAM_EXT_TYPE_CUSTOM == 11.
   {
     char w[128];
     Value v{Type::Str, false, 0, 0, "1920x1080"};
@@ -147,7 +155,7 @@ TEST(encode_wire_round_trips) {
     CHECK(w[9] == '\0');
     for (int k = 10; k < 128; ++k) CHECK(w[k] == 0);
     Value out;
-    CHECK(decode_wire(3, 11, w, &out) && out.s == "1920x1080");
+    CHECK(decode_wire(9, 11, w, &out) && out.s == "1920x1080");
   }
 }
 

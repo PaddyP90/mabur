@@ -132,9 +132,9 @@ idle and encodes on the JPEG device.
 Boot log line that proves the order:
 `[record] ch1 1920x1080 60 fps CBR 40000 kbps on VPE port0, bound before the link (idle)`.
 
-## Live parameter sets — `REC_*`, `VENC_FPS`, `VENC_SIZE`
+## Live parameter sets — `REC_*`, `VENC_MODE`
 
-A MAVLink set to any `[record]` key, or to `VENC_FPS`/`VENC_SIZE`
+A MAVLink set to any `[record]` key, or to `VENC_MODE`
 (`docs/mavlink.md` "Applying a set"), rebuilds the encoder pipeline
 in-process (`docs/link-adaptation.md` "Rebuilding the encoder pipeline
 in-process") rather than restarting `maburd`. Before the rebuild,

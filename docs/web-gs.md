@@ -783,7 +783,7 @@ into the file. Files recorded before 2026-09-29 used a different sync point;
 their history and repair recipe are in
 `docs/findings/2026-09-29-web-gs-raw-dvr-irap-sync.md`.
 
-A coded-size change mid-recording (a drone `VENC_SIZE` MAVLink set
+A coded-size change mid-recording (a drone `VENC_MODE` MAVLink set
 rebuilding the encoder pipeline, `docs/mavlink.md`, is the live case)
 rolls to a new file rather than mixing two sizes in one header: one
 file's header can describe only one size. `RawDvr`'s OPFS open awaits

@@ -120,8 +120,8 @@ class WaitFinalAckTest(unittest.TestCase):
         self.assertEqual(conn._statuses, [status])
 
     def test_immediate_value_unsupported_has_no_in_progress(self):
-        acks = [fake_ack("VENC_FPS", VALUE_UNSUPPORTED)]
-        result, final = mavparam.wait_final_ack(FakeConn(acks), "VENC_FPS")
+        acks = [fake_ack("VENC_MODE", VALUE_UNSUPPORTED)]
+        result, final = mavparam.wait_final_ack(FakeConn(acks), "VENC_MODE")
         self.assertEqual(result, "VALUE_UNSUPPORTED")
         self.assertIs(final, acks[0])
 

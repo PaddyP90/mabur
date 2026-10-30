@@ -953,7 +953,7 @@ in whichever `dvr.mode` is configured:
   REC indicator visibly lags the press. The sync point is decided by
   `mabur::RawDvr` (`common/include/mabur/raw_dvr.h`, shared with the web
   GS's local recording): a complete IRAP (`au_is_irap()`) once VPS+SPS+PPS
-  are known. A coded-size change mid-recording (a drone `VENC_SIZE`
+  are known. A coded-size change mid-recording (a drone `VENC_MODE`
   MAVLink set rebuilding the encoder pipeline in-process,
   `docs/mavlink.md`, `docs/link-adaptation.md`, is the live case) rolls
   to a new file at the next IRAP rather than mixing two sizes in one
@@ -1138,7 +1138,7 @@ deploy, no video) and you need to know whether the encoder is running.
 maburd's own stderr (`/tmp/mabur.log`): the 1 Hz `stats:` line (incl.
 `enc_pk100=`, the peak 100 ms encoder byte rate in kbit/s inside that
 second — its frame-normalised window is sized from the boot config's
-`venc.fps` and is not rebuilt by a live `VENC_FPS` MAVLink set
+`venc.fps` and is not rebuilt by a live `VENC_MODE` MAVLink set
 (`docs/mavlink.md`), so the window's own 100 ms no longer matches the
 running fps after one — `lp=`/`armed=` for low-power mode, `snr_mhz=`, the trimmed
 sensor rate in milli-Hz (same value as `GET /venc`'s `sensor_mhz`), and

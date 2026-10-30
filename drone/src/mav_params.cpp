@@ -14,11 +14,10 @@ Value acc_wall_margin_db(const Config& c) {
   return Value{Type::Real32, false, 0, static_cast<float>(c.radio.wall_margin_db)};
 }
 Value acc_ldpc(const Config& c) { return Value{Type::Bool, c.radio.ldpc}; }
-Value acc_venc_fps(const Config& c) {
-  return Value{Type::Int32, false, static_cast<int32_t>(c.venc.core.fps)};
-}
-Value acc_venc_size(const Config& c) {
-  return Value{Type::Str, false, 0, 0, size_text(c.venc.core.width, c.venc.core.height)};
+Value acc_venc_mode(const Config& c) {
+  return Value{Type::Str, false, 0, 0,
+               std::to_string(c.venc.core.fps) + "@" +
+                   size_text(c.venc.core.width, c.venc.core.height)};
 }
 Value acc_venc_slices(const Config& c) {
   return Value{Type::Int32, false, static_cast<int32_t>(c.venc.core.slices)};
@@ -58,8 +57,7 @@ using Accessor = Value (*)(const Config&);
 constexpr Accessor kAccessors[] = {
     acc_wall_margin_db,    // RADIO_WALL_MARGN
     acc_ldpc,              // RADIO_LDPC
-    acc_venc_fps,          // VENC_FPS
-    acc_venc_size,         // VENC_SIZE
+    acc_venc_mode,         // VENC_MODE
     acc_venc_slices,       // VENC_SLICES
     acc_bitrate_max_kbps,  // ENC_BITRATE_MAX
     acc_airtime_budget,    // ENC_AIRTIME

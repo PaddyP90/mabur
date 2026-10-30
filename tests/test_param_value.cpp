@@ -45,7 +45,7 @@ TEST(wire_round_trip_every_type) {
   encode_wire(Value{Type::Int32, false, -7}, w);
   CHECK(decode_wire(4, 6, w, &v) && v.i == -7);
   encode_wire(Value{Type::Str, false, 0, 0, "1280x720"}, w);
-  CHECK(decode_wire(10, 11, w, &v) && v.s == "1280x720");
+  CHECK(decode_wire(9, 11, w, &v) && v.s == "1280x720");  // REC_SIZE
   // A buffer the Bool row (row 1) would itself accept (wire[0] == 1, rest
   // zero) — so the positive check pins row 1's mav_type to 1, and the
   // negative check below is rejected ONLY by the mav_type mismatch, not by
