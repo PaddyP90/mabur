@@ -679,15 +679,29 @@ The drone's parameter table (`common/include/mabur/config_params.h`
 `kTable`, 12 rows), edited live over the MAVLink tunnel's `ParamClient`
 (see "MAVLink seam" below). `VtxPanel.svelte` groups the rows under the
 table's own section kickers (Radio, Camera, Encoder, Recorder, Power,
-Flight controller) in table order, and renders a header line that tracks
-the list state: "Waiting for the drone link…" before the session links,
-"Reading the drone's settings…" while the first list round is still out,
-"Some settings did not answer." if it came back partial, and nothing once
-it is complete. A dim "no heartbeat" tag sits beside the Refresh button
-when the session is linked but the drone's last Telem is stale — the rows
-stay editable, since the table itself is unaffected. The Refresh button
-(shown once the list has answered at all) re-lists from scratch, for a
-partial list or after a long disconnect from the flight controller.
+Flight controller) in table order. The rows are on screen from the moment
+the core starts (its first `onParams` push), greyed until the session
+links. A header line tracks the link and the list: "Waiting for the drone
+link…" before the session links; "The drone's parameter table differs
+from this page — redeploy." once a value arrives whose `param_count` is
+not this build's row count (the client's `table_mismatch`, which wins
+over the list states); "Reading the drone's settings…" while a list round
+is out; "Some settings did not answer." if it came back partial; and
+nothing once it is complete. A dim "no heartbeat" tag sits beside the
+Refresh button when the session is linked and the drone's component has
+sent a MAVLink `HEARTBEAT` on this link but none in the last 3 s (the
+JSON's `alive` false; before the first one `alive` is null and there is
+no tag) — the rows stay editable, since a set itself times out. The
+Refresh button (shown once the list has answered at all, complete or
+partial) asks the drone for the whole list again, keeping every value it
+already holds on show while the rows answer; a row that stays silent is
+re-read by index like on the first list.
+
+Each row's label is its MAVLink id in mono with the config key it maps to
+dimmed beside it (`section.key`; `venc.fps + venc.size` for VENC_MODE).
+Under the widget sit the row's help text from the table, always visible,
+and for a handful of rows (VENC_MODE/REC_FPS/REC_SIZE/LOWPWR_ENABLE/
+MSP_ENABLE) a second hint line about another row it interacts with.
 
 **Spotter mode** shows "VTX settings need GS mode." and every row as a
 greyed, read-only "—" — a spotter has no control channel to list or set
@@ -695,29 +709,46 @@ anything over.
 
 **Committing a row** is always one `Session.paramSet(id, text)` per edit,
 never a batch: a Bool row is a switch that commits on toggle; Int, Real and
-Str rows commit on Enter or on blur, and only when the typed text parses
-for the row's type and differs from the drone's current value — an
-unparseable edit is left showing exactly what was typed, so the operator
-can fix it, rather than snapping back to the old value. **VENC_MODE** is
-the one composite row: a frame-rate number input (1–120) and a size
-`<select>` scoped to that rate's sensor mode (`docs/camera-modes.md`), with
-its own Apply button enabled only once the pair differs from the live
-value. Crossing a sensor-mode boundary while typing the rate re-selects
-the first size of the new mode, since the old size may not fit it.
+Str rows commit on Enter or on blur, and only when the typed text differs
+from the drone's current value. Text that cannot hold the row's type (say
+`1.5` in an Int row) sends nothing: the row shows a local result line —
+"not a valid integer", "not a valid number", or for Str the allowed
+spelling — and keeps exactly what was typed, so the operator can fix it;
+the line clears on that row's next edit.
+
+**VENC_MODE** is the one composite row: a frame-rate box (1–120) and a
+size `<select>` scoped to that rate's sensor mode (`docs/camera-modes.md`),
+with its own Apply button. The pair starts empty and takes the drone's
+value as soon as the list brings it, then follows every later change of
+that value for as long as the operator has not edited the pair; a pair
+being edited is left alone until its own set settles, when it returns to
+the drone's value. The rate box keeps exactly what was typed (it is never
+clamped or rewritten); Apply is enabled only while the box holds a whole
+number 1–120 and the pair differs from the drone's live value. Crossing a
+sensor-mode boundary while typing the rate re-selects the first size of
+the new mode, since the old size may not fit it. When the drone runs a
+size outside the mode's list (an ssh-set size), that size is offered too
+while the rate stays in its mode, so a rate-only change keeps it.
 
 While a set is in flight, that row shows a small CSS spinner next to its
 busy state ("sending…" / "applying…", including the VENC_MODE row's Apply
 button) and every other row is disabled — the core applies one set at a
-time. The result line that follows reads "accepted" (fading 3 s after
-the push that reported it), "failed: `<reason>`", "unsupported: `<reason>`"
-to a row whose value or type the drone's loader refused, or "no answer" on
-a request that timed out. A badge next to the label reads "live" for a
-reprogram row (e.g. RADIO_LDPC, MSP_ENABLE), or "restarts encoder ~0.6 s"
-for a rebuild (venc/record rows); a knob row (e.g. ENC_BITRATE_MAX,
-ENC_AIRTIME, LOWPWR_ENABLE) carries no badge, since it takes effect at
-once with nothing on the row to show for it. A handful of rows also carry
-a one-line hint next to the badge (VENC_MODE/REC_FPS/REC_SIZE/
-LOWPWR_ENABLE/MSP_ENABLE) about another row it interacts with.
+time. Once the answer arrives (the row leaves sending/in_progress, or the
+client refuses the commit outright), the row's widget is rebuilt on the
+drone's value, so a refused toggle or edit never stays on screen beside
+its refusal. The result line that follows reads "accepted" (fading 3 s
+after the push that reported it); "failed: `<reason>`" for a refusal by
+the client (its own reason: "apply in progress", "not linked") or by the
+drone's loader or applier (the reason its `STATUSTEXT` carries, or
+"refused" if that never arrived); "unsupported:
+the drone refused this value's shape" for the drone's
+`PARAM_ACK_VALUE_UNSUPPORTED` — a type, shape or unknown-id refusal, which
+carries no reason text; or "no answer" on a set that timed out. A badge
+next to the label reads "live" for a reprogram row (e.g. RADIO_LDPC,
+MSP_ENABLE), or "restarts encoder ~0.6 s" for a rebuild (venc/record
+rows); a knob row (e.g. ENC_BITRATE_MAX, ENC_AIRTIME, LOWPWR_ENABLE)
+carries no badge, since it takes effect at once with nothing on the row
+to show for it.
 
 The tab lives both on the windowed sidebar's **VTX** segment (see "Stats
 panel" below) and on the immersive layout's Config|VTX panel (see "Config

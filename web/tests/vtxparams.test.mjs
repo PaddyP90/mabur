@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {
   MODE_SIZES, modeSizes, modeText, parseMode, commitText, SECTION_KICKER, groupRows,
-  HINTS, applyBadge, headerText, rowView, showRefresh,
+  HINTS, applyBadge, headerText, rowView, showRefresh, parseFps, modeOptions, modeDraftFrom,
+  modeDraftNext, modeApplyText, invalidText, rowKeys, showNoHeartbeat, commitAnswered,
 } from '../ui/src/lib/vtxparams.js';
 
 test('modeSizes per sensor mode and at the boundaries', () => {
@@ -26,6 +27,76 @@ test('modeText and parseMode round trip', () => {
   assert.equal(parseMode('x'), null);
   assert.equal(parseMode(''), null);
   assert.equal(parseMode('60@1920x1080extra'), null);
+  // config_params.h's six-digit cap per number, mirrored.
+  assert.deepEqual(parseMode('999999@999999x999999'), { fps: 999999, size: '999999x999999' });
+  assert.equal(parseMode('1000000@1x1'), null);
+  assert.equal(parseMode('4294967356@1x1'), null);
+});
+
+test('parseFps takes only a plain integer 1..120, never clamps', () => {
+  assert.equal(parseFps('90'), 90);
+  assert.equal(parseFps(' 120 '), 120);
+  assert.equal(parseFps('1'), 1);
+  assert.equal(parseFps(''), null);
+  assert.equal(parseFps('0'), null);
+  assert.equal(parseFps('121'), null);
+  assert.equal(parseFps('190'), null);
+  assert.equal(parseFps('9.5'), null);
+  assert.equal(parseFps('6e1'), null);
+  assert.equal(parseFps(null), null);
+});
+
+test('modeOptions keeps a custom live size in its own sensor mode only', () => {
+  assert.deepEqual(modeOptions(60, '60@1920x1080'), ['1920x1080', '1280x720']);
+  assert.deepEqual(modeOptions(60, '60@1600x900'), ['1920x1080', '1280x720', '1600x900']);
+  assert.deepEqual(modeOptions(30, '60@1600x900'), ['1920x1080', '1280x720', '1600x900']);
+  assert.deepEqual(modeOptions(120, '60@1600x900'), ['1728x816', '1152x544', '864x408']);
+  assert.deepEqual(modeOptions(60, null), ['1920x1080', '1280x720']);
+  assert.deepEqual(modeOptions(0, '60@1600x900'), []);
+});
+
+test('VENC_MODE draft: empty until the drone answers, then follows it', () => {
+  // Mounted before the first list: nothing to apply, no made-up default.
+  let st = { draft: modeDraftFrom(null), seen: null, pending: false };
+  assert.deepEqual(st.draft, { fpsText: '', size: '' });
+  assert.equal(modeApplyText(st.draft, null), null);
+  st = modeDraftNext(st, null, 'idle');
+  assert.deepEqual(st.draft, { fpsText: '', size: '' });
+  // The list arrives: the untouched draft takes the drone's value.
+  st = modeDraftNext(st, '60@1920x1080', 'idle');
+  assert.deepEqual(st.draft, { fpsText: '60', size: '1920x1080' });
+  assert.equal(modeApplyText(st.draft, '60@1920x1080'), null);
+  // A later change (a re-list after another set) is followed too.
+  st = modeDraftNext(st, '90@1280x720', 'idle');
+  assert.deepEqual(st.draft, { fpsText: '90', size: '1280x720' });
+  // An unchanged push returns the same object.
+  assert.equal(modeDraftNext(st, '90@1280x720', 'idle'), st);
+});
+
+test('VENC_MODE draft: an edited draft survives pushes until its own set settles', () => {
+  let st = modeDraftNext({ draft: modeDraftFrom(null), seen: null, pending: false }, '60@1920x1080', 'idle');
+  st = { ...st, draft: { fpsText: '60', size: '1280x720' } };   // the operator picks a size
+  assert.equal(modeApplyText(st.draft, '60@1920x1080'), '60@1280x720');
+  st = modeDraftNext(st, '50@1920x1080', 'idle');                // someone else's change
+  assert.deepEqual(st.draft, { fpsText: '60', size: '1280x720' });
+  st = modeDraftNext(st, '50@1920x1080', 'sending');
+  st = modeDraftNext(st, '50@1920x1080', 'in_progress');
+  assert.deepEqual(st.draft, { fpsText: '60', size: '1280x720' });
+  st = modeDraftNext(st, '60@1280x720', 'accepted');             // terminal: back on the drone's value
+  assert.deepEqual(st.draft, { fpsText: '60', size: '1280x720' });
+  assert.equal(st.pending, false);
+  st = modeDraftNext({ ...st, draft: { fpsText: '120', size: '1728x816' } }, '60@1280x720', 'sending');
+  st = modeDraftNext(st, '60@1280x720', 'failed');
+  assert.deepEqual(st.draft, { fpsText: '60', size: '1280x720' });
+});
+
+test('modeApplyText refuses fps text that is not 1..120 and a pair equal to the live value', () => {
+  assert.equal(modeApplyText({ fpsText: '', size: '1920x1080' }, '60@1920x1080'), null);
+  assert.equal(modeApplyText({ fpsText: '190', size: '1920x1080' }, '60@1920x1080'), null);
+  assert.equal(modeApplyText({ fpsText: '90', size: '' }, '60@1920x1080'), null);
+  assert.equal(modeApplyText({ fpsText: '60', size: '1920x1080' }, '60@1920x1080'), null);
+  assert.equal(modeApplyText({ fpsText: '90', size: '1920x1080' }, '60@1920x1080'), '90@1920x1080');
+  assert.equal(modeApplyText({ fpsText: '90', size: '1920x1080' }, null), '90@1920x1080');
 });
 
 test('commitText per type', () => {
@@ -73,6 +144,41 @@ test('groupRows keeps table order under section kickers', () => {
     ['Radio', 'Camera', 'Encoder', 'Recorder', 'Power', 'Flight controller']);
   const camera = groups.find((g) => g.key === 'venc');
   assert.deepEqual(camera.rows.map((r) => r.id), ['VENC_MODE', 'VENC_SLICES']);
+});
+
+test('invalidText names the row type', () => {
+  assert.equal(invalidText('int'), 'not a valid integer');
+  assert.equal(invalidText('real'), 'not a valid number');
+  assert.match(invalidText('str'), /^not valid text/);
+  assert.equal(commitText('int', '1.5'), null);   // the case it is shown for
+});
+
+test('rowKeys: section.key, both keys for VENC_MODE', () => {
+  assert.equal(rowKeys({ id: 'REC_FPS', section: 'record', key: 'fps' }), 'record.fps');
+  assert.equal(rowKeys({ id: 'VENC_MODE', section: 'venc', key: 'fps' }), 'venc.fps + venc.size');
+});
+
+test('showNoHeartbeat only once a heartbeat was seen and then lost', () => {
+  assert.equal(showNoHeartbeat({ linked: true, alive: null }, 'gs'), false);   // none yet on this link
+  assert.equal(showNoHeartbeat({ linked: true, alive: true }, 'gs'), false);
+  assert.equal(showNoHeartbeat({ linked: true, alive: false }, 'gs'), true);
+  assert.equal(showNoHeartbeat({ linked: false, alive: false }, 'gs'), false);
+  assert.equal(showNoHeartbeat({ linked: true, alive: false }, 'spotter'), false);
+});
+
+test('commitAnswered: through pending, or an immediate refusal newer than the snapshot', () => {
+  const idle = { state: 'idle', age_ms: null, status: '' };
+  // Went through sending and left it.
+  assert.equal(commitAnswered({ ...idle, sawPending: false }, { state: 'sending', age_ms: null, status: '' }), false);
+  assert.equal(commitAnswered({ ...idle, sawPending: true }, { state: 'accepted', age_ms: 5, status: '' }), true);
+  // Refused at once by the client: idle -> failed.
+  assert.equal(commitAnswered({ ...idle, sawPending: false }, { state: 'failed', age_ms: 0, status: 'apply in progress' }), true);
+  // Refused again on a row already failed for the same reason: the age restarts.
+  const failed = { state: 'failed', age_ms: 4000, status: 'apply in progress', sawPending: false };
+  assert.equal(commitAnswered(failed, { state: 'failed', age_ms: 3, status: 'apply in progress' }), true);
+  // An unrelated push before the core took the commit: same result, older.
+  assert.equal(commitAnswered(failed, { state: 'failed', age_ms: 4200, status: 'apply in progress' }), false);
+  assert.equal(commitAnswered({ ...idle, sawPending: false }, { state: 'idle', age_ms: null, status: '' }), false);
 });
 
 test('headerText by state', () => {
@@ -130,6 +236,11 @@ test('rowView result/resultKind for the remaining states', () => {
     (({ result, resultKind }) => ({ result, resultKind }))(
       rowView({ state: 'unsupported', value: '1', age_ms: null, status: 'out of range' }, 0, -1, null)),
     { result: 'unsupported: out of range', resultKind: 'err' });
+  // VALUE_UNSUPPORTED never brings a STATUSTEXT: a fallback, not a bare colon.
+  assert.deepEqual(
+    (({ result, resultKind }) => ({ result, resultKind }))(
+      rowView({ state: 'unsupported', value: '1', age_ms: 10, status: '' }, 0, -1, null)),
+    { result: "unsupported: the drone refused this value's shape", resultKind: 'err' });
   assert.deepEqual(
     (({ result, resultKind }) => ({ result, resultKind }))(
       rowView({ state: 'timeout', value: '1', age_ms: null, status: '' }, 0, -1, null)),

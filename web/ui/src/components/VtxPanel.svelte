@@ -1,11 +1,11 @@
 <script>
   // The VTX tab: the drone's parameter table (common/include/mabur/
   // config_params.h kTable), pushed by the core as Module.onParams and
-  // edited here one row at a time. docs/mavlink.md "Later tenants" /
-  // docs/web-gs.md "VTX tab".
+  // edited here one row at a time. docs/web-gs.md "VTX tab".
   import { untrack } from 'svelte';
   import { groupRows, rowView, showRefresh, headerText, applyBadge, HINTS,
-    modeSizes, modeText, parseMode, commitText } from '../lib/vtxparams.js';
+    modeOptions, parseFps, modeDraftFrom, modeDraftNext, modeApplyText,
+    commitText, commitAnswered, invalidText, rowKeys, showNoHeartbeat } from '../lib/vtxparams.js';
 
   let { params, paramsAt = null, spotter = false, onSet = () => {}, onRefresh = () => {} } = $props();
   const uid = $props.id();
@@ -20,25 +20,45 @@
   // doesn't reflow the moment the link forms.
   const greyed = $derived(spotter || !live.linked);
   const refreshShown = $derived(!spotter && showRefresh(live));
-  const noHeartbeat = $derived(!spotter && !!live.linked && !live.alive);
+  const noHeartbeat = $derived(showNoHeartbeat(live, mode));
   // Only one row is ever in flight (the core serialises sets); its index
   // doubles as "something is pending" for every other row's disabled state.
   const pendingIdx = $derived(rows.findIndex((r) => r.state === 'sending' || r.state === 'in_progress'));
 
-  // Typed text per row id: the text just sent, kept visible in place of a
-  // not-yet-updated row.value while sending/in_progress, cleared once the
-  // row lands on a terminal state (or idle) so the drone's own value shows
-  // again. VENC_MODE also uses this key, carrying the committed "fps@WxH".
+  // Typed text per row id: the text just sent, shown in place of a
+  // not-yet-updated row.value while sending/in_progress. VENC_MODE also
+  // uses this key, carrying the committed "fps@WxH".
   let typed = $state({});
-  let prevRowState = $state({});
+  // Per row id: a not-sendable edit's local result line ("not a valid
+  // ..."), shown until that row's next edit.
+  let localErr = $state({});
+  // Per row id: bumped when a commit's answer arrives, keying the row's
+  // widget so it is rebuilt on the drone's value. The browser keeps
+  // whatever the operator typed or toggled in the element, and Svelte only
+  // rewrites it when the bound expression changes -- an immediate refusal
+  // leaves row.value unchanged, so without this the widget would keep the
+  // refused input next to "failed: ...".
+  let epoch = $state({});
+  // Per row id: the row as the last push showed it when a commit went out
+  // (commitAnswered's snapshot). Not reactive: only the effect reads it.
+  const awaiting = {};
   $effect(() => {
     for (const row of rows) {
-      const was = prevRowState[row.id];
-      const stillPending = row.state === 'sending' || row.state === 'in_progress';
-      if ((was === 'sending' || was === 'in_progress') && !stillPending) delete typed[row.id];
-      prevRowState[row.id] = row.state;
+      const snap = awaiting[row.id];
+      if (!snap) continue;
+      if (row.state === 'sending' || row.state === 'in_progress') { snap.sawPending = true; continue; }
+      if (!commitAnswered(snap, row)) continue;
+      delete awaiting[row.id];
+      delete typed[row.id];
+      epoch[row.id] = untrack(() => epoch[row.id] ?? 0) + 1;
+      if (row.id === 'VENC_MODE') md = { draft: modeDraftFrom(row.value), seen: row.value ?? null, pending: false };
     }
   });
+  function sent(row, text) {
+    awaiting[row.id] = { state: row.state, age_ms: row.age_ms ?? null, status: row.status ?? '', sawPending: false };
+    typed[row.id] = text;
+    onSet(row.id, text);
+  }
 
   // A ~1 s clock, running only while a row is fading out an "accepted"
   // result -- rowView's age_ms is frozen at push time, so this is what
@@ -58,46 +78,51 @@
   }
 
   function commitRow(row, raw) {
+    // Nothing edited (e.g. focus passing through an empty, unanswered row).
+    if (typeof raw === 'string' && raw.trim() === (row.value ?? '')) return;
     const text = commitText(row.type, raw);
-    if (text == null || text === row.value) return;   // null = can't fix it up, keep the typed text as-is
-    typed[row.id] = text;
-    onSet(row.id, text);
+    if (text == null) { localErr[row.id] = invalidText(row.type); return; }
+    if (text === row.value) return;
+    sent(row, text);
   }
+  function onRowInput(row) { delete localErr[row.id]; }
   function onRowKeydown(e) { if (e.key === 'Enter') e.currentTarget.blur(); }
   function onRowBlur(row, e) { commitRow(row, e.currentTarget.value); }
-  function onBoolChange(row, e) { commitRow(row, e.currentTarget.checked); }
+  function onBoolChange(row, e) { delete localErr[row.id]; commitRow(row, e.currentTarget.checked); }
 
   // VENC_MODE: fps + size edited as a pair, applied together as one
-  // "<fps>@<WxH>" set (docs/camera-modes.md). `draft` is the pair the
-  // operator is composing; it re-syncs to the drone's value only when the
-  // row leaves sending/in_progress, so mid-edit it is never clobbered by
-  // an unrelated params push.
+  // "<fps>@<WxH>" set (docs/camera-modes.md). `md.draft` is the pair the
+  // operator is composing, the fps as the raw text in its box; it follows
+  // the drone's value until the operator edits it (modeDraftNext), and is
+  // never touched by a push while a set of it is in flight.
   const vencRow = $derived(rows.find((r) => r.id === 'VENC_MODE'));
-  // Seeded once from the prop directly (never from the `rows` derived --
-  // that would only capture its value at this line's first run, not track
-  // it), then kept in step by the resync effect below.
-  let draft = $state(untrack(() => parseMode((params?.rows ?? []).find((r) => r.id === 'VENC_MODE')?.value))
-    ?? { fps: 90, size: '1920x1080' });
-  let prevVencState = null;
+  const vencLive = $derived(vencRow?.value ?? null);
+  let md = $state({ draft: modeDraftFrom(null), seen: null, pending: false });
   $effect(() => {
     if (!vencRow) return;
-    const wasPending = prevVencState === 'sending' || prevVencState === 'in_progress';
-    const stillPending = vencRow.state === 'sending' || vencRow.state === 'in_progress';
-    if (wasPending && !stillPending) draft = parseMode(vencRow.value) ?? draft;
-    prevVencState = vencRow.state;
+    const prev = untrack(() => md);
+    const next = modeDraftNext(prev, vencRow.value, vencRow.state);
+    if (next !== prev) md = next;
   });
-  const vencSizes = $derived(modeSizes(draft.fps));
-  const vencText = $derived(modeText(draft.fps, draft.size));
+  const vencFps = $derived(parseFps(md.draft.fpsText));
+  // Sizes for the typed fps; while that text is not a valid rate, the
+  // chosen size stays the only option rather than the list emptying.
+  const vencSizes = $derived(vencFps == null ? (md.draft.size ? [md.draft.size] : []) : modeOptions(vencFps, vencLive));
+  const vencApply = $derived(modeApplyText(md.draft, vencLive));
   function onFpsInput(e) {
-    const n = Math.max(1, Math.min(120, Math.trunc(Number(e.currentTarget.value)) || 1));
-    const sizes = modeSizes(n);
-    draft = { fps: n, size: sizes.includes(draft.size) ? draft.size : sizes[0] };
+    const fpsText = e.currentTarget.value;
+    const n = parseFps(fpsText);
+    let size = md.draft.size;
+    if (n != null) {
+      const sizes = modeOptions(n, vencLive);
+      if (!sizes.includes(size)) size = sizes[0];
+    }
+    md = { ...md, draft: { fpsText, size } };
   }
-  function onSizeChange(e) { draft = { ...draft, size: e.currentTarget.value }; }
+  function onSizeChange(e) { md = { ...md, draft: { ...md.draft, size: e.currentTarget.value } }; }
   function applyVenc() {
-    if (!vencRow || vencText === vencRow.value) return;
-    typed[vencRow.id] = vencText;
-    onSet(vencRow.id, vencText);
+    if (!vencRow || vencApply == null) return;
+    sent(vencRow, vencApply);
   }
 </script>
 
@@ -116,44 +141,56 @@
         <span class="card-kicker">{g.kicker}</span>
         {#each g.rows as row (row.id)}
           {@const v = view(row)}
+          {@const err = localErr[row.id]}
           <div class="field">
             <div class="rowhead">
-              <span class="fieldlabel" id="{uid}{row.id}-label" title={row.help}>{row.key}</span>
+              <span class="fieldlabel" id="{uid}{row.id}-label">
+                <span class="mono rowid">{row.id}</span>
+                <span class="rowkey">{rowKeys(row)}</span>
+              </span>
               {#if applyBadge(row.apply)}<span class="tag tag-neutral badge">{applyBadge(row.apply)}</span>{/if}
             </div>
 
-            {#if spotter}
-              <span class="dim5 dash" aria-labelledby="{uid}{row.id}-label">—</span>
-            {:else if row.id === 'VENC_MODE'}
-              <div class="mode-row">
-                <input class="input sm num" type="number" min="1" max="120" style="width:64px"
-                  aria-label="{row.key} frame rate" value={draft.fps}
-                  disabled={greyed || v.disabled || v.busy} oninput={onFpsInput}>
-                <select class="input sm" aria-label="{row.key} size" value={draft.size}
-                  disabled={greyed || v.disabled || v.busy} onchange={onSizeChange}>
-                  {#each vencSizes as s}<option value={s} selected={s === draft.size}>{s}</option>{/each}
-                </select>
-                <button class="btn btn-secondary" type="button" style="font-size:12px"
-                  disabled={greyed || v.disabled || v.busy || vencText === (vencRow?.value ?? null)}
-                  onclick={applyVenc}>
-                  {#if v.busy}<span class="spinner" aria-hidden="true"></span>applying…{:else}Apply{/if}
-                </button>
-              </div>
-            {:else if row.type === 'bool'}
-              <label class="vswitch" aria-labelledby="{uid}{row.id}-label">
-                <input type="checkbox" checked={v.shown === '1'}
-                  disabled={greyed || v.disabled || v.busy} onchange={(e) => onBoolChange(row, e)}>
-                <span class="track"><span class="thumb"></span></span>
-              </label>
-            {:else}
-              <input class="input sm" type={row.type === 'str' ? 'text' : 'number'} step={row.type === 'real' ? 'any' : null}
-                aria-labelledby="{uid}{row.id}-label" value={v.shown}
-                disabled={greyed || v.disabled || v.busy}
-                onkeydown={onRowKeydown} onblur={(e) => onRowBlur(row, e)}>
-            {/if}
+            {#key epoch[row.id] ?? 0}
+              {#if spotter}
+                <span class="dim5 dash" aria-labelledby="{uid}{row.id}-label">—</span>
+              {:else if row.id === 'VENC_MODE'}
+                <div class="mode-row">
+                  <!-- type="text": a number input reports "" for half-typed text, and
+                       writing that back would wipe what the operator typed. -->
+                  <input class="input sm num" type="text" inputmode="numeric" style="width:64px"
+                    aria-label="{row.id} frame rate, 1 to 120" value={md.draft.fpsText}
+                    aria-invalid={md.draft.fpsText !== '' && vencFps == null}
+                    disabled={greyed || v.disabled || v.busy} oninput={onFpsInput}>
+                  <select class="input sm" aria-label="{row.id} size" value={md.draft.size}
+                    disabled={greyed || v.disabled || v.busy} onchange={onSizeChange}>
+                    {#each vencSizes as s}<option value={s} selected={s === md.draft.size}>{s}</option>{/each}
+                  </select>
+                  <button class="btn btn-secondary" type="button" style="font-size:12px"
+                    disabled={greyed || v.disabled || v.busy || vencApply == null}
+                    onclick={applyVenc}>
+                    {#if v.busy}<span class="spinner" aria-hidden="true"></span>applying…{:else}Apply{/if}
+                  </button>
+                </div>
+              {:else if row.type === 'bool'}
+                <label class="vswitch" aria-labelledby="{uid}{row.id}-label">
+                  <input type="checkbox" checked={v.shown === '1'}
+                    disabled={greyed || v.disabled || v.busy} onchange={(e) => onBoolChange(row, e)}>
+                  <span class="track"><span class="thumb"></span></span>
+                </label>
+              {:else}
+                <input class="input sm" type={row.type === 'str' ? 'text' : 'number'} step={row.type === 'real' ? 'any' : null}
+                  aria-labelledby="{uid}{row.id}-label" value={v.shown}
+                  disabled={greyed || v.disabled || v.busy}
+                  oninput={() => onRowInput(row)} onkeydown={onRowKeydown} onblur={(e) => onRowBlur(row, e)}>
+              {/if}
+            {/key}
 
+            <div class="hint">{row.help}</div>
             {#if HINTS[row.id]}<div class="hint">{HINTS[row.id]}</div>{/if}
-            {#if !spotter && v.result}
+            {#if !spotter && err}
+              <div class="result result-err">{err}</div>
+            {:else if !spotter && v.result}
               <div class="result result-{v.resultKind}">
                 {#if v.resultKind === 'busy'}<span class="spinner" aria-hidden="true"></span>{/if}{v.result}
               </div>
@@ -169,7 +206,9 @@
   .hdr-row { display: flex; align-items: center; gap: 8px; }
   .dash { display: inline-block; font-size: 13px; }
   .rowhead { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-bottom: 5px; }
-  .fieldlabel { font-size: 12px; color: color-mix(in srgb, var(--color-text) 70%, transparent); cursor: help; }
+  .fieldlabel { font-size: 12px; display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; min-width: 0; }
+  .rowid { color: color-mix(in srgb, var(--color-text) 85%, transparent); }
+  .rowkey { font-size: 11px; color: var(--color-neutral-500); }
   .badge { font-size: 10px; padding: 1px 6px; }
   .hint { font-size: 11px; color: var(--color-neutral-500); margin-top: 4px; }
   .result { font-size: 11px; margin-top: 4px; }
