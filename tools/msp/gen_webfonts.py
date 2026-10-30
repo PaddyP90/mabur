@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
-"""Convert a folder of `.mfont` OSD fonts into the web GS's selectable fonts.
+"""Convert `.mfont` OSD fonts into the web GS's selectable fonts.
 
 Usage:
   gen_webfonts.py <dir-or-files...> [--out web/ui/public/fonts]
 
-Each `<name>.mfont` becomes `<out>/<slug>.png` (same 36x54, 32-per-row atlas
-as gen_webfont.py), and `<out>/index.json` lists them for the Display menu's
-"OSD font" picker. The shipped Betaflight atlas (font_btfl.png) is always
-offered by the page and is not listed here. Re-running regenerates the whole
-manifest from the inputs given.
+At least one input is required: a `.mfont` file, or a folder whose `*.mfont`
+files are all converted. Each `<name>.mfont` becomes `<out>/<slug>.png` (same
+36x54, 32-per-row atlas as gen_webfont.py), and `<out>/index.json` lists them
+for the "OSD font" picker in the Config form's Display group. The shipped
+Betaflight atlas (font_btfl.png) is always offered by the page and is not
+listed here.
+
+index.json is merged, not rewritten: fonts already listed that are not among
+the inputs are kept as they are (their ids are printed), a font that is passed
+again is regenerated under the same id and keeps its listed name, and new
+fonts are appended. To remove a font, delete its entry from index.json and its
+PNG by hand.
 
 The `.mfont` spec says premultiplied alpha, but some tools write straight
 alpha. A pixel with a colour channel above its alpha cannot be premultiplied,
@@ -28,6 +35,7 @@ import gen_webfont as g  # noqa: E402
 
 ROOT = os.path.normpath(os.path.join(HERE, "..", ".."))
 COLS = g.COLS
+USAGE = "usage: gen_webfonts.py <dir-or-files...> [--out web/ui/public/fonts]"
 
 
 def is_straight(words):
@@ -69,20 +77,52 @@ def convert(src, dst):
     return straight
 
 
+def load_manifest(path):
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except ValueError as e:
+        sys.exit("%s is not valid JSON (%s); fix or remove it first" % (path, e))
+    if not isinstance(data, list):
+        sys.exit("%s is not a JSON list; fix or remove it first" % path)
+    return data
+
+
+def merge(existing, entries):
+    """New entries replace same-id ones in place (keeping the listed name); others are appended."""
+    merged = list(existing)
+    pos = {e["id"]: i for i, e in enumerate(merged) if isinstance(e, dict) and "id" in e}
+    for e in entries:
+        if e["id"] in pos:
+            old = merged[pos[e["id"]]]
+            merged[pos[e["id"]]] = dict(e, name=old.get("name", e["name"]))
+        else:
+            merged.append(e)
+    return merged
+
+
 def main(argv):
     args, out = [], os.path.join(ROOT, "web/ui/public/fonts")
     it = iter(argv[1:])
     for a in it:
         if a == "--out":
-            out = next(it)
+            out = next(it, None)
+            if out is None:
+                sys.exit("--out needs a directory\n" + USAGE)
         else:
             args.append(a)
+    if not args:
+        sys.exit("no inputs given\n" + USAGE)
     files = []
-    for a in args or ["."]:
+    for a in args:
         files += sorted(glob.glob(os.path.join(a, "*.mfont"))) if os.path.isdir(a) else [a]
     if not files:
         sys.exit("no .mfont files found")
     os.makedirs(out, exist_ok=True)
+    manifest = os.path.join(out, "index.json")
+    existing = load_manifest(manifest)   # fail on a broken manifest before writing any PNG
     entries, used = [], {"btfl"}
     for src in files:
         base = os.path.splitext(os.path.basename(src))[0]
@@ -95,10 +135,13 @@ def main(argv):
             print("%s: colours stored as straight alpha (taken as-is)" % base)
         print("wrote %s.png" % slug)
         entries.append({"id": slug, "name": base.replace("_", " "), "file": "fonts/%s.png" % slug})
-    with open(os.path.join(out, "index.json"), "w") as f:
-        json.dump(entries, f, indent=2)
+    merged = merge(existing, entries)
+    kept = [e["id"] for e in existing
+            if isinstance(e, dict) and "id" in e and e["id"] not in {n["id"] for n in entries}]
+    with open(manifest, "w") as f:
+        json.dump(merged, f, indent=2)
         f.write("\n")
-    print("wrote index.json (%d fonts)" % len(entries))
+    print("wrote index.json (%d fonts%s)" % (len(merged), "; kept " + ", ".join(kept) if kept else ""))
 
 
 if __name__ == "__main__":
