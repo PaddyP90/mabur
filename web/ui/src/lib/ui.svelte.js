@@ -1,6 +1,7 @@
 // App-level UI state (handoff "State"). Svelte 5 runes module.
 import { loadConfig, loadKey } from './config.js';
 import { loadRelayCustom } from './logic.mjs';
+import { DEFAULT_FONT } from './osdfonts.js';
 
 function storageSafe() {
   try { return localStorage; } catch { return null; }
@@ -53,7 +54,7 @@ export const ui = $state({
   tick: 0,
   // Selectable OSD fonts: the manifest (public/fonts/index.json) replaces
   // this at startup; the shipped Betaflight atlas is always available.
-  osdFonts: [{ id: 'btfl', name: 'Betaflight', file: 'font_btfl.png' }],
+  osdFonts: [{ ...DEFAULT_FONT }],
   sideTab: 'config',                   // ConfigSide's own Config|VTX segment
   params: null,                        // the latest onParams push, null while disconnected
   paramsAt: null,                      // Date.now() when that push arrived (VtxPanel's "accepted" fade)
