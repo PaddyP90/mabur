@@ -32,7 +32,7 @@ on an IDR) were the geometry proof.
 | 5 LDPC | pass (drone side) | `RADIO_LDPC` 0 then 1: `reprogram` 33 and 30 ms, link held (`sent` climbing, state LINKED), AU rate 103, no RCF-slot timeout lines on the GS. The OSD rate row was not observed |
 | 6 MSP thread | pass | `MSP_ENABLE` 0: the `mbr-msp` thread gone; 1: `maburd msp: enabled … reading /dev/ttyS2` and the thread back; 35 and 37 ms |
 | 7 TX-power margin | pass (margin half) | `RADIO_WALL_MARGN` 2.0 then 1.0: `reprogram` 59 and 62 ms, `SetTxPowerRateDiffs` accepted. The refusal during a calibration sweep was not run on the device (host test `submit_during_calibration_is_refused` covers it) |
-| 8 raw DVR roll | pass (maburplay) | one recording across gate 2's return leg: `rec: START (raw)` → `rec: ROLL (record-0205.mp4)` at the 1080→720 IDR → `rec: STOP (1532 samples)`; `record-0204.mp4` 1920x1080, 1553 frames decoded; `record-0205.mp4` 1280x720, 1479 frames decoded. The web GS half was not run (no browser GS on this bench) |
+| 8 raw DVR roll | pass (maburplay) | one recording across gate 2's return leg: `rec: START (raw)` → `rec: ROLL (record-0205.mp4)` at the 1080→720 IDR → `rec: STOP (1532 samples)`; `record-0204.mp4` 1920x1080, 1553 frames decoded; `record-0205.mp4` 1280x720, 1479 frames decoded. Web GS: the page in Chrome on the host with an EU card, connected as a **spotter** beside the GS, recording locally; `VENC_SIZE` 1280x720 → 1728x972 → 1280x720 (same 100 fps sensor mode) rolled the OPFS recording twice: `mabur-…155528.mp4` 1280x720 (681 frames decoded), `…-r1.mp4` 1728x972 (1203), `…-r2.mp4` 1280x720 (3878), all three playable on the host. A spotter cannot ask for the key frame the rolled file waits on, so each new file began at the IDR the GS was made to request (`refresh dvr` on its player loopback socket); a GS-mode page asks for its own |
 | 9 set at RENDEZVOUS | not run | the tag/session rule is unchanged code; no device run |
 | ladder rung 2 | pass | `MABUR_VENC_FAIL_RESTARTS=1` in the wrapper's environment for one start: `VENC_SLICES` 2 → `injected pipeline start failure` → `new pipeline refused` → `previous pipeline restored`; ack FAILED `pipeline refused venc.slices: restored previous`, 536 ms; video back at 103 fps, `mav_apply=0/1 mav_rebuild=2` |
 | ladder rung 3 | pass | `=2`: both pipeline-only starts refused → `previous pipeline restored by a cold restart` (`ISP channel ready after 16 ms`, `ISP file loaded`), ack FAILED `… restored previous (cold)`, 8785 ms, the tool's 15 s wait covered it; video back at 103 fps; `venc_verb_fail` 447 over the gap (the agent's re-asserts, as designed). A clean restart afterwards shows no injection line and a normal apply counter |
@@ -44,6 +44,7 @@ throughout, not a 14–17 s respawn.
 
 ## Not covered
 
-- The web GS's deferred roll (gate 8's second half) and the calibration
-  refusal (gate 7's second half) on a device.
+- The calibration refusal (gate 7's second half) on a device, and the web
+  GS roll in GS mode (only the spotter was run; a GS-mode page requests the
+  IDR itself).
 - Long-run soak beyond the twenty rebuilds.
