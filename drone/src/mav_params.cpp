@@ -1,10 +1,6 @@
 #include "mav_params.h"
 
-#include <algorithm>
 #include <cmath>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
 
 namespace mabur::mavparam {
 
@@ -102,17 +98,10 @@ bool render_toml(const Value& v, std::string* out) {
       // ("nan", "inf") and the ".0" append below would mangle it further
       // ("inf.0") into something that doesn't even round-trip as a float.
       if (!std::isfinite(v.f)) return false;
-      // Shortest text that reads back as the same float: %.9g always
-      // round-trips but spells 0.65f as 0.649999976, so a set of the value
-      // the bundle already holds would rewrite its line. Append ".0" when
-      // %g picked the integer form, so the TOML value is never read back
-      // as an Int32.
-      char buf[64];
-      for (int prec = 6; prec <= 9; ++prec) {
-        std::snprintf(buf, sizeof buf, "%.*g", prec, static_cast<double>(v.f));
-        if (std::strtof(buf, nullptr) == v.f) break;
-      }
-      std::string s(buf);
+      // paramval::float_text already picks the shortest text that reads
+      // back as the same float; append ".0" when it picked the integer
+      // form, so the TOML value is never read back as an Int32.
+      std::string s = paramval::float_text(v.f);
       if (s.find('.') == std::string::npos && s.find('e') == std::string::npos &&
           s.find('E') == std::string::npos) {
         s += ".0";
@@ -129,72 +118,6 @@ bool render_toml(const Value& v, std::string* out) {
     }
   }
   return false;
-}
-
-bool decode_wire(size_t idx, uint8_t mav_type, const char wire[128], Value* out) {
-  if (idx >= cfgparam::kCount) return false;
-  const Type type = cfgparam::kTable[idx].type;
-  if (mav_type != cfgparam::mav_type(type)) return false;
-  switch (type) {
-    case Type::Bool: {
-      const uint8_t b = static_cast<uint8_t>(wire[0]);
-      if (b != 0 && b != 1) return false;
-      *out = Value{Type::Bool, b != 0};
-      return true;
-    }
-    case Type::Int32: {
-      int32_t v;
-      std::memcpy(&v, wire, sizeof v);
-      *out = Value{Type::Int32, false, v};
-      return true;
-    }
-    case Type::Real32: {
-      float v;
-      std::memcpy(&v, wire, sizeof v);
-      // A wire buffer decoding to NaN/Inf can never have come from a
-      // legal config value (venc_cfg's rails, the bundle's %.9g text):
-      // treat it the same as any other malformed payload.
-      if (!std::isfinite(v)) return false;
-      *out = Value{Type::Real32, false, 0, v};
-      return true;
-    }
-    case Type::Str: {
-      // A NUL must appear within the 128-byte buffer, and every byte
-      // before it must be printable ASCII — otherwise the sender's buffer
-      // is garbage, not a string this config could ever hold.
-      size_t len = 0;
-      for (; len < 128; ++len) {
-        if (wire[len] == '\0') break;
-        const unsigned char c = static_cast<unsigned char>(wire[len]);
-        if (c < 0x20 || c > 0x7e) return false;
-      }
-      if (len == 128) return false;  // no NUL found
-      *out = Value{Type::Str, false, 0, 0, std::string(wire, len)};
-      return true;
-    }
-  }
-  return false;
-}
-
-void encode_wire(const Value& v, char wire[128]) {
-  std::memset(wire, 0, 128);
-  switch (v.type) {
-    case Type::Bool:
-      wire[0] = v.b ? 1 : 0;
-      break;
-    case Type::Int32:
-      std::memcpy(wire, &v.i, sizeof v.i);
-      break;
-    case Type::Real32:
-      std::memcpy(wire, &v.f, sizeof v.f);
-      break;
-    case Type::Str: {
-      const size_t n = std::min(v.s.size(), static_cast<size_t>(127));
-      std::memcpy(wire, v.s.data(), n);
-      wire[n] = '\0';
-      break;
-    }
-  }
 }
 
 }  // namespace mabur::mavparam
