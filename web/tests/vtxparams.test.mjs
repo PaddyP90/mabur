@@ -93,11 +93,14 @@ test('rowView shows typed text only while pending', () => {
   assert.equal(rowView(sending, 2, 2, '90').shown, '90');
   assert.equal(rowView(sending, 2, 2, '90').busy, true);
   const accepted = { state: 'accepted', value: '90', age_ms: 1000, status: '' };
-  assert.equal(rowView(accepted, 2, -1, '90').shown, '90');
+  // A terminal state ignores stale typed text, even when it differs from
+  // the drone's own value -- '91' here must not leak into `shown`.
+  assert.equal(rowView(accepted, 2, -1, '91').shown, '90');
   const old = { state: 'accepted', value: '90', age_ms: 3500, status: '' };
   assert.equal(rowView(old, 2, -1, null, 0).result, '');
   assert.equal(rowView(accepted, 2, -1, null, 0).result, 'accepted');
   const failed = { state: 'failed', value: '90', age_ms: null, status: '' };
+  assert.equal(rowView(failed, 2, -1, '91').shown, '90');
   assert.equal(rowView(failed, 2, -1, null).result, 'failed: refused');
 });
 
