@@ -953,7 +953,15 @@ in whichever `dvr.mode` is configured:
   REC indicator visibly lags the press. The sync point is decided by
   `mabur::RawDvr` (`common/include/mabur/raw_dvr.h`, shared with the web
   GS's local recording): a complete IRAP (`au_is_irap()`) once VPS+SPS+PPS
-  are known. Older raw files that open on a non-IRAP need repair — see
+  are known. A coded-size change mid-recording (a drone `VENC_SIZE`
+  MAVLink set rebuilding the encoder pipeline in-process,
+  `docs/mavlink.md`, `docs/link-adaptation.md`, is the live case) rolls
+  to a new file at the next IRAP rather than mixing two sizes in one
+  header: `maburplay` names the next file through the GS DVR's namer and
+  logs `maburplay: rec: ROLL (<path>)`. The web GS's local recording
+  rolls the same way, naming the new file `<name>-rN.mp4` and resuming
+  at the next sync point (`docs/web-gs.md`, "Local (`web`) target").
+  Older raw files that open on a non-IRAP need repair — see
   `docs/findings/2026-09-29-web-gs-raw-dvr-irap-sync.md`.
 - **burned** re-encodes what the display scans out, with the OSD burnt
   in. The recorder taps the display's flip on the release thread
@@ -1118,7 +1126,10 @@ deploy, no video) and you need to know whether the encoder is running.
 
 maburd's own stderr (`/tmp/mabur.log`): the 1 Hz `stats:` line (incl.
 `enc_pk100=`, the peak 100 ms encoder byte rate in kbit/s inside that
-second, `lp=`/`armed=` for low-power mode, `snr_mhz=`, the trimmed
+second — its frame-normalised window is sized from the boot config's
+`venc.fps` and is not rebuilt by a live `VENC_FPS` MAVLink set
+(`docs/mavlink.md`), so the window's own 100 ms no longer matches the
+running fps after one — `lp=`/`armed=` for low-power mode, `snr_mhz=`, the trimmed
 sensor rate in milli-Hz (same value as `GET /venc`'s `sensor_mhz`), and
 `snr_off=`, the phase-lock offset on the sensor in milli-fps (0 = the
 trim's own rate); `rc: low_power ENTER/EXIT` lines mark transitions,
@@ -1130,11 +1141,27 @@ The MAVLink parameter component (T_MAV, `drone/src/mav_component.h`) logs
 to the same stderr. At boot: `maburd mav: component sys 1 comp 191,
 config <path>`. Per request, `[mav] ` lines: `list: <n> values`,
 `read <id>: no such parameter` (`read #<index>: no such parameter` for a
-read by index), `set <id>: no such parameter`, `set <id> = <value> (<toml key>)`, with
-`, unchanged)` when the file already held that line and nothing was
-written, `set <id> refused: <why>` (the loader's message when the result
-would not load), and `... config does not load: <why>` when the file on
-disk itself fails to load. The `stats:` line gains
+read by index), `set <id>: no such parameter`, `set <id> = <value>
+(<toml key>, unchanged)` when the file already held that line and
+nothing was written, `set <id> refused: <why>` for an immediate refusal
+(unknown id, a type mismatch, a loader refusal, "apply in progress",
+"calibration in progress"), and `... config does not load: <why>` when
+the file on disk itself fails to load. A set that is a real change past
+the loader check is handed to `ConfigApplier` (`docs/mavlink.md`
+"Applying a set") and logs two lines instead: `set <id> = <value>
+(<toml key>) in progress` at once, then — once the applier finishes —
+either `set <id> = <value> (<toml key>) applied <knob|reprogram|rebuild>
+<ms> ms` or `set <id> refused: <reason>`. The applier itself, on its own
+thread (`mbr-apply`), logs one line per attempt, `apply <id>
+<knob|reprogram|rebuild> ok <ms> ms` or `... failed: <reason> <ms> ms`,
+plus one line per rung for a rebuild that falls back: `rebuild <toml
+key>: new pipeline refused` / `previous pipeline restored` / `previous
+pipeline refused` / `previous pipeline restored by a cold restart` /
+`cold restart failed` / `pipeline lost, requesting exit`. The `stats:`
+line always carries `mav_apply=<ok>/<failed>` (every finished apply,
+cumulative since start) and `mav_rebuild=<n>` (every `pipeline_restart`
+call the ladder made, so a rebuild that falls back twice counts twice),
+and gains
 `mav rx=<frames>/<packets> tx=<frames>/<packets> drop=<n> reject=<n>`
 on the ticks where any of those moved since the last time they were
 printed; the values are cumulative since start. `rx` counts verified

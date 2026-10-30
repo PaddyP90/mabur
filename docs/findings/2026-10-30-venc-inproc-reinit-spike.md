@@ -3,11 +3,15 @@
 **Status:** positive result, twice over: a full `venc_core_stop()` +
 `venc_core_start()` works (8.5 s), and a pipeline-only restart that keeps
 the MI module clients connected works in about 0.6 s to the first frame
-of the new mode. `docs/link-adaptation.md` ("Encoder faults are process
-faults") now records it. Nothing built: `maburd` at HEAD still exits on
-an encoder fault and never rebuilds in one process. The spike's binary,
-CMake target and the two throwaway restart functions are not in the
-tree.
+of the new mode. Built: `ConfigApplier` drives this in-process rebuild
+for a `VENC_FPS`/`VENC_SIZE`/`VENC_SLICES`/`REC_*` MAVLink parameter
+set, with the full stop/start and the wrapper-respawn exit as its
+fallback ladder — `docs/mavlink.md` ("Applying a set") and
+`docs/link-adaptation.md` ("Rebuilding the encoder pipeline in-process")
+now record it. An encoder fault (as opposed to a parameter-set rebuild)
+still exits: see those pages for what the ladder does and does not
+cover. The spike's binary, CMake target and the two throwaway restart
+functions are not in the tree.
 
 ## Question
 

@@ -4,8 +4,11 @@ The radio link carries MAVLink 2 packets in both directions inside one RC
 frame type, `T_MAV`. The first tenant is a parameter component on the drone
 that serves thirteen keys of `/etc/mabur.toml` as MAVLink extended
 parameters (`PARAM_EXT_*`): a ground end holding the link key can list,
-read and set them while linked. A set rewrites the config **file**; the
-running `maburd` keeps the values it booted with until it restarts.
+read and set them while linked. A set applies to the running `maburd`
+before it is published to the file — a knob takes effect on `RcAgent`'s
+next tick, a reprogram takes effect in place, a rebuild restarts the
+encoder pipeline in-process — and `ACCEPTED` always means both: in
+effect on the drone and on disk. See "Applying a set" below.
 
 On the GS, `maburgs` bridges the tunnel to a MAVLink UDP endpoint, so a
 ground app or `tools/bench/mavparam.py` talks to the drone as if it were a
@@ -118,31 +121,94 @@ agent and TX threads.
 - **Read.** By `param_index` (when not -1) or by `param_id`: one
   `PARAM_EXT_VALUE`. An unknown id or index gets no reply (the protocol
   has no negative read answer; the ground end times out) and is logged.
-- **Set.** One key per set, answered with one `PARAM_EXT_ACK`:
+- **Set.** One key per set, answered with one `PARAM_EXT_ACK`, or two for
+  a set that changes the file:
   - unknown id: `PARAM_ACK_VALUE_UNSUPPORTED`, value zeroed;
   - a `param_type` other than the row's, a Bool byte other than 0/1, a
     non-finite REAL32, or a CUSTOM value with no NUL in its 128 bytes or a
     non-printable byte: `PARAM_ACK_VALUE_UNSUPPORTED` with the current
     value; there is no cross-type coercion;
-  - otherwise the file's line for the key is patched in place (spacing and
-    trailing comment kept byte for byte), the candidate is written next to
-    the file and verified with `mabur::load_config`, and only a candidate
-    the loader accepts replaces the file. Success:
-    `PARAM_ACK_ACCEPTED` with the value read back from the published file.
-    Failure: `PARAM_ACK_FAILED` with the current, unchanged value, followed
-    by one `STATUSTEXT` (`MAV_SEVERITY_ERROR`) carrying the reason
-    (`<field>: <why>`, the loader's message without its file and line,
-    cut to 50 characters). A key whose line is missing or commented out
-    is `FAILED` with `<section.key>: key not found`; nothing is written.
-  - A set to the value the file already holds writes nothing and answers
-    `ACCEPTED`, so a ground end may re-send a set whose ack it lost.
-  - Each set is one `[mav] set ...` line in `maburd`'s log
+  - a set to the value the file already holds writes nothing and answers
+    `ACCEPTED` immediately, so a ground end may re-send a set whose ack
+    it lost;
+  - otherwise the file's line for the key is patched in place (spacing
+    and trailing comment kept byte for byte) and the candidate is
+    written next to the file and verified with `mabur::load_config`
+    before anything is submitted for applying. A candidate the loader
+    refuses is `PARAM_ACK_FAILED` immediately, with the current,
+    unchanged value, followed by one `STATUSTEXT`
+    (`MAV_SEVERITY_ERROR`) carrying the reason (`<field>: <why>`, the
+    loader's message without its file and line, cut to 50 characters).
+    A key whose line is missing or commented out is `FAILED` with
+    `<section.key>: key not found`; nothing is written. A candidate
+    the loader accepts, and that is a real change, is handed to
+    `ConfigApplier` instead of being written straight to disk: the set
+    answers `PARAM_ACK_IN_PROGRESS` with the current value at once,
+    and a second `PARAM_EXT_ACK` follows once the applier finishes —
+    `ACCEPTED` with the value read back from the now-published file,
+    or `FAILED` with the current value and a `STATUSTEXT` reason. See
+    "Applying a set" below.
+  - Only one set is ever being applied at a time: a set submitted while
+    an earlier one is still in progress is refused immediately,
+    `PARAM_ACK_FAILED` "apply in progress"; a set is refused the same
+    way, "calibration in progress", while a calibration session is
+    running.
+  - Each set is one or two `[mav] set ...` lines in `maburd`'s log
     (`docs/observability.md`).
 
-`ACCEPTED` always means published to disk. The read-patch-publish
-sequence holds the process-wide config-write lock, so a calibration apply
-on another thread and a parameter set never lose each other's change.
-There is no arm-state gate: a set in flight is the operator's call.
+`ACCEPTED` always means both: the value is in effect on the running
+`maburd` and published to disk. The applier publishes a candidate only
+after the process has accepted it — never before — and a publish that
+fails afterwards (disk full, a lost race) re-applies the previous config
+so the process and the file never disagree. The read-patch-check
+sequence in `handle_set` and the applier's own read-patch-apply-publish
+sequence both hold the process-wide config-write lock, so a calibration
+publish on another thread and a parameter set never lose each other's
+change. There is no arm-state gate: a set in flight is the operator's
+call.
+
+### Applying a set
+
+A set that changes the file and passes the loader check is applied to
+the running process by `ConfigApplier`, its own thread (`mbr-apply`,
+`drone/src/config_apply.h`) — a rebuild stops the encoder for about half
+a second, too long to run on the MAVLink thread that answers the set.
+Each parameter takes one of three paths, the parameter table's "apply"
+column below:
+
+- **Knob** (`ENC_BITRATE_MAX`, `ENC_AIRTIME`, `LOWPWR_ENABLE`): the new
+  value is written to a live atomic `RcAgent` reads on its next tick.
+  Nothing stops.
+- **Reprogram** (`RADIO_WALL_MARGN`, `RADIO_LDPC`, `MSP_ENABLE`): a radio
+  or peripheral setting changes in place. `RADIO_WALL_MARGN` reprograms
+  the TX-power plan under the retune gate; `RADIO_LDPC` rebuilds the
+  control radiotaps and `RcAgent` re-applies the current operating point
+  with the new flag on its next tick (every ladder it builds from then
+  on uses it too); `MSP_ENABLE` starts or stops the MSP thread.
+- **Rebuild** (`VENC_FPS`, `VENC_SIZE`, `VENC_SLICES`, `REC_ENABLE`,
+  `REC_BITRATE`, `REC_FPS`, `REC_SIZE`): the encoder pipeline is rebuilt
+  in-process (`docs/link-adaptation.md` "Rebuilding the encoder pipeline
+  in-process"), about 0.5 s plus ~0.1 s to the first frame of the new
+  mode. A recording in progress is stopped first and the record channel
+  is recreated in its bind order; the GS's standing record wish restarts
+  it (`docs/vtx-recorder.md`).
+
+**The rebuild failure ladder.** A rebuild tries the new config; if the
+pipeline refuses it, the ladder falls back to the previous config as the
+same pipeline-only restart; if that also fails, to a full
+`venc_core_stop()` + `venc_core_start()` of the previous config (about
+8.5 s); and if that also fails, `maburd` exits for its init wrapper to
+respawn it from the unchanged file. Each rung logs one line. A set that
+falls to any rung but the first still answers `PARAM_ACK_FAILED` with
+the reason — `ACCEPTED` is only for the config that was actually asked
+for, never a fallback.
+
+Only one apply runs at a time (`submit()` refuses a second with "apply
+in progress"), and an apply is refused outright while a calibration
+session is running ("calibration in progress") — calibration owns the
+TX-power table and the config-write lock during its sweep. Logging and
+the `stats:` line's `mav_apply=`/`mav_rebuild=` counters:
+`docs/observability.md`. The undo, `.pre-param`: below.
 
 ### `.pre-param`
 
@@ -162,24 +228,28 @@ are what an operator UI shows. Types on the wire: Bool is
 (NUL-terminated ASCII, at most 127 characters, written into the TOML as a
 quoted string).
 
-| # | param_id | TOML key | type | help |
-|---|---|---|---|---|
-| 0 | `RADIO_WALL_MARGN` | `radio.wall_margin_db` | Real32 | Safety margin below the calibrated TX-power walls; raise to lower TX power |
-| 1 | `RADIO_LDPC` | `radio.ldpc` | Bool | LDPC coding on every frame; turn off only for a ground card that cannot decode it |
-| 2 | `VENC_FPS` | `venc.fps` | Int32 | Camera frame rate, which also selects the sensor's field-of-view mode |
-| 3 | `VENC_SIZE` | `venc.size` | Str | Encoder output resolution, must match the fps mode's aspect ratio |
-| 4 | `VENC_SLICES` | `venc.slices` | Int32 | H.265 row slices on the link channel; 1 disables slice salvage |
-| 5 | `ENC_BITRATE_MAX` | `encoder.bitrate_max_kbps` | Int32 | Bitrate ceiling, kbps |
-| 6 | `ENC_AIRTIME` | `encoder.airtime_budget` | Real32 | Share of the link's real capacity the video may use |
-| 7 | `REC_ENABLE` | `record.enable` | Bool | Enable the onboard microSD recorder |
-| 8 | `REC_BITRATE` | `record.bitrate_kbps` | Int32 | Constant bitrate of the onboard recording |
-| 9 | `REC_FPS` | `record.fps` | Int32 | Onboard recording frame rate, at most the camera's fps |
-| 10 | `REC_SIZE` | `record.size` | Str | Onboard recording resolution, same aspect ratio as the camera's |
-| 11 | `LOWPWR_ENABLE` | `low_power.enable` | Bool | Lower bitrate and frame rate while disarmed to keep the VTX cool; needs msp.enable for arm state |
-| 12 | `MSP_ENABLE` | `msp.enable` | Bool | Flight-controller link for the OSD and arm state |
+| # | param_id | TOML key | type | apply | help |
+|---|---|---|---|---|---|
+| 0 | `RADIO_WALL_MARGN` | `radio.wall_margin_db` | Real32 | reprogram | Safety margin below the calibrated TX-power walls; raise to lower TX power |
+| 1 | `RADIO_LDPC` | `radio.ldpc` | Bool | reprogram | LDPC coding on every frame; turn off only for a ground card that cannot decode it |
+| 2 | `VENC_FPS` | `venc.fps` | Int32 | rebuild | Camera frame rate, which also selects the sensor's field-of-view mode |
+| 3 | `VENC_SIZE` | `venc.size` | Str | rebuild | Encoder output resolution, must match the fps mode's aspect ratio |
+| 4 | `VENC_SLICES` | `venc.slices` | Int32 | rebuild | H.265 row slices on the link channel; 1 disables slice salvage |
+| 5 | `ENC_BITRATE_MAX` | `encoder.bitrate_max_kbps` | Int32 | knob | Bitrate ceiling, kbps |
+| 6 | `ENC_AIRTIME` | `encoder.airtime_budget` | Real32 | knob | Share of the link's real capacity the video may use |
+| 7 | `REC_ENABLE` | `record.enable` | Bool | rebuild | Enable the onboard microSD recorder |
+| 8 | `REC_BITRATE` | `record.bitrate_kbps` | Int32 | rebuild | Constant bitrate of the onboard recording |
+| 9 | `REC_FPS` | `record.fps` | Int32 | rebuild | Onboard recording frame rate, at most the camera's fps |
+| 10 | `REC_SIZE` | `record.size` | Str | rebuild | Onboard recording resolution, same aspect ratio as the camera's |
+| 11 | `LOWPWR_ENABLE` | `low_power.enable` | Bool | knob | Lower bitrate and frame rate while disarmed to keep the VTX cool; needs msp.enable for arm state |
+| 12 | `MSP_ENABLE` | `msp.enable` | Bool | reprogram | Flight-controller link for the OSD and arm state |
 
-Ranges are the loader's, not repeated here: whatever `maburd` refuses to
-boot on, a set refuses.
+"apply" is how the set reaches the running process (`apply_path_for` in
+`drone/src/config_apply.h`; "Applying a set" above): knob is a live
+atomic `RcAgent` reads on its next tick, reprogram changes a radio or
+peripheral setting in place, rebuild restarts the encoder pipeline
+in-process. Ranges are the loader's, not repeated here: whatever
+`maburd` refuses to boot on, a set refuses.
 
 ### Ordering rules
 
@@ -283,13 +353,22 @@ one subcommand:
   its `id  type  value` row.
 - `set ID VALUE` looks `ID` up in its own copy of the 13-row table (ids
   and types mirrored from `common/include/mabur/config_params.h`) to
-  encode `VALUE` for the wire, sends the set (2 s timeout, 3 retries),
-  and prints the ack result (`ACCEPTED`/`FAILED`/`VALUE_UNSUPPORTED`/
-  `IN_PROGRESS`) and value, then any `STATUSTEXT` that follows within 1 s.
+  encode `VALUE` for the wire and sends the set (2 s timeout, 3 retries).
+  A set the drone applies (a real change past a loader check) answers
+  `IN_PROGRESS` first, holding the current value; the tool prints
+  `IN_PROGRESS  <value>` and waits up to 15 s from that ack for the
+  final one before giving up — long enough for a rebuild's ~0.5 s or,
+  on the ladder's worst case (two failed restarts plus an ~8.5 s cold
+  one), for that to finish too. It then prints the final
+  ack result (`ACCEPTED`/`FAILED`/`VALUE_UNSUPPORTED`) and value, and
+  any `STATUSTEXT` that follows within 1 s. A set refused immediately
+  (unknown id, a type mismatch, a loader refusal, "apply in progress",
+  "calibration in progress") never sees `IN_PROGRESS` at all.
 
-Exit 0 on an ACCEPTED set or a successful list/get, 1 on a runtime
-failure (no heartbeat, a request that times out after retries, an
-incomplete list, or a non-ACCEPTED ack), 2 on a usage error (missing
+Exit 0 on an ACCEPTED set or a successful list/get; 1 on a runtime
+failure — no heartbeat, a request that times out after retries, an
+incomplete list, an ack other than ACCEPTED, or a set whose final ack
+never arrived within 15 s of `IN_PROGRESS`; 2 on a usage error (missing
 `GS`/`PORT`, a bad command line, an unknown parameter id, or a value
 that doesn't parse for its type).
 

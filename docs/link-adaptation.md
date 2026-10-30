@@ -566,31 +566,47 @@ This closes two holes:
   procedures that need an override to stick must re-POST inside that
   window.
 
-### Encoder faults are process faults — `maburd` does not rebuild in-process
+### Rebuilding the encoder pipeline in-process
 
-If the MI pipeline dies or has to be rebuilt (a resolution/sensor-mode
-change, a wedged ISP), `maburd` **exits and lets its init wrapper
-(`/etc/init.d/S00mabur`, repo file `bundle/S96mabur`) respawn it**: a
-cold bring-up of about 14–17 s with the link down. Nothing at HEAD calls
-`venc_core_stop()` followed by `venc_core_start()` in one process.
+A `VENC_FPS`/`VENC_SIZE`/`VENC_SLICES`/`REC_*` MAVLink parameter set
+(`docs/mavlink.md` "Applying a set") rebuilds the MI sensor→ISP→VENC
+pipeline inside the running `maburd` — it does not restart the process.
+`ConfigApplier` (`drone/src/config_apply.h`) calls `venc_core_restart`,
+which stops the encoder thread, rebuilds under the same `MI_SYS_Init`
+session (`star6e_runtime_pipeline_restart`, `drone/venc/star6e_runtime.h`)
+— the MI module clients stay connected, never `MI_SYS_Exit` — and
+restarts the thread: about 0.5 s, with the first frame of the new mode
+about 0.1 s later.
 
-That is a choice, not a hardware limit. The upstream waybeam record
+This contradicts the upstream waybeam record
 (`../waybeam_venc/documentation/STAR6E_SINGLE_PID_REINIT_FINDINGS.md`,
-imx335) found every in-process reset lever came back with a dead stream
-and concluded the VIF/VPE/ISP channel state is released only by `execv`.
-On this board that is contradicted:
-`docs/findings/2026-10-30-venc-inproc-reinit-spike.md` ran five pipeline
-bring-ups in one PID across three sensor modes (1728x972@100,
-1920x1080@90, 1728x816@120), each at the mode's exact rate with a real
-picture. A full stop and start costs about 8.5 s, almost all of it the
-per-module MI device re-open penalty
-(`docs/findings/2026-09-07-boot-time.md`); a pipeline-only restart under
-the same `MI_SYS_Init` (`star6e_pipeline_stop` then
-`star6e_pipeline_start`, the encoder thread rejoined and respawned)
-costs about 0.5 s with the first frame of the new mode 0.1 s later. What
-that spike did not cover (a rebuild inside a running `maburd` with the
-ring consumer and RcAgent live, a rebuild after a wedged ISP, long-run
-soak) is listed there.
+imx335), which found every in-process reset lever came back with a dead
+stream and concluded the VIF/VPE/ISP channel state is released only by
+`execv`; on this board, with this driver, it is not.
+`docs/findings/2026-10-30-venc-inproc-reinit-spike.md` measured it
+across three sensor-mode changes (1728x972@100, 1920x1080@90,
+1728x816@120), each landing at the mode's exact rate with a real
+picture.
+
+**The rebuild failure ladder.** If the rebuilt pipeline refuses to come
+up, `ConfigApplier`'s ladder falls back to the previous config as the
+same pipeline-only restart; if that also fails, to a full
+`venc_core_stop()` + `venc_core_start()` of the previous config (about
+8.5 s, almost all of it the per-module MI device re-open penalty,
+`docs/findings/2026-09-07-boot-time.md`); and only if that also fails
+does `maburd` **exit and let its init wrapper**
+(`/etc/init.d/S00mabur`, repo file `bundle/S96mabur`) **respawn it**
+from the unchanged file — a cold bring-up of about 14–17 s with the
+link down.
+
+**A pipeline that faults on its own is still a process fault.** The
+ladder above only ever rebuilds a pipeline that `ConfigApplier` itself
+stopped cleanly first. The encoder's own `on_fault` callback (a wedged
+ISP, an unrecoverable MI error) is unrelated to it and still calls
+`_exit(3)` for the wrapper to respawn. Recovering a *faulted* pipeline
+in-process was not exercised by the spike
+(`docs/findings/2026-10-30-venc-inproc-reinit-spike.md`, "Not covered")
+and nothing at HEAD attempts it.
 
 ### Low-power (disarmed) mode
 
@@ -599,6 +615,12 @@ While the FC reports DISARMED, `RcAgent` runs the encoder at
 **off** (`low_power.enable = false`) with 1 Mb/s and 30 fps ready for when
 it is turned on; the code defaults are 1000 kbps and 15 fps. An ARMED
 report returns full power.
+
+`low_power.enable` (`LOWPWR_ENABLE`) is a live knob: a MAVLink set
+(`docs/mavlink.md`) reaches `RcAgent::set_live_knobs` and is read on the
+agent's next tick, no pipeline rebuild and no restart — turning the mode
+on or off in flight takes effect against whichever arm state the agent
+last saw.
 
 The mode tracks the FC's **current** arm state both ways. It is not a
 one-shot pre-arm latch, so a DISARMED report re-enters it however many

@@ -783,6 +783,20 @@ into the file. Files recorded before 2026-09-29 used a different sync point;
 their history and repair recipe are in
 `docs/findings/2026-09-29-web-gs-raw-dvr-irap-sync.md`.
 
+A coded-size change mid-recording (a drone `VENC_SIZE` MAVLink set
+rebuilding the encoder pipeline, `docs/mavlink.md`, is the live case)
+rolls to a new file rather than mixing two sizes in one header: one
+file's header can describe only one size. `RawDvr`'s OPFS open awaits
+through ASYNCIFY, which must run from the core loop and never from the
+AU callback that detects the change, so the roll defers — the current
+file seals immediately (reported through `onRecClosed` like any other
+stop) and the loop finishes the open on its next iteration. The new
+file is named `<base>-r<N>.mp4` (`N` counting up within this recording;
+`recFileName()`'s own collision suffix never produces that pattern, so
+it can't collide with a later recording's name) and opens on the next
+sync point — the core asks the drone for an IDR the moment the roll
+resolves, the same as a fresh Record press does.
+
 The file exists before the sync point, though. The (empty) OPFS file is
 created and opened right at the press (`OpfsFile::open()`, see Build,
 above), wrapped as a `DvrSink` (`OpfsSink` in `web_main.cpp`), and held by
