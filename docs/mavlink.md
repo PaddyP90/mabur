@@ -2,8 +2,8 @@
 
 The radio link carries MAVLink 2 packets in both directions inside one RC
 frame type, `T_MAV`. The first tenant is a parameter component on the drone
-that serves thirteen keys of `/etc/mabur.toml` as MAVLink extended
-parameters (`PARAM_EXT_*`): a ground end holding the link key can list,
+that serves twelve parameters over thirteen keys of `/etc/mabur.toml`
+(`VENC_MODE` spells two) as MAVLink extended parameters (`PARAM_EXT_*`): a ground end holding the link key can list,
 read and set them while linked. A set applies to the running `maburd`
 before it is published to the file — a knob takes effect on `RcAgent`'s
 next tick, a reprogram takes effect in place, a rebuild restarts the
@@ -12,7 +12,9 @@ effect on the drone and on disk. See "Applying a set" below.
 
 On the GS, `maburgs` bridges the tunnel to a MAVLink UDP endpoint, so a
 ground app or `tools/bench/mavparam.py` talks to the drone as if it were a
-MAVLink system on the network. There is no operator screen for it yet.
+MAVLink system on the network. The web GS runs its own ground client on
+the tunnel, and its VTX tab is the operator screen onto the table
+(`docs/web-gs.md` "VTX tab").
 
 ## Where the code lives
 
@@ -22,7 +24,8 @@ MAVLink system on the network. There is no operator screen for it yet.
 | the parameter table (ids, keys, types, help) | `common/include/mabur/config_params.h` |
 | the vendored MAVLink common dialect | `third_party/mavlink/` (upstream commit in its `VERSION`), included through `common/include/mabur/mav.h` |
 | drone: the component (list/read/set, heartbeat) | `drone/src/mav_component.h` |
-| drone: per-row accessors and value coding | `drone/src/mav_params.h` |
+| value coding (wire and text), shared by drone and GS | `common/include/mabur/param_value.h` |
+| drone: per-row accessors, TOML rendering, the row patcher | `drone/src/mav_params.h` |
 | drone: line patcher and verified publish | `drone/src/config_write.h` |
 | drone: MAV thread, tag and counter check | `drone/src/main.cpp` (`mbr-mav`), `RcAgent::check_mav` |
 | GS: the tunnel (shared GS core) | `gs/src/mav_tunnel.h` |
@@ -258,7 +261,7 @@ quoted string).
 |---|---|---|---|---|---|
 | 0 | `RADIO_WALL_MARGN` | `radio.wall_margin_db` | Real32 | reprogram | Safety margin below the calibrated TX-power walls; raise to lower TX power |
 | 1 | `RADIO_LDPC` | `radio.ldpc` | Bool | reprogram | LDPC coding on every frame; turn off only for a ground card that cannot decode it |
-| 2 | `VENC_MODE` | `venc.fps` | Str | rebuild | Camera frame rate and encoder size, <fps>@<WxH>; the rate picks the sensor's field-of-view mode and the size must fit it |
+| 2 | `VENC_MODE` | `venc.fps` + `venc.size` | Str | rebuild | Camera frame rate and encoder size, `<fps>@<WxH>`; the rate picks the sensor's field-of-view mode and the size must fit it |
 | 3 | `VENC_SLICES` | `venc.slices` | Int32 | rebuild | H.265 row slices on the link channel; 1 disables slice salvage |
 | 4 | `ENC_BITRATE_MAX` | `encoder.bitrate_max_kbps` | Int32 | knob | Bitrate ceiling, kbps |
 | 5 | `ENC_AIRTIME` | `encoder.airtime_budget` | Real32 | knob | Share of the link's real capacity the video may use |
@@ -354,7 +357,10 @@ bridges the tunnel to the UDP endpoint.
   the end state a caller observes is the plain unlinked defaults.
   Independent of this is the drone heartbeat: `alive()` is true while a
   `HEARTBEAT` from 1/191 arrived within the last 3 s; a heartbeat that
-  arrives while already alive only refreshes the timestamp.
+  arrives while already alive only refreshes the timestamp. Either
+  `set_linked` call also zeroes `alive_ms`, so a fresh link has no
+  heartbeat until the drone's next one (the web GS reports that as
+  `alive: null`).
 - **List.** While `list` is `Pending`, each row that has not answered
   since the round began (no `PARAM_EXT_VALUE` or ack carrying its value)
   is re-read individually by `PARAM_EXT_REQUEST_READ` (`param_index` set,
@@ -378,11 +384,10 @@ bridges the tunnel to the UDP endpoint.
   earlier set never shows against this one), then resends it every 2 s,
   up to 3 times, while no ack for it has arrived; the row times out
   (`result_ms` stamped, one `PARAM_EXT_REQUEST_READ` follows) if nothing
-  ever answers. The row's
-  first `PARAM_ACK_IN_PROGRESS` moves it to `InProgress` and opens a 15 s
-  deadline from that moment -- a repeated `IN_PROGRESS` updates the row's
-  value but never pushes the deadline out, and the row times out the same
-  way if the deadline passes first. `PARAM_ACK_ACCEPTED`/`FAILED`/
+  ever answers. The row's first `PARAM_ACK_IN_PROGRESS` moves it to
+  `InProgress` and opens a 15 s deadline from that moment -- a repeated
+  `IN_PROGRESS` updates the row's value but never pushes the deadline
+  out, and the row times out the same way if the deadline passes first. `PARAM_ACK_ACCEPTED`/`FAILED`/
   `VALUE_UNSUPPORTED` for the row is terminal: the row's state and value
   are set and the client is free to set another row; an `ACCEPTED` on a
   row whose `apply` is `rebuild` also starts a fresh list round, since a
@@ -397,8 +402,8 @@ bridges the tunnel to the UDP endpoint.
   `list`, `pending_row` (the row a `set()` is in flight for, or -1), and
   one row per table parameter holding `have_value`/`value`/`st`/`status`/
   `result_ms` from the list/read/set traffic above -- a row always shows
-  the value its last ack carried, never text an operator typed and the
-  drone hasn't confirmed. `seq()` bumps once per call that changed
+  the value the drone last reported for it (a `PARAM_EXT_VALUE` or an
+  ack), never text an operator typed and the drone hasn't confirmed. `seq()` bumps once per call that changed
   anything in it, so a UI can poll it cheaply instead of diffing the
   struct; a resend that changes nothing observable does not bump it.
 

@@ -692,8 +692,8 @@ Refresh button when the session is linked and the drone's component has
 sent a MAVLink `HEARTBEAT` on this link but none in the last 3 s (the
 JSON's `alive` false; before the first one `alive` is null and there is
 no tag) — the rows stay editable, since a set itself times out. The
-Refresh button (shown once the list has answered at all, complete or
-partial) asks the drone for the whole list again, keeping every value it
+Refresh button (shown while the list stands complete or partial, and
+disabled while a set is in flight) asks the drone for the whole list again, keeping every value it
 already holds on show while the rows answer; a row that stays silent is
 re-read by index like on the first list.
 
@@ -1233,8 +1233,9 @@ call, up to `cap` bytes -- never split, and never more than one packet per
 call, so a caller loops it until it returns 0 to drain everything queued. A
 `cap` of at least `MAVLINK_MAX_PACKET_LEN` (~280 B) always succeeds; a
 smaller one just leaves a too-big packet queued. The inbound side sits in a
-bounded ring (`web/src/mav_ring.h`, 64 KiB): there is no JS parser and no UI
-for this yet, so nothing may ever call `webgs_mav_take`, and the drone's
+bounded ring (`web/src/mav_ring.h`, 64 KiB): the page has no MAVLink
+parser of its own (the VTX tab goes through the core's `ParamClient`,
+below, never these bytes), so nothing may ever call `webgs_mav_take`, and the drone's
 once-a-second heartbeat would otherwise grow an unbounded buffer for the
 page's whole session -- the ring drops the oldest queued packets instead. A
 page that wants to speak MAVLink pushes/pulls bytes through these two calls
@@ -1247,8 +1248,9 @@ tunnel: its outbound PARAM_EXT_* traffic goes in through
 local MAVLink peer's, and the tunnel's `DeliverFn` hands it every inbound
 packet to the client (`ParamClient::on_packet`) as well as to `mav_in_`.
 `WebGs::tick()` re-lists it (a fresh `PARAM_EXT_REQUEST_LIST`, every row
-cleared) whenever the session links, drops, or its `vtx_nonce` changes
-while still linked. `WebGs::params()` is the readout (`nullptr` in
+cleared) whenever the session links or its `vtx_nonce` changes while
+still linked, and drops every row back to the unlinked defaults when the
+session drops. `WebGs::params()` is the readout (`nullptr` in
 Spotter, which has no session to list over), `WebGs::param_set`/
 `param_refresh` drive a row edit or a fresh list round, and
 `webgs::params_json` renders the table for a page.
