@@ -503,9 +503,9 @@ class RcAgent {
   int16_t snr_off_sent_ = 0;  // last offset handed to the actuator
   void intake_arm_state_(uint64_t now_ms);
 
-  // Live config knobs (set_live_knobs): any thread may write, the agent
-  // thread reads them wherever this file used to read the matching Config
-  // field. int, not atomic<double>, for airtime_budget: std::atomic<double>
+  // Live config knobs (set_live_knobs): any thread may write, and the agent
+  // thread reads these, never the boot Config, for encoder.bitrate_max_kbps,
+  // encoder.airtime_budget, low_power.enable and venc.fps. int, not atomic<double>, for airtime_budget: std::atomic<double>
   // is not guaranteed lock-free on armv7 (is_always_lock_free), and the
   // policy's own 100 kbps rounding grid already swallows milli-scale error.
   std::atomic<int> knob_bitrate_max_kbps_{0};

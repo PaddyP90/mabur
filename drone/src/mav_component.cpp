@@ -357,9 +357,9 @@ void MavComponent::handle_set(const char id16[16], const char value[128], uint8_
   }
   // The candidate as the boot loader would see it, before handing this row
   // to the applier: a row the loader would refuse (an ordering rule, an
-  // out-of-range value past render_toml's own checks) is caught here, the
-  // same way publish_config's own verify step used to, so the applier is
-  // never asked to apply a candidate that can't boot. This is only a check
+  // out-of-range value past render_toml's own checks) is caught here, so
+  // the operator gets the loader's reason at once and the applier is never
+  // asked to apply a candidate that can't boot. This is only a check
   // -- the applier re-reads, re-patches, re-verifies and publishes its own
   // candidate under its own hold of the lock -- so the scratch file is
   // removed right after the check, win or lose, the same as

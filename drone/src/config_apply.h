@@ -2,9 +2,8 @@
 // Applies one MAVLink parameter set to the running maburd, then publishes
 // it to /etc/mabur.toml.
 //
-// A set used to only patch the file and leave the daemon on its boot
-// values until the next restart. ConfigApplier closes that gap: it runs
-// each set on its own thread (a rebuild stops the encoder for about half a
+// The running daemon takes each set before the file records it.
+// ConfigApplier runs each set on its own thread (a rebuild stops the encoder for about half a
 // second, too long for the MAVLink loop that submits it) in the order
 //
 //   re-read the file -> patch the one key -> load the result with the boot
