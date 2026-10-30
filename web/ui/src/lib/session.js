@@ -21,12 +21,12 @@ export const WORKER_FAILED = 'Page worker failed — if served over LAN, the TLS
 
 export class Session {
   constructor({ createModule, requestDevice, onAu, onStats, onOsd = () => {}, onRecClosed = () => {},
-                onChannel = () => {}, reload,
+                onChannel = () => {}, onParams = () => {}, reload,
                 // Wrapped: a bare window.setTimeout called as timers.setTimeout(...) throws "Illegal invocation".
                 timers = { setTimeout: (f, ms) => setTimeout(f, ms), clearTimeout: (h) => clearTimeout(h) },
                 stopTimeoutMs = 3000, recOffTimeoutMs = 1000,
                 checkIsolated = () => {}, startRelay = null, prepareRelay = async () => {} }) {
-    Object.assign(this, { createModule, requestDevice, onAu, onStats, onOsd, onRecClosed, onChannel, reload, timers,
+    Object.assign(this, { createModule, requestDevice, onAu, onStats, onOsd, onRecClosed, onChannel, onParams, reload, timers,
       stopTimeoutMs, recOffTimeoutMs, checkIsolated, startRelay, prepareRelay });
     this.subs = new Set();
     this.mod = null;
@@ -80,6 +80,7 @@ export class Session {
         onAu: (...a) => { if (this.token === token) this.onAu(...a); },
         onStats: (text) => { if (this.token === token) this.handleStats(text); },
         onOsd: (rows, cols, cells) => { if (this.token === token) this.onOsd(rows, cols, cells); },
+        onParams: (text) => { if (this.token === token) this.handleParams(text); },
         onError: (text) => { if (this.token === token) this.handleError(text); },
         onRelayRing: (buffer, ptr) => {
           if (this.token !== token || !this.startRelay) return;
@@ -133,6 +134,16 @@ export class Session {
     this.lastCore = s;
     if (this.recWaiter && s.rec_state !== 1) { const r = this.recWaiter; this.recWaiter = null; r(); }
     this.onStats(text, s);
+  }
+
+  // The drone's parameter-table push (ParamClient's params_json, docs/
+  // web-gs.md "MAVLink seam"): once when the core starts, in both modes, then
+  // in GS mode on every client change. A malformed line is dropped rather
+  // than handed on.
+  handleParams(text) {
+    let p;
+    try { p = JSON.parse(text); } catch { return; }
+    this.onParams(p);
   }
 
   // Always overwrites the error text -- whichever of onExit/onError fired
@@ -191,6 +202,24 @@ export class Session {
       this.mod._webgs_set_local_rec(0, 0);
     }
     this.set({ localWish: !!name });
+  }
+
+  // VTX tab (docs/web-gs.md "VTX tab"): one row edit, queued by the core
+  // and applied on its next loop iteration. The result arrives later
+  // through onParams, never from this call's return value.
+  paramSet(id, text) {
+    if (!this.mod) return;
+    const pId = this.mod.stringToNewUTF8(id);
+    const pText = this.mod.stringToNewUTF8(text);
+    this.mod._webgs_param_set(pId, pText);
+    this.mod._free(pId);
+    this.mod._free(pText);
+  }
+
+  // Forces a fresh list round (e.g. after "did not answer"/partial list).
+  paramRefresh() {
+    if (!this.mod) return;
+    this.mod._webgs_param_refresh();
   }
 
   async disconnect() {

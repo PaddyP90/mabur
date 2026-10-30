@@ -16,7 +16,7 @@ TEST(heartbeat_packs_and_parses) {
 TEST(param_ext_value_is_161_bytes_untruncated) {
   mavlink_message_t msg; uint8_t buf[MAVLINK_MAX_PACKET_LEN];
   char value[128]; std::memset(value, 'x', sizeof value);
-  mavlink_msg_param_ext_value_pack(1, 191, &msg, "VENC_FPS", value, MAV_PARAM_EXT_TYPE_INT32, 13, 2);
+  mavlink_msg_param_ext_value_pack(1, 191, &msg, "ANY_PARAM_ID", value, MAV_PARAM_EXT_TYPE_INT32, 13, 2);
   CHECK(mavlink_msg_to_send_buffer(buf, &msg) == 161);
 }
 MTEST_MAIN

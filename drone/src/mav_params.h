@@ -5,24 +5,21 @@
 
 #include "config.h"
 #include "mabur/config_params.h"
+#include "mabur/param_value.h"
 
-// Drone-side accessors and value coding for the MAVLink extended-parameter
-// component (cfgparam::kTable, common/include/mabur/config_params.h). This
-// file reads/writes mabur::Config fields and the MAVLink
-// PARAM_EXT_* wire bytes; it never includes the MAVLink library itself.
+// Drone-side accessors for the MAVLink extended-parameter component
+// (cfgparam::kTable, common/include/mabur/config_params.h). This file
+// reads/writes mabur::Config fields; it never includes the MAVLink
+// library itself. The value coding itself (Value, decode_wire, encode_wire)
+// lives in mabur::paramval (common/include/mabur/param_value.h), shared
+// with a ground-side client, and is re-exposed here under its old names.
 
 namespace mabur::mavparam {
 
 using cfgparam::Type;
-
-// A decoded parameter value, one alternative live per cfgparam::Type.
-struct Value {
-  Type type;
-  bool b = false;
-  int32_t i = 0;
-  float f = 0;
-  std::string s;
-};
+using Value = paramval::Value;
+using paramval::decode_wire;
+using paramval::encode_wire;
 
 // Reads row `idx` of cfgparam::kTable out of a loaded Config into *out.
 // False, *out untouched, when idx >= cfgparam::kCount — callers that drive
@@ -39,18 +36,20 @@ bool read(const Config& cfg, size_t idx, Value* out);
 // produce) — render_toml never escapes.
 bool render_toml(const Value& v, std::string* out);
 
-// Decodes the 128-byte wire buffer for row `idx`, given the sender's
-// MAV_PARAM_EXT_TYPE (as a plain number, see cfgparam::mav_type). False
-// (the caller should answer PARAM_ACK_VALUE_UNSUPPORTED) when idx is out
-// of range, mav_type doesn't match the row's type, a Bool byte isn't 0 or
-// 1, a Real32 buffer decodes to NaN or Inf, or a CUSTOM buffer has no NUL
-// within 128 bytes or a non-printable byte (outside 0x20..0x7e, so DEL
-// 0x7f included) before it.
-bool decode_wire(size_t idx, uint8_t mav_type, const char wire[128], Value* out);
-
-// Encodes `v` for PARAM_EXT_VALUE/PARAM_EXT_ACK: little-endian in bytes
-// 0..3 for Bool/Int32/Real32, or NUL-terminated ASCII for Str. Zero-fills
-// every byte past the value.
-void encode_wire(const Value& v, char wire[128]);
+// Patches `text` for row `idx`'s own config line(s), leaving `text`
+// unchanged on failure. Every row but kVencModeRow owns one line:
+// render_toml(v) must succeed and that line must exist in [section], or
+// *err is "value unsupported" or "<section.key>: key not found".
+// kVencModeRow's Str value "<fps>@<WxH>" patches venc.fps and venc.size
+// together (a value that doesn't parse to that shape is "value
+// unsupported", never a report of a missing key); when
+// `current.record.enable`, `current.record.width > 0` (an explicit
+// record.size, not the "same as venc.size" default) and the new WxH's
+// aspect ratio differs from the current recording size's (compared by
+// cross-multiplication, no float division), record.size is patched to the
+// same WxH too and *followed is set to "record.size" -- cleared at the
+// start of every call otherwise. record.fps never follows.
+bool patch_row(std::string* text, size_t idx, const Value& v, const Config& current,
+               std::string* followed, std::string* err);
 
 }  // namespace mabur::mavparam

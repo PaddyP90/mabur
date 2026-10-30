@@ -1286,6 +1286,14 @@ int main(int argc, char** argv) {
   // Raw-mode recorder (common/raw_dvr.h): sync gate + params + mux. Its
   // Error state is what the GS overlay's REC "broken" reads.
   mabur::RawDvr dvr;
+  // A coded-size change mid-recording (the drone picked a new camera mode)
+  // seals the current file and rolls to the next namer-assigned one rather
+  // than erroring the recording out.
+  dvr.set_next_sink([&](std::string* name) {
+    *name = dvr_filename(cfg.dvr.dir);
+    std::fprintf(stderr, "maburplay: rec: ROLL (%s)\n", name->c_str());
+    return mabur::open_file_sink(*name);
+  });
   // Autostart: dvr.autostart armed rec_on before this point (see rec_on's
   // declaration above), but the actual start() call has to wait until here,
   // where bcfg is in scope.

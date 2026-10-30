@@ -99,6 +99,7 @@ add_mtest(test_uep_frame test_uep_frame.cpp)
 add_mtest(test_rc test_rc.cpp)
 add_mtest(test_mav_lib test_mav_lib.cpp)
 add_mtest(test_config_params test_config_params.cpp)
+add_mtest(test_param_value test_param_value.cpp)
 add_mtest(test_hevc_params test_hevc_params.cpp)
 add_mtest(test_hevc_bits test_hevc_bits.cpp)
 add_mtest(test_hevc_ps test_hevc_ps.cpp)
@@ -147,6 +148,7 @@ if(MABUR_BUILD_DRONE)
   add_mtest(test_power_plan test_power_plan.cpp LIBS mabur_drone_core)
   add_mtest(test_cal_apply test_cal_apply.cpp LIBS mabur_drone_core)
   add_mtest(test_config_write test_config_write.cpp LIBS mabur_drone_core)
+  add_mtest(test_config_apply test_config_apply.cpp LIBS mabur_drone_core)
   add_mtest(test_mav_params test_mav_params.cpp LIBS mabur_drone_core)
   add_mtest(test_mav_component test_mav_component.cpp LIBS mabur_drone_core)
   add_mtest(test_cal_sweep test_cal_sweep.cpp LIBS mabur_drone_core)
@@ -179,6 +181,15 @@ if(MABUR_BUILD_DRONE)
   add_mtest(test_sensor_steer test_sensor_steer.cpp ${MABUR_VENC_DIR}/sensor_steer.c)
   target_include_directories(test_sensor_steer PRIVATE ${MABUR_VENC_DIR}
     ${CMAKE_SOURCE_DIR}/common/include)
+  # The real venc_core.c facade over a fake star6e runtime: its lifecycle
+  # guards are what the rebuild failure ladder stands on.
+  add_mtest(test_venc_core test_venc_core.cpp venc_core_fake.c
+    ${MABUR_VENC_DIR}/venc_core.c)
+  target_include_directories(test_venc_core PRIVATE ${MABUR_VENC_DIR}
+    ${CMAKE_SOURCE_DIR}/drone/vendor)
+  target_compile_definitions(test_venc_core PRIVATE
+    PLATFORM_STAR6E HAVE_BACKEND_STAR6E=1 _GNU_SOURCE)
+  target_link_libraries(test_venc_core PRIVATE pthread)
 
   add_test(NAME host_e2e COMMAND bash ${CMAKE_SOURCE_DIR}/tests/integration/run_host_e2e.sh)
   set_tests_properties(host_e2e PROPERTIES
@@ -328,6 +339,7 @@ if(MABUR_BUILD_GS)
   add_mtest(test_tx_selector test_tx_selector.cpp LIBS mabur_gs_core)
   add_mtest(test_rcf_slot test_rcf_slot.cpp LIBS mabur_gs_core)
   add_mtest(test_mav_tunnel test_mav_tunnel.cpp LIBS mabur_gs_core)
+  add_mtest(test_param_client test_param_client.cpp LIBS mabur_gs_core)
   add_mtest(test_mav_endpoint test_mav_endpoint.cpp LIBS mabur_gs_core)
   add_mtest(test_probe_track test_probe_track.cpp LIBS mabur_gs_core)
   add_mtest(test_control_frame test_control_frame.cpp LIBS mabur_gs_dot11)
@@ -416,6 +428,8 @@ if(Python3_EXECUTABLE)
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/test_maburtop.py)
   set_tests_properties(test_maburtop PROPERTIES
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/tools)
+  add_test(NAME test_mavparam
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/test_mavparam.py)
   add_test(NAME test_gen_font
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/test_gen_font.py
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})

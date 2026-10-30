@@ -32,7 +32,7 @@ static Bytes hb_bytes(uint8_t sysid, uint8_t compid) {
 // A PARAM_EXT_VALUE whose every payload byte is significant, so the packer
 // truncates nothing: 149 B payload + 12 B framing = 161 B.
 static Bytes param_ext_value_bytes(uint16_t index) {
-  char id[16] = "VENC_FPS";   // the packer copies all 16 id bytes
+  char id[16] = "ANY_PARAM_ID";   // the packer copies all 16 id bytes
   char value[128];
   std::memset(value, 'v', sizeof(value));
   mavlink_message_t msg;

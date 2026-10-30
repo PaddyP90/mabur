@@ -6,8 +6,9 @@
  * two signals.
  *
  * Threading contract:
- *   - venc_core_start / venc_core_stop are called by maburd's main thread
- *     and must not overlap each other or the verbs.
+ *   - venc_core_start / venc_core_stop / venc_core_restart are called by one
+ *     thread at a time (maburd's main thread at boot and shutdown, the
+ *     config apply thread for a rebuild) and never overlap each other.
  *   - The verbs and venc_get_stats / venc_snapshot_jpeg are callable from
  *     the agent thread while the encoder runs.
  *   - on_chain_break / on_fault fire on the encoder thread.  Consumers
@@ -52,6 +53,36 @@ static int g_cur_bitrate_kbps = -1;
  * are each a GetChnAttr/GetRcParam → mutate → Set pair on one channel, so
  * two of them interleaving would lose one of the two edits. */
 static pthread_mutex_t g_verb_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Bench failure injection: MABUR_VENC_FAIL_RESTARTS=N makes the next N
+ * pipeline starts made by venc_core_restart fail (after the old pipeline is
+ * stopped, before the SDK is touched), so a device can walk the rebuild
+ * failure ladder's restore rungs. Read from the environment once, by the
+ * process's first venc_core_start, and only counted down after that: a
+ * later start never re-arms it. Unset or 0 = off. */
+static int g_fail_restarts_read;
+static int g_fail_restarts;
+
+static void venc_fail_restarts_arm(void)
+{
+	const char *env;
+
+	if (g_fail_restarts_read)
+		return;
+	g_fail_restarts_read = 1;
+	env = getenv("MABUR_VENC_FAIL_RESTARTS");
+	if (!env)
+		return;
+	g_fail_restarts = (int)strtol(env, NULL, 10);
+	if (g_fail_restarts < 0)
+		g_fail_restarts = 0;
+	if (g_fail_restarts > 0) {
+		fprintf(stderr, "venc: MABUR_VENC_FAIL_RESTARTS=%d: the next %d "
+			"pipeline restarts will fail\n", g_fail_restarts,
+			g_fail_restarts);
+		fflush(stderr);
+	}
+}
 
 static int venc_core_running(void)
 {
@@ -235,10 +266,13 @@ int venc_core_start(const VencCfg *cfg, const VencCallbacks *cb)
 
 	if (!cfg)
 		return -1;
-	if (venc_core_running()) {
-		fprintf(stderr, "ERROR: venc_core_start: already started\n");
+	if (venc_core_running() || g_ctx.system_initialized ||
+	    g_enc_thread_started) {
+		fprintf(stderr, "ERROR: venc_core_start: already started "
+			"(venc_core_stop first)\n");
 		return -1;
 	}
+	venc_fail_restarts_arm();
 
 	/* Published before any thread that reads them exists; the
 	 * pthread_create below is the barrier. */
@@ -301,9 +335,15 @@ int venc_core_start(const VencCfg *cfg, const VencCallbacks *cb)
 	return 0;
 }
 
+/* Tears down whatever is up: a running core, and equally a core a failed
+ * venc_core_restart left not running with the MI_SYS session still open (or
+ * a pipeline whose encoder thread never started), so the venc_core_start
+ * that follows always begins from a closed session. A no-op only when no
+ * session exists. */
 void venc_core_stop(void)
 {
-	if (!venc_core_running() && !g_enc_thread_started)
+	if (!venc_core_running() && !g_enc_thread_started &&
+	    !g_ctx.system_initialized)
 		return;
 
 	/* Close the verb window first: teardown destroys the channel and
@@ -329,6 +369,71 @@ void venc_core_stop(void)
 	star6e_runtime_teardown(&g_ctx);
 	memset(&g_cb, 0, sizeof(g_cb));  /* drop the consumer's user ptr */
 	g_cur_bitrate_kbps = -1;
+}
+
+/* Rebuild the pipeline with a new cfg in place: stop the encoder thread if
+ * one runs, rebuild under the same MI_SYS session
+ * (star6e_runtime_pipeline_restart — no MI_SYS_Exit/Init, no module
+ * re-open), restart the encoder thread. Gated on the session, not on the
+ * running flag: after a failed restart the core is not running but the
+ * session is still open, and the next restart (the ladder's "restore the
+ * previous config" rung) must still be able to build a pipeline on it.
+ * Takes g_verb_lock for the whole call so it serialises against the verbs;
+ * clearing g_started before touching anything else means a verb that lands
+ * mid-restart sees the core as not running rather than racing the rebuild.
+ * Must not be called from the encoder thread (it joins it). */
+int venc_core_restart(const VencCfg *cfg)
+{
+	int inject;
+
+	pthread_mutex_lock(&g_verb_lock);
+
+	if (!cfg || !g_ctx.system_initialized) {
+		pthread_mutex_unlock(&g_verb_lock);
+		return -1;
+	}
+
+	/* Close the verb window first, same as venc_core_stop: the pipeline
+	 * restart below destroys and recreates the channel out from under
+	 * any call that assumes it is live. */
+	__atomic_store_n(&g_started, 0, __ATOMIC_RELEASE);
+
+	star6e_runtime_request_stop();
+	if (g_enc_thread_started) {
+		pthread_join(g_enc_thread, NULL);
+		g_enc_thread_started = 0;
+	}
+	g_cur_bitrate_kbps = -1;
+
+	inject = g_fail_restarts > 0;
+	if (inject)
+		--g_fail_restarts;
+	if (star6e_runtime_pipeline_restart(&g_ctx, cfg, inject) != 0) {
+		fprintf(stderr, "ERROR: venc_core_restart: pipeline restart failed\n");
+		pthread_mutex_unlock(&g_verb_lock);
+		return -1;
+	}
+
+	__atomic_store_n(&g_started, 1, __ATOMIC_RELEASE);
+
+	if (pthread_create(&g_enc_thread, NULL, venc_encoder_thread,
+	    &g_ctx) != 0) {
+		/* The pipeline stays built with no encoder thread; the next
+		 * venc_core_restart or venc_core_stop takes it down. */
+		fprintf(stderr, "ERROR: venc_core_restart: encoder thread create failed\n");
+		__atomic_store_n(&g_started, 0, __ATOMIC_RELEASE);
+		pthread_mutex_unlock(&g_verb_lock);
+		return -1;
+	}
+	g_enc_thread_started = 1;
+	pthread_setname_np(g_enc_thread, "venc-enc");
+
+	printf("> venc_core: restarted (%ux%u@%u)\n",
+		(unsigned)cfg->width, (unsigned)cfg->height, (unsigned)cfg->fps);
+	fflush(stdout);
+
+	pthread_mutex_unlock(&g_verb_lock);
+	return 0;
 }
 
 /* ── Verbs ────────────────────────────────────────────────────────────── */

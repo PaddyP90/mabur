@@ -2,14 +2,17 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <cstring>
 #include <exception>
 #include <utility>
 
 #include "config.h"
+#include "config_apply.h"
 #include "config_write.h"
 #include "mabur/config_params.h"
 #include "mabur/mav.h"
+#include "mabur/param_value.h"
 #include "mabur/rc_proto.h"
 #include "mav_params.h"
 
@@ -48,21 +51,6 @@ std::string printable_id(const char id16[16]) {
   return s;
 }
 
-// load_config's message is "config: <file>:<line>: <field>: <why>". The
-// file is the publisher's scratch candidate, meaningless to the operator,
-// and STATUSTEXT holds 50 chars: keep the field and the reason.
-std::string loader_reason(std::string s) {
-  static const std::string kPrefix = "config: ";
-  if (s.compare(0, kPrefix.size(), kPrefix) == 0) s.erase(0, kPrefix.size());
-  for (size_t i = 0; i < s.size(); ++i) {
-    if (s[i] != ':') continue;
-    size_t j = i + 1;
-    while (j < s.size() && std::isdigit(static_cast<unsigned char>(s[j]))) ++j;
-    if (j > i + 1 && s.compare(j, 2, ": ") == 0) return s.substr(j + 2);
-  }
-  return s;
-}
-
 // The current value of row `idx` as the config file holds it. False with
 // *err set when the file doesn't load.
 bool current_value(const std::string& path, size_t idx, Value* out, std::string* err) {
@@ -74,10 +62,21 @@ bool current_value(const std::string& path, size_t idx, Value* out, std::string*
   }
 }
 
+// The applier's own log wording for a path, for the completion log line.
+const char* apply_path_name(ConfigApplyPath p) {
+  switch (p) {
+    case ConfigApplyPath::Knob: return "knob";
+    case ConfigApplyPath::Reprogram: return "reprogram";
+    case ConfigApplyPath::Rebuild: return "rebuild";
+  }
+  return "rebuild";
+}
+
 }  // namespace
 
-MavComponent::MavComponent(std::string cfg_path, std::function<void(const std::string&)> log)
-    : cfg_path_(std::move(cfg_path)), log_(std::move(log)) {
+MavComponent::MavComponent(std::string cfg_path, ApplyPort port,
+                           std::function<void(const std::string&)> log)
+    : cfg_path_(std::move(cfg_path)), port_(std::move(port)), log_(std::move(log)) {
   mavlink_reset_channel_status(kChanDroneRx);
 }
 
@@ -194,6 +193,25 @@ void MavComponent::queue_value(size_t idx, const Value& v, bool list_value) {
   queue(m, list_value);
 }
 
+void MavComponent::queue_ack(const char id16[16], const Value* v, uint8_t mav_type,
+                             uint8_t result) {
+  char wire[128] = {};
+  if (v) mavparam::encode_wire(*v, wire);
+  Msg m;
+  mavlink_msg_param_ext_ack_pack_chan(kSysId, kCompId, kChanDroneRx, &m.m, id16, wire, mav_type,
+                                      result);
+  queue(m);
+}
+
+void MavComponent::queue_status(const std::string& text) {
+  char buf[kStatusTextLen] = {};
+  std::memcpy(buf, text.data(), std::min(text.size(), kStatusTextLen));
+  Msg m;
+  mavlink_msg_statustext_pack_chan(kSysId, kCompId, kChanDroneRx, &m.m, MAV_SEVERITY_ERROR, buf, 0,
+                                   0);
+  queue(m);
+}
+
 void MavComponent::handle_list() {
   if (list_queued_ > 0) {
     ++stats_.list_coalesced;
@@ -234,21 +252,9 @@ void MavComponent::handle_read(const char id16[16], int16_t index) {
 void MavComponent::handle_set(const char id16[16], const char value[128], uint8_t type) {
   const std::string shown = printable_id(id16);
   auto ack = [&](const Value* v, uint8_t mav_type, uint8_t result) {
-    char wire[128] = {};
-    if (v) mavparam::encode_wire(*v, wire);
-    Msg m;
-    mavlink_msg_param_ext_ack_pack_chan(kSysId, kCompId, kChanDroneRx, &m.m, id16, wire,
-                                        mav_type, result);
-    queue(m);
+    queue_ack(id16, v, mav_type, result);
   };
-  auto status = [&](const std::string& text) {
-    char buf[kStatusTextLen] = {};
-    std::memcpy(buf, text.data(), std::min(text.size(), kStatusTextLen));
-    Msg m;
-    mavlink_msg_statustext_pack_chan(kSysId, kCompId, kChanDroneRx, &m.m, MAV_SEVERITY_ERROR,
-                                     buf, 0, 0);
-    queue(m);
-  };
+  auto status = [&](const std::string& text) { queue_status(text); };
 
   const int found = cfgparam::find(id16);
   if (found < 0) {
@@ -262,19 +268,59 @@ void MavComponent::handle_set(const char id16[16], const char value[128], uint8_
   const uint8_t row_type = cfgparam::mav_type(row.type);
   const std::string field = std::string(row.section) + "." + row.key;
 
-  // Held from the read of the current file to the publish, so a concurrent
-  // writer (calibration) can't publish between them and be overwritten.
+  // An apply in flight holds lock_config_writes() until it publishes, so
+  // this is answered before the lock is touched: waiting for it would stop
+  // the MAV loop's heartbeat and drain for the length of the apply. A repeat
+  // of the pending set (a ground app re-sending after a lost IN_PROGRESS)
+  // is told IN_PROGRESS again and is resolved by the one final ack; any
+  // other set is refused, with the value the file holds, read without the
+  // lock (the file is only ever replaced by rename).
+  if (port_.busy && port_.busy()) {
+    Value want;
+    std::string rendered;
+    const bool decoded =
+        mavparam::decode_wire(idx, type, value, &want) && mavparam::render_toml(want, &rendered);
+    if (decoded && has_pending_ && pending_.idx == idx && pending_.rendered == rendered) {
+      ack(&pending_.cur, row_type, PARAM_ACK_IN_PROGRESS);
+      log("set " + shown + " = " + rendered + " (" + field + ") in progress, repeat");
+      return;
+    }
+    Value cur{row.type};
+    bool have_cur = true;
+    if (has_pending_ && pending_.idx == idx) {
+      cur = pending_.cur;
+    } else {
+      std::string err;
+      have_cur = current_value(cfg_path_, idx, &cur, &err);
+    }
+    ack(have_cur ? &cur : nullptr, row_type, PARAM_ACK_FAILED);
+    status("apply in progress");
+    ++stats_.sets_refused;
+    log("set " + shown + " refused: apply in progress");
+    return;
+  }
+
+  // Held from the read of the current file through the candidate write and
+  // load and the hand-off to the applier, so the applier's own use of
+  // <cfg_path>.new and a concurrent calibration publish can't interleave
+  // with this read-patch-check sequence. The applier takes the same lock
+  // again for its own re-read through its publish, once this function has
+  // returned.
   auto lock = lock_config_writes();
 
-  Value cur{row.type};
-  std::string err;
-  if (!current_value(cfg_path_, idx, &cur, &err)) {
+  Config cur_cfg;
+  try {
+    cur_cfg = load_config(cfg_path_);
+  } catch (const std::exception& e) {
+    const std::string err = loader_reason(e.what());
     ack(nullptr, row_type, PARAM_ACK_FAILED);
     status(err);
     ++stats_.sets_refused;
     log("set " + shown + " refused: config does not load: " + err);
     return;
   }
+  Value cur{row.type};
+  mavparam::read(cur_cfg, idx, &cur);
   auto refuse = [&](uint8_t result, const std::string& why, bool tell) {
     ack(&cur, row_type, result);
     if (tell) status(why);
@@ -297,10 +343,12 @@ void MavComponent::handle_set(const char id16[16], const char value[128], uint8_
     return;
   }
   std::string patched = text;
-  if (!patch_toml_key(&patched, row.section, row.key, rendered)) {
-    refuse(PARAM_ACK_FAILED, field + ": key not found", true);
+  std::string followed, patch_err;
+  if (!mavparam::patch_row(&patched, idx, want, cur_cfg, &followed, &patch_err)) {
+    refuse(PARAM_ACK_FAILED, patch_err, true);
     return;
   }
+  const std::string followed_suffix = followed.empty() ? "" : " +" + followed;
   // Unchanged when the rendered line is already the file's, or when the
   // decoded value equals what the file loads as (a REAL32 line spelled
   // differently, "0.650"). Str rows are left to the text comparison: their
@@ -311,21 +359,78 @@ void MavComponent::handle_set(const char id16[16], const char value[128], uint8_
   if (patched == text || same_value) {
     ack(&cur, row_type, PARAM_ACK_ACCEPTED);
     ++stats_.sets_ok;
-    log("set " + shown + " = " + rendered + " (" + field + ", unchanged)");
+    log("set " + shown + " = " + rendered + " (" + field + followed_suffix + ", unchanged)");
     return;
   }
-  const PublishResult pr = publish_config(cfg_path_, patched, "pre-param", &err);
-  if (pr != PublishResult::Ok) {
-    refuse(PARAM_ACK_FAILED, pr == PublishResult::ReparseFailed ? loader_reason(err) : err, true);
+  // The candidate as the boot loader would see it, before handing this row
+  // to the applier: a row the loader would refuse (an ordering rule, an
+  // out-of-range value past render_toml's own checks) is caught here, so
+  // the operator gets the loader's reason at once and the applier is never
+  // asked to apply a candidate that can't boot. This is only a check
+  // -- the applier re-reads, re-patches, re-verifies and publishes its own
+  // candidate under its own hold of the lock -- so the scratch file is
+  // removed right after the check, win or lose, the same as
+  // publish_config and ConfigApplier::apply_locked do with theirs.
+  const std::string tmp = cfg_path_ + ".new";
+  if (!write_file_fsync(tmp, patched)) {
+    std::remove(tmp.c_str());
+    refuse(PARAM_ACK_FAILED, "failed to write " + tmp, true);
     return;
   }
-  // The ack reports what the published file loads as; the loader just
-  // accepted these bytes, so the fallback is only for a vanished file.
-  Value now = want;
-  (void)current_value(cfg_path_, idx, &now, &err);
-  ack(&now, row_type, PARAM_ACK_ACCEPTED);
-  ++stats_.sets_ok;
-  log("set " + shown + " = " + rendered + " (" + field + ")");
+  try {
+    (void)load_config(tmp);
+  } catch (const std::exception& e) {
+    std::remove(tmp.c_str());
+    refuse(PARAM_ACK_FAILED, loader_reason(e.what()), true);
+    return;
+  }
+  std::remove(tmp.c_str());
+
+  std::string why;
+  if (!port_.submit(idx, want, &why)) {
+    refuse(PARAM_ACK_FAILED, why, true);
+    return;
+  }
+  // The file hasn't changed yet -- the ack reports the value still on
+  // record until the applier's result lands in poll_results.
+  std::memcpy(pending_.id16, id16, cfgparam::kMaxIdLen);
+  pending_.idx = idx;
+  pending_.row_type = row_type;
+  pending_.cur = cur;
+  pending_.rendered = rendered;
+  pending_.field = field;
+  has_pending_ = true;
+  ack(&cur, row_type, PARAM_ACK_IN_PROGRESS);
+  ++stats_.sets_in_progress;
+  log("set " + shown + " = " + rendered + " (" + field + followed_suffix + ") in progress");
+}
+
+void MavComponent::poll_results() {
+  ConfigApplyResult r;
+  if (!port_.take_result(&r)) return;
+  if (!has_pending_) {
+    log("applier result with no set pending, dropped");
+    return;
+  }
+  const Pending p = pending_;
+  has_pending_ = false;
+  const std::string shown = printable_id(p.id16);
+  if (r.ok) {
+    // The ack reports what the published file loads as; the applier just
+    // published these bytes, so the fallback is only for a vanished file.
+    Value now = p.cur;
+    std::string err;
+    (void)current_value(cfg_path_, p.idx, &now, &err);
+    queue_ack(p.id16, &now, p.row_type, PARAM_ACK_ACCEPTED);
+    ++stats_.sets_ok;
+    log("set " + shown + " = " + p.rendered + " (" + p.field + ") applied " +
+        apply_path_name(r.path) + " " + std::to_string(r.ms) + " ms");
+  } else {
+    queue_ack(p.id16, &p.cur, p.row_type, PARAM_ACK_FAILED);
+    queue_status(r.reason);
+    ++stats_.sets_refused;
+    log("set " + shown + " refused: " + r.reason);
+  }
 }
 
 }  // namespace mabur

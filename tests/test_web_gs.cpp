@@ -2,6 +2,7 @@
 // rendezvous/RCF cadence, and the wiring into the shared units.
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <memory>
 #include <stdexcept>
 
@@ -10,10 +11,13 @@
 #include "fake_link_card.h"
 #include "mav_ring.h"
 #include "mtest.h"
+#include "param_client.h"
 #include "web_gs.h"
+#include "mabur/config_params.h"
 #include "mabur/mav.h"
 #include "mabur/msp_dp.h"
 #include "mabur/msp_source.h"
+#include "mabur/param_value.h"
 #include "osd_screen.h"
 using namespace webgs;
 
@@ -65,6 +69,38 @@ mabur::node::RxBody mav_body(const std::vector<uint8_t>& payload, uint32_t count
   m.counter = counter;
   m.payload = payload;
   return rc_body(mabur::rc::pack_mav(m, /*tagged=*/false), mono_us);
+}
+// A PARAM_EXT_VALUE packet from the drone (1/191), as test_mav_tunnel.cpp's
+// param_ext_value_bytes but with a real id/count/index.
+std::vector<uint8_t> param_ext_value_pkt(const char* id, uint8_t type, const char wire[128],
+                                          uint16_t count, uint16_t index) {
+  char id16[16] = {};
+  std::strncpy(id16, id, 16);
+  mavlink_message_t msg;
+  mavlink_msg_param_ext_value_pack(1, 191, &msg, id16, wire, type, count, index);
+  uint8_t buf[MAVLINK_MAX_PACKET_LEN];
+  const uint16_t n = mavlink_msg_to_send_buffer(buf, &msg);
+  return std::vector<uint8_t>(buf, buf + n);
+}
+// How many of `sent`'s T_MAV frames (tag-stripped) carry a whole
+// PARAM_EXT_REQUEST_LIST packet.
+int count_param_list_requests(const std::vector<std::vector<uint8_t>>& sent) {
+  int n = 0;
+  for (auto& s : sent) {
+    if (mabur::rc::frame_type(s.data(), s.size()) != mabur::rc::T_MAV) continue;
+    const auto m = mabur::rc::parse_mav(s.data(), s.size(), /*tagged=*/true);
+    if (!m) continue;
+    mavlink_reset_channel_status(MAVLINK_COMM_1);
+    mavlink_message_t msg{};
+    mavlink_status_t st{};
+    for (uint8_t c : m->payload) {
+      if (mavlink_parse_char(MAVLINK_COMM_1, c, &msg, &st) == MAVLINK_FRAMING_OK &&
+          msg.msgid == MAVLINK_MSG_ID_PARAM_EXT_REQUEST_LIST) {
+        ++n;
+      }
+    }
+  }
+  return n;
 }
 // One full DisplayPort screen: CLEAR, optional SET_OPTIONS (hd_option),
 // `text` at row 0 col 0, then DRAW_SCREEN unless `finish` is false.
@@ -578,6 +614,172 @@ TEST(mav_outbound_drops_while_unlinked) {
   g.tick(t);   // the beacon's own send; flush() has nothing queued to drop
   CHECK(g.mav()->stats().drop_unlinked == 1);
   for (auto& s : sent) CHECK(mabur::rc::frame_type(s.data(), s.size()) != mabur::rc::T_MAV);
+}
+
+// ParamClient (gs/src/param_client.h): the core lists the drone's
+// parameters as soon as the session links, alongside the raw mav_in_ seam.
+TEST(gs_lists_parameters_after_disc_ack) {
+  std::vector<std::vector<uint8_t>> sent;
+  Io io;
+  io.on_au = [](Au&&) {};
+  io.send = [&](const std::vector<uint8_t>& b) { sent.push_back(b); };
+  WebGs g(cfg(), Mode::Gs, 136, 40, {}, 0, io);
+  REQUIRE(g.params() != nullptr);
+  CHECK(g.params()->state().list == maburgs::ParamListState::None);
+  const uint64_t t = 1'000'000;
+  g.inject_disc_ack_for_replay(t);
+  g.tick(t);
+  CHECK(count_param_list_requests(sent) == 1);
+  CHECK(g.params()->state().list == maburgs::ParamListState::Pending);
+}
+
+// A drone PARAM_EXT_VALUE lands on the right row and shows up in the page's
+// params_json, keyed by its MAVLink id.
+TEST(drone_values_reach_the_client) {
+  Io io;
+  io.on_au = [](Au&&) {};
+  io.send = [](const std::vector<uint8_t>&) {};
+  WebGs g(cfg(), Mode::Gs, 136, 40, {}, 0, io);
+  const uint64_t t = 1'000'000;
+  g.inject_disc_ack_for_replay(t);
+  g.tick(t);
+  REQUIRE(g.params() != nullptr);
+  char wire[128] = {};
+  std::strncpy(wire, "60@1920x1080", sizeof wire);
+  const auto pkt = param_ext_value_pkt(
+      "VENC_MODE", mabur::cfgparam::mav_type(mabur::cfgparam::Type::Str), wire,
+      mabur::cfgparam::kCount, static_cast<uint16_t>(mabur::cfgparam::kVencModeRow));
+  g.on_rx(mav_body(pkt, 1, t));
+  g.tick(t);
+  CHECK(g.params()->state().rows[mabur::cfgparam::kVencModeRow].value.s == "60@1920x1080");
+  const std::string j = params_json(g, t / 1000);
+  CHECK(j.find("\"id\":\"VENC_MODE\"") != std::string::npos);
+  CHECK(j.find("\"value\":\"60@1920x1080\"") != std::string::npos);
+}
+
+// "alive" is null between link-up and the drone's first HEARTBEAT (no
+// verdict yet, so a page shows no "no heartbeat" flash), then a bool.
+TEST(params_json_alive_is_null_until_the_first_heartbeat) {
+  Io io;
+  io.on_au = [](Au&&) {};
+  io.send = [](const std::vector<uint8_t>&) {};
+  WebGs g(cfg(), Mode::Gs, 136, 40, {}, 0, io);
+  uint64_t t = 1'000'000;
+  CHECK(params_json(g, t / 1000).find("\"alive\":null") != std::string::npos);   // unlinked
+  g.inject_disc_ack_for_replay(t);
+  g.tick(t);
+  REQUIRE(g.params()->state().linked);
+  CHECK(params_json(g, t / 1000).find("\"alive\":null") != std::string::npos);
+  const auto hb = mav_heartbeat_bytes(1, 191);
+  g.on_rx(mav_body(hb, 1, t));
+  g.tick(t);
+  CHECK(params_json(g, t / 1000).find("\"alive\":true") != std::string::npos);
+  t += 3'500'000;   // 3.5 s with no further heartbeat
+  CHECK(params_json(g, t / 1000).find("\"alive\":false") != std::string::npos);
+}
+
+// A session lost then re-acked (gs_session_loss_then_reack_resets_and_flows'
+// pattern) re-lists: the drop to BEACONING unlinks the client (clearing
+// every row) and the fresh ack links it again, sending a second
+// PARAM_EXT_REQUEST_LIST -- never just one, reverted or not.
+TEST(new_session_nonce_relists) {
+  std::vector<std::vector<uint8_t>> sent;
+  Io io;
+  io.on_au = [](Au&&) {};
+  io.send = [&](const std::vector<uint8_t>& b) { sent.push_back(b); };
+  WebGs g(cfg(), Mode::Gs, 136, 40, {}, 0, io);
+  uint64_t t = 1'000'000;
+  g.inject_disc_ack_for_replay(t);
+  g.tick(t);
+  t = feed(g, 60, t);
+  REQUIRE(g.params() != nullptr);
+  CHECK(count_param_list_requests(sent) == 1);
+  char wire[128] = {};
+  std::strncpy(wire, "60@1920x1080", sizeof wire);
+  const auto pkt = param_ext_value_pkt(
+      "VENC_MODE", mabur::cfgparam::mav_type(mabur::cfgparam::Type::Str), wire,
+      mabur::cfgparam::kCount, static_cast<uint16_t>(mabur::cfgparam::kVencModeRow));
+  g.on_rx(mav_body(pkt, 1, t));
+  g.tick(t);
+  REQUIRE(g.params()->state().rows[mabur::cfgparam::kVencModeRow].have_value);
+
+  for (int i = 0; i < 150; ++i) g.tick(t += 10000);   // 1.5 s silence: session lost
+  CHECK(g.vrx()->link_state() == maburgs::VrxState::BEACONING);
+  CHECK(!g.params()->state().linked);
+  CHECK(!g.params()->state().rows[mabur::cfgparam::kVencModeRow].have_value);   // cleared
+
+  g.inject_disc_ack_for_replay(t);
+  g.tick(t);
+  CHECK(g.params()->state().linked);
+  CHECK(count_param_list_requests(sent) == 2);
+}
+
+// A drone restart whose fresh DISC_ACK beats the video-silence timeout
+// adopts a new vtx_nonce without ever leaving SESSION: VrxRendezvous::
+// feed_disc_ack sets state_ = SESSION unconditionally on every unflagged
+// ack (rendezvous.cpp), so link_state() shows no edge here -- only the
+// nonce clause in WebGs::tick() catches it, and it must still re-list.
+TEST(vtx_nonce_change_while_linked_relists) {
+  std::vector<std::vector<uint8_t>> sent;
+  Io io;
+  io.on_au = [](Au&&) {};
+  io.send = [&](const std::vector<uint8_t>& b) { sent.push_back(b); };
+  WebGs g(cfg(), Mode::Gs, 136, 40, {}, 0, io);
+  uint64_t t = 1'000'000;
+  g.inject_disc_ack_for_replay(t);   // vtx_nonce 1 (inject_disc_ack_for_replay's constant)
+  g.tick(t);
+  REQUIRE(g.params() != nullptr);
+  CHECK(count_param_list_requests(sent) == 1);
+  char wire[128] = {};
+  std::strncpy(wire, "60@1920x1080", sizeof wire);
+  const auto pkt = param_ext_value_pkt(
+      "VENC_MODE", mabur::cfgparam::mav_type(mabur::cfgparam::Type::Str), wire,
+      mabur::cfgparam::kCount, static_cast<uint16_t>(mabur::cfgparam::kVencModeRow));
+  g.on_rx(mav_body(pkt, 1, t));
+  g.tick(t);
+  REQUIRE(g.params()->state().rows[mabur::cfgparam::kVencModeRow].have_value);
+
+  // A second, differently-nonced DISC_ACK, fed straight to VrxController as
+  // inject_disc_ack_for_replay does (replay has no drone to answer a real
+  // DISC): the rendezvous adopts the new nonce and stays in SESSION the
+  // whole time -- never BEACONING in between.
+  REQUIRE(g.vrx() != nullptr);
+  mabur::rc::DiscAck ack;
+  ack.vrx_nonce = g.vrx()->rz_nonce();
+  ack.vtx_nonce = 2;
+  ack.chip_caps = mabur::rc::CAP_FRAME_WIRE;
+  ack.agreed_channel = g.vrx()->proposal();
+  ack.seq = 2;
+  const auto wire2 = mabur::rc::pack_disc_ack(ack);
+  g.vrx()->on_rc_frame(wire2.data(), wire2.size(), static_cast<double>(t) / 1000.0);
+  REQUIRE(g.vrx()->link_state() == maburgs::VrxState::SESSION);   // no BEACONING edge
+
+  g.tick(t);
+  CHECK(g.vrx()->link_state() == maburgs::VrxState::SESSION);
+  CHECK(count_param_list_requests(sent) == 2);
+  CHECK(!g.params()->state().rows[mabur::cfgparam::kVencModeRow].have_value);   // cleared
+}
+
+// Spotter has no tunnel to list parameters over: params() is null and the
+// page's params_json falls back to the static table, every value null.
+TEST(spotter_has_no_param_client) {
+  Io io;
+  io.on_au = [](Au&&) {};
+  WebGs g(cfg(), Mode::Spotter, 136, 40, {}, 0, io);
+  CHECK(g.params() == nullptr);
+  const std::string j = params_json(g, 1000);
+  CHECK(j.find("\"mode\":\"spotter\"") != std::string::npos);
+  CHECK(j.find("\"linked\":false") != std::string::npos);
+  size_t pos = 0;
+  int id_count = 0, null_value_count = 0;
+  while ((pos = j.find("\"id\":", pos)) != std::string::npos) { ++id_count; pos += 5; }
+  pos = 0;
+  while ((pos = j.find("\"value\":null", pos)) != std::string::npos) {
+    ++null_value_count;
+    pos += 12;
+  }
+  CHECK(id_count == static_cast<int>(mabur::cfgparam::kCount));
+  CHECK(null_value_count == static_cast<int>(mabur::cfgparam::kCount));
 }
 
 // MavRing (web_main.cpp's page bridge, and WebGs's own inbound buffer):

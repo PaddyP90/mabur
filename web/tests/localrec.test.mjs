@@ -24,6 +24,15 @@ test('file name from the local clock, suffixed on collision', () => {
   assert.match(recFileName(d, []), /^[A-Za-z0-9.-]+$/);   // core writes it into JSON unescaped
 });
 
+test('a roll file never blocks or gets reused as a new recording name', () => {
+  // mabur-20261030-101500-r1.mp4 is 101500's OWN roll, not a prior
+  // recording's name: the base being taken still bumps to -2, not -r1.
+  assert.equal(
+    recFileName(new Date(2026, 9, 30, 10, 15, 0),
+      ['mabur-20261030-101500.mp4', 'mabur-20261030-101500-r1.mp4']),
+    'mabur-20261030-101500-2.mp4');
+});
+
 test('local view from core stats', () => {
   assert.deepEqual(localView(null), { state: 'unknown', err: null, bytes: 0 });
   assert.deepEqual(localView({ lrec_state: 0, lrec_err: 0, lrec_bytes: 0 }), { state: 'off', err: null, bytes: 0 });

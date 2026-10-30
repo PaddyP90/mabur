@@ -2,27 +2,30 @@
 // The drone's MAVLink component: answers MAVLink extended-parameter traffic
 // (PARAM_EXT_REQUEST_LIST / _REQUEST_READ / _SET) for the config keys in
 // cfgparam::kTable (common/include/mabur/config_params.h), and rewrites the
-// config file maburd loaded one key at a time.
+// config file one row at a time.
 //
 // The failure mode this file exists to prevent is the one config_write.h
 // guards against: a config maburd cannot load is a drone stuck in a 2 s
-// respawn loop with no console. A set therefore never writes anything the
-// real loader would refuse. It reads the file, patches the one key's line
-// (patch_toml_key, so every comment survives), and hands the result to
-// publish_config, which verifies the candidate with mabur::load_config
-// before it replaces the file. Cross-key rules (record.fps <= venc.fps,
-// venc.size against the fps mode, low_power.enable needs msp.enable) are
-// the loader's, not this file's: a set that breaks one is answered
-// PARAM_ACK_FAILED with the loader's message in a STATUSTEXT, so the
-// operator learns which key must move first. The read-patch-publish
-// sequence holds lock_config_writes() throughout, so a calibration write on
-// another thread can't be lost between this read and this publish.
+// respawn loop with no console. A set therefore never hands on anything the
+// real loader would refuse. Under lock_config_writes() it reads the file,
+// patches the row's own line(s) (mavparam::patch_row, built on
+// patch_toml_key, so every comment survives) and loads the candidate with
+// mabur::load_config; cross-key rules
+// (record.fps <= venc.fps, venc.size against the fps mode, low_power.enable
+// needs msp.enable) are the loader's, not this file's, so a set that breaks
+// one is answered PARAM_ACK_FAILED with the loader's message in a
+// STATUSTEXT and the operator learns which key must move first. A candidate
+// that loads is submitted to ConfigApplier (ApplyPort), acked
+// PARAM_ACK_IN_PROGRESS, and resolved by poll_results once the applier has
+// applied it to the running daemon and published the file, or refused it.
 //
-// A set changes the file, not the running daemon's Config. Reads and acks
-// report the file: the ack carries the value read back from the published
-// file, and a set whose rendered line is already the one in the file, or
-// whose value equals what the file loads as, is acked without writing (no
-// flash wear for a ground app that re-sends).
+// Reads and acks report the file: the final ack carries the value read
+// back from the published file, and a set whose rendered line is already
+// the one in the file, or whose value equals what the file loads as, is
+// acked without submitting (no flash wear for a ground app that re-sends).
+// While an apply is in flight a repeat of the pending set is acked
+// IN_PROGRESS again and any other set is refused "apply in progress",
+// both without taking the lock the applier holds.
 //
 // Packets: inbound is MAVLink 2 only; a v1 packet, a bad CRC or a packet
 // cut off at the end of a payload is dropped and counted, and the parser
@@ -52,9 +55,25 @@
 #include <string>
 #include <vector>
 
+#include "config_apply.h"
+#include "mabur/param_value.h"
 #include "mav_params.h"
 
 namespace mabur {
+
+// The slice of ConfigApplier a set needs: submit a patched row, poll for
+// its result, and ask whether an apply is in flight. A real ConfigApplier's
+// submit/take_result/busy bind directly; a test supplies a fake so it can
+// drive the timing of a completion without a second thread.
+struct ApplyPort {
+  std::function<bool(size_t row, const mavparam::Value& want, std::string* why)> submit;
+  std::function<bool(ConfigApplyResult*)> take_result;
+  // True from an accepted submit until take_result hands its result over.
+  // The applier holds lock_config_writes() for the whole apply, so a set
+  // checks this before taking the lock: the MAV thread never waits out an
+  // apply (a rebuild, or the cold rung's several seconds).
+  std::function<bool()> busy;
+};
 
 // The drone sends a T_MAV frame (drone -> GS) at most this often, each
 // carrying one take_outbound() of queued packets: at kMavMaxPayload per
@@ -70,17 +89,19 @@ struct MavComponentStats {
   uint64_t rx_packets = 0,       // good MAVLink 2 packets, before routing
       drop_not_for_us = 0,       // another target, or a message this component doesn't handle
       drop_bad_packet = 0,       // bad CRC, MAVLink 1, a header the parser rejects, a partial
-      sets_ok = 0,               // PARAM_EXT_SET acked ACCEPTED
-      sets_refused = 0,          // PARAM_EXT_SET acked VALUE_UNSUPPORTED or FAILED
+      sets_in_progress = 0,      // PARAM_EXT_SET acked IN_PROGRESS and submitted to the applier
+      sets_ok = 0,               // a set's final outcome: PARAM_EXT_SET acked ACCEPTED
+      sets_refused = 0,          // a set's final outcome: acked VALUE_UNSUPPORTED or FAILED
       drop_queue_full = 0,       // an outbound packet dropped at kMavQueueCap
       list_coalesced = 0;        // a REQUEST_LIST answered by a list still queued
 };
 
 class MavComponent {
  public:
-  // cfg_path: the file maburd loaded. log: one line per event, prefixed
-  // "[mav] ", no trailing newline; may be null.
-  MavComponent(std::string cfg_path, std::function<void(const std::string&)> log);
+  // cfg_path: the file maburd loaded. port: ConfigApplier's submit/
+  // take_result. log: one line per event, prefixed "[mav] ", no trailing
+  // newline; may be null.
+  MavComponent(std::string cfg_path, ApplyPort port, std::function<void(const std::string&)> log);
 
   // Inbound T_MAV payload bytes (already tag-verified by the caller).
   // Parses, routes, and queues replies.
@@ -91,6 +112,10 @@ class MavComponent {
   // rc::kMavMaxPayload; a packet is never split. Returns packets taken.
   int take_outbound(std::vector<uint8_t>* out);
   size_t outbound_packets() const { return queue_.size(); }
+  // Drains the applier's result for the one set in flight, if any, and
+  // queues its final PARAM_EXT_ACK (plus a STATUSTEXT on failure). The MAV
+  // loop calls this every pass; a no-op when nothing is pending.
+  void poll_results();
   const MavComponentStats& stats() const { return stats_; }
   // The MAVLink identity this component answers as (mabur/mav.h's kSysId
   // and kCompId), for callers that don't include the MAVLink headers.
@@ -107,9 +132,14 @@ class MavComponent {
   void queue(const Msg& m, bool list_value = false);
   // A PARAM_EXT_VALUE for row idx; list_value marks one queued by a list.
   void queue_value(size_t idx, const mavparam::Value& v, bool list_value = false);
+  // A PARAM_EXT_ACK, shared by handle_set's immediate acks and poll_results'
+  // completion ack.
+  void queue_ack(const char id16[16], const mavparam::Value* v, uint8_t mav_type, uint8_t result);
+  void queue_status(const std::string& text);
   void log(const std::string& line) const;
 
   std::string cfg_path_;
+  ApplyPort port_;
   std::function<void(const std::string&)> log_;
   struct Out {
     std::vector<uint8_t> bytes;
@@ -118,6 +148,21 @@ class MavComponent {
   std::deque<Out> queue_;
   size_t list_queued_ = 0;   // list values in queue_
   MavComponentStats stats_;
+
+  // The one set submitted to the applier and not yet resolved: ConfigApplier
+  // itself allows only one apply in flight, so at most one of these is ever
+  // pending. Remembered so poll_results can ack with the row's identity and
+  // pre-set value without re-reading the file.
+  struct Pending {
+    size_t idx = 0;
+    char id16[16] = {};
+    uint8_t row_type = 0;
+    mavparam::Value cur{cfgparam::Type::Bool};
+    std::string rendered;
+    std::string field;
+  };
+  bool has_pending_ = false;
+  Pending pending_;
 };
 
 }  // namespace mabur
