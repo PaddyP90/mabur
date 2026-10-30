@@ -335,19 +335,21 @@ Boot log: `maburgs: mavlink endpoint udp <bind>:<port>` or
 ## Ground client
 
 `ParamClient` (`gs/src/param_client.h`) is the ground-side PARAM_EXT_*
-protocol client: list, read and link/heartbeat state, driven only by a
-send callback and `on_packet`/`tick(now)` -- pure data handling, no socket
-or clock of its own. Not wired into `maburgs` or the web GS yet; either
-could feed it by fanning the tunnel's `deliver` callback out to it
+protocol client: list, read, set and link/heartbeat state, driven only by
+a send callback and `on_packet`/`tick(now)` -- pure data handling, no
+socket or clock of its own. Not wired into `maburgs` or the web GS yet;
+either could feed it by fanning the tunnel's `deliver` callback out to it
 alongside `mav_endpoint`'s UDP bridge.
 
 - **Link.** `set_linked(true)` starts a fresh list: every row is cleared,
   `list` becomes `Pending`, and one `PARAM_EXT_REQUEST_LIST` goes to
   system 1 / component 191. `set_linked(false)` drops every row back to
-  the unlinked defaults. Independent of this is the drone heartbeat:
-  `alive()` is true while a `HEARTBEAT` from 1/191 arrived within the last
-  3 s; a heartbeat that arrives while already alive only refreshes the
-  timestamp.
+  the unlinked defaults -- including a set in flight, whose row passes
+  through `Timeout` with status "link lost" on the way to that clear, so
+  the end state a caller observes is the plain unlinked defaults.
+  Independent of this is the drone heartbeat: `alive()` is true while a
+  `HEARTBEAT` from 1/191 arrived within the last 3 s; a heartbeat that
+  arrives while already alive only refreshes the timestamp.
 - **List.** While `list` is `Pending`, each row still missing a value is
   re-read individually by `PARAM_EXT_REQUEST_READ` (`param_index` set, the
   id left blank) once every 2 s, for up to 3 rounds; `list` reaches
@@ -358,11 +360,37 @@ alongside `mav_endpoint`'s UDP bridge.
   id the table doesn't have is dropped and counted. `refresh()` starts the
   same round again without clearing the rows already held, for a UI's
   manual re-list.
+- **Set.** `set(row, text, now, &why)` refuses (`false`, `*why`) while
+  unlinked ("not linked"), while another set is already in flight
+  ("apply in progress"), for an out-of-range row ("no such parameter"),
+  or for text that doesn't parse for the row's type ("bad value for
+  `<type>`"); a refusal on a row the table has marks that row `Failed`
+  with `*why` as its status. An accepted set sends one `PARAM_EXT_SET` and
+  marks the row `Sending`, then resends it every 2 s, up to 3 times, while
+  no ack for it has arrived; the row times out (one
+  `PARAM_EXT_REQUEST_READ` follows) if nothing ever answers. The row's
+  first `PARAM_ACK_IN_PROGRESS` moves it to `InProgress` and opens a 15 s
+  deadline from that moment -- a repeated `IN_PROGRESS` updates the row's
+  value but never pushes the deadline out, and the row times out the same
+  way if the deadline passes first. `PARAM_ACK_ACCEPTED`/`FAILED`/
+  `VALUE_UNSUPPORTED` for the row is terminal: the row's state and value
+  are set and the client is free to set another row; an `ACCEPTED` on a
+  row whose `apply` is `rebuild` also starts a fresh list round, since a
+  `VENC_MODE` set can move `REC_SIZE`'s value along with it. An ack for
+  any row other than the one being set only updates that row's value. A
+  `STATUSTEXT` from 1/191 lands on the row currently being set, if there
+  is one -- so a reason that reaches the GS before, or instead of, its
+  ack still lands on the right row -- otherwise on whichever row's
+  terminal `Failed`/`Unsupported` landed within the last 1.5 s (the latest
+  one), or is dropped.
 - **State.** `state()` exposes `linked`, `alive_ms`, `table_mismatch`,
-  `list`, and one row per table parameter holding `have_value`/`value`
-  from the list/read traffic above; `seq()` bumps once per call that
-  changed anything in it, so a UI can poll it cheaply instead of diffing
-  the struct. `set()` is declared but not implemented at HEAD.
+  `list`, `pending_row` (the row a `set()` is in flight for, or -1), and
+  one row per table parameter holding `have_value`/`value`/`st`/`status`/
+  `result_ms` from the list/read/set traffic above -- a row always shows
+  the value its last ack carried, never text an operator typed and the
+  drone hasn't confirmed. `seq()` bumps once per call that changed
+  anything in it, so a UI can poll it cheaply instead of diffing the
+  struct; a resend that changes nothing observable does not bump it.
 
 ### Trust boundary
 

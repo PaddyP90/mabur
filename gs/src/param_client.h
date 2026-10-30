@@ -1,10 +1,9 @@
 #pragma once
 // ParamClient -- the ground-side MAVLink extended-parameter protocol
-// client: list, read and link/heartbeat state against the drone's
+// client: list, read, set and link/heartbeat state against the drone's
 // component (system 1, component 191). Pure data handling, driven only by
 // a send callback, on_packet and tick(now); the caller owns the MAVLink
-// tunnel and the clock. set() is declared here but not implemented yet
-// (always refuses "not implemented").
+// tunnel and the clock.
 //
 // List. set_linked(true) clears every row, sets list = Pending and sends
 // one PARAM_EXT_REQUEST_LIST. While Pending, every row still missing a
@@ -19,6 +18,30 @@
 // again without clearing the rows already held. set_linked(false) drops
 // every row back to the unlinked defaults.
 //
+// Set. One set is ever in flight: set() refuses a second one ("apply in
+// progress"), an unknown row ("no such parameter"), a value that doesn't
+// parse for the row's type ("bad value for <type>"), or any set while
+// unlinked ("not linked") -- a refusal on a known row also records it
+// (rows[row].st = Failed, status = the refusal, result_ms = now). An
+// accepted set sends one PARAM_EXT_SET and marks the row Sending; while
+// Sending, tick() resends it every kParamSetRetryMs, at most
+// kParamSetRetries times, giving up with Timeout (and one
+// PARAM_EXT_REQUEST_READ of the row) if nothing ever answers. The first
+// PARAM_ACK_IN_PROGRESS for the pending row moves it to InProgress and
+// starts a kParamFinalMs deadline from that moment -- a repeated
+// IN_PROGRESS updates the row's value but never extends the deadline, and
+// tick() times the row out the same way if the deadline passes with no
+// final answer. PARAM_ACK_ACCEPTED/FAILED/VALUE_UNSUPPORTED for the
+// pending row is terminal: the row's state and value are set, pending_row
+// clears, and an ACCEPTED on a row whose apply is Rebuild starts a fresh
+// list round (a VENC_MODE set can move REC_SIZE's value along with it). An
+// ack for any other row only updates that row's value. A STATUSTEXT from
+// 1/191 lands on the pending row if one is set (so a reply that beats, or
+// replaces, a lost ack still reaches the right row); otherwise it lands on
+// whichever row's terminal Failed/Unsupported result_ms is within
+// kParamStatusMs of now (the latest one), or is dropped. set_linked(false)
+// while a set is pending still ends in the full unlinked-defaults clear.
+//
 // Heartbeat. A HEARTBEAT from 1/191 stamps alive_ms; alive() is true while
 // now - alive_ms is within kParamAliveMs. A heartbeat that arrives while
 // already alive only refreshes the timestamp and never bumps seq() on its
@@ -27,7 +50,9 @@
 //
 // seq() bumps once per call (on_packet/tick/set_linked/refresh/set) that
 // changed anything a caller could observe through state(), so a UI can
-// poll it cheaply instead of diffing the whole struct.
+// poll it cheaply instead of diffing the whole struct. A resend that
+// changes nothing observable -- the common case while a set is in flight
+// -- does not bump it.
 //
 // Parsing: each on_packet call gets one whole MAVLink packet (the MAVLink
 // tunnel's deliver callback already splits the tunnel payload into
@@ -105,8 +130,9 @@ class ParamClient {
   // Starts a new list round without clearing the rows already held. A
   // no-op while unlinked.
   void refresh(uint64_t now_ms);
-  // Not implemented yet: always returns false with *why = "not
-  // implemented", and changes nothing.
+  // Sets row's value to text, parsed for the row's own type. False with
+  // *why on a refusal (see the class comment's "Set" section); true once
+  // the PARAM_EXT_SET is on its way, with the row marked Sending.
   bool set(size_t row, const std::string& text, uint64_t now_ms, std::string* why);
   bool alive(uint64_t now_ms) const;
   const ParamClientState& state() const { return state_; }
@@ -116,6 +142,10 @@ class ParamClient {
  private:
   void send_list_request();
   void send_read_request(size_t idx);
+  void send_set_packet(size_t idx, const mabur::paramval::Value& v);
+  void begin_list(uint64_t now_ms);  // the shared body of refresh() and an ACCEPTED Rebuild row
+  void refuse(size_t row, const std::string& why, uint64_t now_ms);
+  void timeout_pending();  // Timeout from either tick() path: resends exhausted or the final deadline
 
   SendFn send_;
   uint8_t sysid_, compid_;
@@ -125,6 +155,13 @@ class ParamClient {
   bool alive_cached_ = false;      // alive() as of the end of the last call, to detect a flip
   uint64_t list_last_req_ms_ = 0;  // when the list request, or the last retry round, went out
   int list_rounds_ = 0;            // retry rounds sent for the current list
+
+  // The one set in flight, if any (state_.pending_row is the public half).
+  mabur::paramval::Value set_value_{};  // re-sent verbatim by every resend
+  uint64_t set_send_ms_ = 0;            // when the SET, or the last resend, went out
+  int set_resends_ = 0;                 // resends already sent for the pending set
+  bool set_in_progress_ = false;        // the pending row has seen its first IN_PROGRESS
+  uint64_t set_deadline_ms_ = 0;        // first IN_PROGRESS + kParamFinalMs; valid iff set_in_progress_
 };
 
 }  // namespace maburgs

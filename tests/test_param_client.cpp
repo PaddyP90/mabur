@@ -33,6 +33,22 @@ static Bytes hb_pkt() {
   return pkt(msg);
 }
 
+static Bytes ack_pkt(const char* id, uint8_t type, const char wire[128], uint8_t result) {
+  char id16[16] = {};
+  std::strncpy(id16, id, 16);
+  mavlink_message_t msg;
+  mavlink_msg_param_ext_ack_pack(1, 191, &msg, id16, wire, type, result);
+  return pkt(msg);
+}
+
+static Bytes status_pkt(const std::string& text) {
+  char buf[50] = {};
+  std::memcpy(buf, text.data(), std::min(text.size(), static_cast<size_t>(50)));
+  mavlink_message_t msg;
+  mavlink_msg_statustext_pack(1, 191, &msg, MAV_SEVERITY_ERROR, buf, 0, 0);
+  return pkt(msg);
+}
+
 static std::vector<mavlink_message_t> parse(const Bytes& b) {
   mavlink_reset_channel_status(MAVLINK_COMM_1);
   std::vector<mavlink_message_t> out;
@@ -85,6 +101,15 @@ struct Rig {
   std::vector<Bytes> sent;
   ParamClient c{[this](const uint8_t* p, size_t n) { sent.emplace_back(p, p + n); }};
 };
+
+// Fixture for the set() tests: links `r.c` and feeds every row a value so
+// the list reaches Complete, then clears `sent` so a test sees only its
+// own traffic.
+static void link_and_complete_list(Rig& r, uint64_t now_ms) {
+  r.c.set_linked(true, now_ms);
+  for (size_t i = 0; i < mabur::cfgparam::kCount; ++i) feed_row(r.c, i, now_ms + 1);
+  r.sent.clear();
+}
 
 TEST(link_up_requests_the_list_once) {
   Rig r;
@@ -243,6 +268,309 @@ TEST(seq_is_stable_when_nothing_changes) {
   r.c.tick(1000);
   r.c.tick(2000);
   CHECK(r.c.seq() == seq0);
+}
+
+TEST(set_encodes_by_type_and_marks_sending) {
+  Rig r;
+  link_and_complete_list(r, 1000);
+  std::string why;
+  CHECK(r.c.set(4, "30000", 2000, &why));
+  CHECK(why.empty());
+  REQUIRE(r.sent.size() == 1);
+  auto msgs = parse(r.sent[0]);
+  REQUIRE(msgs.size() == 1);
+  CHECK(msgs[0].msgid == MAVLINK_MSG_ID_PARAM_EXT_SET);
+  mavlink_param_ext_set_t p;
+  mavlink_msg_param_ext_set_decode(&msgs[0], &p);
+  CHECK(p.target_system == 1 && p.target_component == 191);
+  CHECK(p.param_type == 6);  // MAV_PARAM_EXT_TYPE_INT32
+  int32_t v;
+  std::memcpy(&v, p.param_value, sizeof v);
+  CHECK(v == 30000);
+  CHECK(r.c.state().rows[4].st == ParamRowState::Sending);
+  CHECK(r.c.state().pending_row == 4);
+}
+
+TEST(set_refuses_second_while_pending) {
+  Rig r;
+  link_and_complete_list(r, 1000);
+  std::string why;
+  REQUIRE(r.c.set(4, "30000", 2000, &why));
+  r.sent.clear();
+
+  std::string why2;
+  CHECK(!r.c.set(5, "0.5", 2001, &why2));
+  CHECK(why2 == "apply in progress");
+  CHECK(r.c.state().rows[5].st == ParamRowState::Failed);
+  CHECK(r.c.state().rows[5].status == "apply in progress");
+  CHECK(r.sent.empty());
+}
+
+TEST(set_refuses_bad_text_and_records_it) {
+  Rig r;
+  link_and_complete_list(r, 1000);
+  std::string why;
+  CHECK(!r.c.set(4, "abc", 2000, &why));
+  CHECK(why.rfind("bad value", 0) == 0);
+  CHECK(r.c.state().rows[4].st == ParamRowState::Failed);
+  CHECK(r.c.state().rows[4].status.rfind("bad value", 0) == 0);
+  CHECK(r.sent.empty());
+}
+
+TEST(set_refuses_unlinked) {
+  Rig r;
+  link_and_complete_list(r, 1000);
+  r.c.set_linked(false, 2000);
+
+  std::string why;
+  CHECK(!r.c.set(4, "30000", 2001, &why));
+  CHECK(why == "not linked");
+}
+
+TEST(in_progress_then_accepted_updates_value) {
+  Rig r;
+  link_and_complete_list(r, 1000);
+  std::string why;
+  REQUIRE(r.c.set(4, "30000", 2000, &why));
+
+  mabur::paramval::Value v{mabur::cfgparam::Type::Int32};
+  char wire[128];
+  v.i = 24000;
+  mabur::paramval::encode_wire(v, wire);
+  Bytes a1 = ack_pkt("ENC_BITRATE_MAX", 6, wire, PARAM_ACK_IN_PROGRESS);
+  r.c.on_packet(a1.data(), a1.size(), 2100);
+  CHECK(r.c.state().rows[4].st == ParamRowState::InProgress);
+  CHECK(r.c.state().rows[4].value.i == 24000);
+  CHECK(r.c.state().pending_row == 4);
+
+  v.i = 30000;
+  mabur::paramval::encode_wire(v, wire);
+  Bytes a2 = ack_pkt("ENC_BITRATE_MAX", 6, wire, PARAM_ACK_ACCEPTED);
+  r.c.on_packet(a2.data(), a2.size(), 2200);
+  CHECK(r.c.state().rows[4].st == ParamRowState::Accepted);
+  CHECK(r.c.state().rows[4].value.i == 30000);
+  CHECK(r.c.state().pending_row == -1);
+  CHECK(r.c.state().rows[4].result_ms == 2200);
+}
+
+TEST(accepted_without_in_progress) {
+  Rig r;
+  link_and_complete_list(r, 1000);
+  std::string why;
+  REQUIRE(r.c.set(4, "30000", 2000, &why));
+
+  mabur::paramval::Value v{mabur::cfgparam::Type::Int32};
+  v.i = 30000;
+  char wire[128];
+  mabur::paramval::encode_wire(v, wire);
+  Bytes a = ack_pkt("ENC_BITRATE_MAX", 6, wire, PARAM_ACK_ACCEPTED);
+  r.c.on_packet(a.data(), a.size(), 2050);
+  CHECK(r.c.state().rows[4].st == ParamRowState::Accepted);
+  CHECK(r.c.state().pending_row == -1);
+}
+
+TEST(failed_then_status_fills_status) {
+  Rig r;
+  link_and_complete_list(r, 1000);
+  std::string why;
+  REQUIRE(r.c.set(8, "5", 2000, &why));
+
+  mabur::paramval::Value v{mabur::cfgparam::Type::Int32};
+  v.i = 30;
+  char wire[128];
+  mabur::paramval::encode_wire(v, wire);
+  Bytes fail = ack_pkt("REC_FPS", 6, wire, PARAM_ACK_FAILED);
+  r.c.on_packet(fail.data(), fail.size(), 2050);
+  CHECK(r.c.state().rows[8].st == ParamRowState::Failed);
+  CHECK(r.c.state().pending_row == -1);
+
+  Bytes s1 = status_pkt("record.fps: must be in [1, venc.fps]");
+  r.c.on_packet(s1.data(), s1.size(), 3050);  // 1 s after the ack: within the window
+  CHECK(r.c.state().rows[8].status == "record.fps: must be in [1, venc.fps]");
+
+  Bytes s2 = status_pkt("stale, must be dropped");
+  r.c.on_packet(s2.data(), s2.size(), 4050);  // 2 s after the ack: outside the window
+  CHECK(r.c.state().rows[8].status == "record.fps: must be in [1, venc.fps]");
+}
+
+TEST(status_before_final_ack_lands_on_pending_row) {
+  Rig r;
+  link_and_complete_list(r, 1000);
+  std::string why;
+  REQUIRE(r.c.set(8, "5", 2000, &why));
+
+  Bytes s = status_pkt("record.fps: must be in [1, venc.fps]");
+  r.c.on_packet(s.data(), s.size(), 2010);  // the ack was lost, this arrives instead
+  CHECK(r.c.state().rows[8].status == "record.fps: must be in [1, venc.fps]");
+  CHECK(r.c.state().rows[8].st == ParamRowState::Sending);
+
+  mabur::paramval::Value v{mabur::cfgparam::Type::Int32};
+  v.i = 30;
+  char wire[128];
+  mabur::paramval::encode_wire(v, wire);
+  Bytes fail = ack_pkt("REC_FPS", 6, wire, PARAM_ACK_FAILED);
+  r.c.on_packet(fail.data(), fail.size(), 2050);
+  CHECK(r.c.state().rows[8].st == ParamRowState::Failed);
+  CHECK(r.c.state().rows[8].status == "record.fps: must be in [1, venc.fps]");
+  CHECK(r.c.state().pending_row == -1);
+}
+
+TEST(resend_stops_at_first_ack) {
+  Rig r;
+  link_and_complete_list(r, 1000);
+  std::string why;
+  REQUIRE(r.c.set(4, "30000", 2000, &why));
+  REQUIRE(r.sent.size() == 1);
+
+  r.c.tick(2000 + 2001);
+  CHECK(r.sent.size() == 2);
+  r.c.tick(2000 + 4002);
+  CHECK(r.sent.size() == 3);
+  r.c.tick(2000 + 6003);
+  CHECK(r.sent.size() == 4);
+  r.c.tick(2000 + 8004);
+  CHECK(r.sent.size() == 5);
+  CHECK(r.c.state().rows[4].st == ParamRowState::Timeout);
+  CHECK(r.c.state().pending_row == -1);
+  CHECK(r.c.stats().timeouts == 1);
+  {
+    auto msgs = parse(r.sent[4]);
+    REQUIRE(msgs.size() == 1);
+    CHECK(msgs[0].msgid == MAVLINK_MSG_ID_PARAM_EXT_REQUEST_READ);
+    mavlink_param_ext_request_read_t p;
+    mavlink_msg_param_ext_request_read_decode(&msgs[0], &p);
+    CHECK(p.param_index == 4);
+  }
+
+  // An IN_PROGRESS right after the first send stops every resend.
+  Rig r2;
+  link_and_complete_list(r2, 1000);
+  std::string why2;
+  REQUIRE(r2.c.set(9, "1920x1080", 3000, &why2));
+  REQUIRE(r2.sent.size() == 1);
+
+  mabur::paramval::Value v{mabur::cfgparam::Type::Str};
+  v.s = "1920x1080";
+  char wire[128];
+  mabur::paramval::encode_wire(v, wire);
+  Bytes ip = ack_pkt("REC_SIZE", 11, wire, PARAM_ACK_IN_PROGRESS);
+  r2.c.on_packet(ip.data(), ip.size(), 3010);
+  r2.sent.clear();
+
+  // Well past several would-be resend intervals, but short of the
+  // IN_PROGRESS deadline: still no resend, because the row is no longer
+  // Sending.
+  r2.c.tick(3010 + 10000);
+  CHECK(r2.sent.empty());
+  CHECK(r2.c.state().rows[9].st == ParamRowState::InProgress);
+}
+
+TEST(final_deadline_from_first_in_progress) {
+  Rig r;
+  link_and_complete_list(r, 1000);
+  std::string why;
+  REQUIRE(r.c.set(4, "30000", 2000, &why));
+
+  mabur::paramval::Value v{mabur::cfgparam::Type::Int32};
+  v.i = 24000;
+  char wire[128];
+  mabur::paramval::encode_wire(v, wire);
+  Bytes ip1 = ack_pkt("ENC_BITRATE_MAX", 6, wire, PARAM_ACK_IN_PROGRESS);
+  r.c.on_packet(ip1.data(), ip1.size(), 2000);  // the first IN_PROGRESS
+
+  Bytes ip2 = ack_pkt("ENC_BITRATE_MAX", 6, wire, PARAM_ACK_IN_PROGRESS);
+  r.c.on_packet(ip2.data(), ip2.size(), 2000 + 10000);  // a repeat, 10 s later
+
+  r.sent.clear();
+  r.c.tick(2000 + 15000 - 1);  // just before 15 s after the first IN_PROGRESS
+  CHECK(r.c.state().rows[4].st == ParamRowState::InProgress);
+  CHECK(r.sent.empty());
+
+  r.c.tick(2000 + 15001);  // just after
+  CHECK(r.c.state().rows[4].st == ParamRowState::Timeout);
+  CHECK(r.c.state().pending_row == -1);
+  CHECK(r.c.stats().timeouts == 1);
+  REQUIRE(r.sent.size() == 1);
+  auto msgs = parse(r.sent[0]);
+  REQUIRE(msgs.size() == 1);
+  CHECK(msgs[0].msgid == MAVLINK_MSG_ID_PARAM_EXT_REQUEST_READ);
+}
+
+TEST(accepted_rebuild_row_relists) {
+  Rig r;
+  link_and_complete_list(r, 1000);
+  std::string why;
+  REQUIRE(r.c.set(2, "90@1920x1080", 2000, &why));
+  r.sent.clear();
+
+  mabur::paramval::Value v{mabur::cfgparam::Type::Str};
+  v.s = "90@1920x1080";
+  char wire[128];
+  mabur::paramval::encode_wire(v, wire);
+  Bytes a = ack_pkt("VENC_MODE", 11, wire, PARAM_ACK_ACCEPTED);
+  r.c.on_packet(a.data(), a.size(), 2050);
+
+  CHECK(r.c.state().rows[2].st == ParamRowState::Accepted);
+  CHECK(r.c.state().list == ParamListState::Pending);
+  for (size_t i = 0; i < mabur::cfgparam::kCount; ++i) CHECK(r.c.state().rows[i].have_value);
+  REQUIRE(r.sent.size() == 1);
+  auto msgs = parse(r.sent[0]);
+  REQUIRE(msgs.size() == 1);
+  CHECK(msgs[0].msgid == MAVLINK_MSG_ID_PARAM_EXT_REQUEST_LIST);
+}
+
+TEST(accepted_knob_row_does_not_relist) {
+  Rig r;
+  link_and_complete_list(r, 1000);
+  std::string why;
+  REQUIRE(r.c.set(4, "30000", 2000, &why));
+  r.sent.clear();
+
+  mabur::paramval::Value v{mabur::cfgparam::Type::Int32};
+  v.i = 30000;
+  char wire[128];
+  mabur::paramval::encode_wire(v, wire);
+  Bytes a = ack_pkt("ENC_BITRATE_MAX", 6, wire, PARAM_ACK_ACCEPTED);
+  r.c.on_packet(a.data(), a.size(), 2050);
+
+  CHECK(r.c.state().rows[4].st == ParamRowState::Accepted);
+  CHECK(r.c.state().list == ParamListState::Complete);
+  CHECK(r.sent.empty());
+}
+
+TEST(ack_for_other_row_updates_value_only) {
+  Rig r;
+  link_and_complete_list(r, 1000);
+  std::string why;
+  REQUIRE(r.c.set(4, "30000", 2000, &why));
+
+  mabur::paramval::Value v{mabur::cfgparam::Type::Str};
+  v.s = "1280x720";
+  char wire[128];
+  mabur::paramval::encode_wire(v, wire);
+  Bytes a = ack_pkt("REC_SIZE", 11, wire, PARAM_ACK_ACCEPTED);
+  r.c.on_packet(a.data(), a.size(), 2050);
+
+  CHECK(r.c.state().rows[9].value.s == "1280x720");
+  CHECK(r.c.state().rows[9].st == ParamRowState::Idle);
+  CHECK(r.c.state().pending_row == 4);
+}
+
+TEST(link_down_mid_set_clears) {
+  Rig r;
+  link_and_complete_list(r, 1000);
+  std::string why;
+  REQUIRE(r.c.set(4, "30000", 2000, &why));
+
+  r.c.set_linked(false, 2100);
+
+  const ParamClientState def{};
+  CHECK(r.c.state().linked == def.linked);
+  CHECK(r.c.state().pending_row == def.pending_row);
+  for (size_t i = 0; i < mabur::cfgparam::kCount; ++i) {
+    CHECK(r.c.state().rows[i].have_value == def.rows[i].have_value);
+    CHECK(r.c.state().rows[i].st == def.rows[i].st);
+  }
 }
 
 MTEST_MAIN
