@@ -1152,6 +1152,18 @@ page's whole session -- the ring drops the oldest queued packets instead. A
 page that wants to speak MAVLink pushes/pulls bytes through these two calls
 itself.
 
+Alongside that raw seam the core also runs its own `ParamClient`
+(`gs/src/param_client.h`), listing the drone's config rows over the same
+tunnel: its outbound PARAM_EXT_* traffic goes in through
+`MavTunnel::push_outbound`, so it is tagged and slotted exactly like a
+local MAVLink peer's, and the tunnel's `DeliverFn` hands it every inbound
+packet alongside `mav_in_`. `WebGs::tick()` re-lists it (a fresh
+`PARAM_EXT_REQUEST_LIST`, every row cleared) whenever the session links,
+drops, or its `vtx_nonce` changes while still linked. `WebGs::params()` is
+the readout (`nullptr` in Spotter, which has no session to list over),
+`WebGs::param_set`/`param_refresh` drive a row edit or a fresh list round,
+and `webgs::params_json` renders the table for a page.
+
 ## Colour correction
 
 The drone flies the colortrans sensor file, which flattens the picture on

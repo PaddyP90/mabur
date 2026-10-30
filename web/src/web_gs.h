@@ -60,6 +60,7 @@
 #include "mav_tunnel.h"
 #include "msp_sink.h"
 #include "osd_screen.h"
+#include "param_client.h"
 #include "rcf_slot.h"
 #include "relay_stats.h"
 #include "rtt_estimator.h"
@@ -71,6 +72,8 @@
 namespace webgs {
 
 enum class Mode { Gs, Spotter };
+
+class WebGs;
 
 struct Au {
   std::vector<uint8_t> data;       // Annex-B, FrameHdr stripped
@@ -167,6 +170,11 @@ struct Stats {
 // "follow_state": str|null; "follows": int|null (spotter with a roster).
 std::string stats_json(const Stats& s);
 
+// The parameter table readout: the ParamClient's state, every row keyed by
+// its MAVLink id. Spotter mode has no ParamClient (no session to list
+// over): static columns, every value null, every row "idle".
+std::string params_json(const WebGs& g, uint64_t now_ms);
+
 // Validates the page's channel set/start/width with the shared rules: width
 // 20|40; the set 1-8 unique members in [1,177], at width 40 every member an
 // HT40 pair primary on one offset (mabur::channel_set_issue); start_ch a
@@ -260,6 +268,15 @@ class WebGs {
   // buffer; MAVLINK_MAX_PACKET_LEN (~280 B) always fits. Returns the bytes
   // copied, 0 if nothing was.
   size_t mav_take_inbound(uint8_t* out, size_t cap);
+  // ParamClient (gs/src/param_client.h) over the same tunnel: Gs only --
+  // nullptr in Spotter, which has no session to list parameters over.
+  const maburgs::ParamClient* params() const { return params_.get(); }
+  // Sets row's value to text; false with *why on a refusal (ParamClient::set's
+  // reasons). Spotter always refuses "not linked" (no ParamClient exists).
+  bool param_set(size_t row, const std::string& text, std::string* why);
+  // Starts a new list round without clearing rows already held. No-op in
+  // Spotter, or while unlinked.
+  void param_refresh();
   Mode mode() const { return mode_; }
   // Test seams.
   const maburgs::VrxController* vrx() const { return vrx_.get(); }  // nullptr in Spotter
@@ -297,6 +314,15 @@ class WebGs {
   // to drain one at a time via mav_take_inbound.
   std::unique_ptr<maburgs::MavTunnel> mav_;
   MavRing mav_in_;
+  // ParamClient (gs/src/param_client.h): Gs only, listing the drone's
+  // config rows over the same tunnel's outbound queue. Re-listed whenever
+  // the session links up, drops, or its vtx_nonce changes while still
+  // linked -- param_linked_/param_vtx_seen_ are the values set_linked was
+  // last called with, so tick() can tell the session apart from the last
+  // one it listed.
+  std::unique_ptr<maburgs::ParamClient> params_;
+  bool param_linked_ = false;
+  uint32_t param_vtx_seen_ = 0;
   // Software NACK (fec-nack): Gs only, and only with [link.nack] enable --
   // null otherwise, so a spotter has no tracker at all. The same poll block
   // as maburgs main.cpp, sent directly (never the slotter) through send_().
