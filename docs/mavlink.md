@@ -27,6 +27,7 @@ MAVLink system on the network. There is no operator screen for it yet.
 | drone: MAV thread, tag and counter check | `drone/src/main.cpp` (`mbr-mav`), `RcAgent::check_mav` |
 | GS: the tunnel (shared GS core) | `gs/src/mav_tunnel.h` |
 | GS: the UDP endpoint | `gs/src/mav_endpoint.h` |
+| GS: the ground client (list/read/link state) | `gs/src/param_client.h` |
 
 ## The wire: `T_MAV`
 
@@ -330,6 +331,38 @@ Boot log: `maburgs: mavlink endpoint udp <bind>:<port>` or
   most 64 datagrams per tick, so a flooding client cannot hold the loop.
 - Sideport: `link.mav{tx, rx, reject, peer}` (`docs/observability.md`);
   maburtop shows `mav <tx>/<rx>` on its top bar.
+
+## Ground client
+
+`ParamClient` (`gs/src/param_client.h`) is the ground-side PARAM_EXT_*
+protocol client: list, read and link/heartbeat state, driven only by a
+send callback and `on_packet`/`tick(now)` -- pure data handling, no socket
+or clock of its own. Not wired into `maburgs` or the web GS yet; either
+could feed it by fanning the tunnel's `deliver` callback out to it
+alongside `mav_endpoint`'s UDP bridge.
+
+- **Link.** `set_linked(true)` starts a fresh list: every row is cleared,
+  `list` becomes `Pending`, and one `PARAM_EXT_REQUEST_LIST` goes to
+  system 1 / component 191. `set_linked(false)` drops every row back to
+  the unlinked defaults. Independent of this is the drone heartbeat:
+  `alive()` is true while a `HEARTBEAT` from 1/191 arrived within the last
+  3 s; a heartbeat that arrives while already alive only refreshes the
+  timestamp.
+- **List.** While `list` is `Pending`, each row still missing a value is
+  re-read individually by `PARAM_EXT_REQUEST_READ` (`param_index` set, the
+  id left blank) once every 2 s, for up to 3 rounds; `list` reaches
+  `Complete` as soon as every row has a value, or `Partial` once the
+  rounds run out with rows still missing. A `PARAM_EXT_VALUE` whose
+  `param_count` disagrees with the table's own row count flags
+  `table_mismatch`, but the value is still stored when its id is known; an
+  id the table doesn't have is dropped and counted. `refresh()` starts the
+  same round again without clearing the rows already held, for a UI's
+  manual re-list.
+- **State.** `state()` exposes `linked`, `alive_ms`, `table_mismatch`,
+  `list`, and one row per table parameter holding `have_value`/`value`
+  from the list/read traffic above; `seq()` bumps once per call that
+  changed anything in it, so a UI can poll it cheaply instead of diffing
+  the struct. `set()` is declared but not implemented at HEAD.
 
 ### Trust boundary
 

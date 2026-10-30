@@ -13,6 +13,17 @@
 // other TUs only through ordinary function calls, never by including this
 // header a second time with different pack/parse call sites.
 //
+// The GS has two such TUs. gs/src/mav_tunnel.cpp parses on its own
+// channels (kChanGsRx, kChanGsLocal below) because it needs to split an
+// unbounded byte stream one byte at a time, carrying parse state across
+// calls. gs/src/param_client.cpp packs with the plain `_pack` helpers (not
+// `_pack_chan`, so it never touches kChanGsRx/kChanGsLocal either) and
+// parses with the stateless mavlink_frame_char_buffer over its own
+// mavlink_message_t/mavlink_status_t, fresh every call -- it is always
+// handed one whole packet already split by the tunnel, so it never needs
+// channel state to carry a parse across calls. Neither shares the other's
+// channel state.
+//
 // The vendored headers are MIT-licensed generated output (see
 // third_party/mavlink/LICENSE).
 
