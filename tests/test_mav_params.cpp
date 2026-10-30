@@ -1,11 +1,15 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <sstream>
 #include <string>
+#include <vector>
 
 #include "mtest.h"
 #include "mav_params.h"
 #include "config.h"
+#include "config_write.h"
+#include "scratch.h"
 
 using namespace mabur;
 using namespace mabur::mavparam;
@@ -25,6 +29,23 @@ Value rd(const Config& c, size_t idx) {
   Value v;
   REQUIRE(read(c, idx, &v));
   return v;
+}
+
+std::vector<std::string> lines_of(const std::string& t) {
+  std::vector<std::string> out;
+  std::istringstream in(t);
+  for (std::string l; std::getline(in, l);) out.push_back(l);
+  return out;
+}
+
+// Line-by-line diff count between two texts of the same length; patch_row
+// never changes the line count (every patch rewrites a value in place).
+int changed_lines(const std::string& a, const std::string& b) {
+  const auto la = lines_of(a), lb = lines_of(b);
+  REQUIRE(la.size() == lb.size());
+  int n = 0;
+  for (size_t i = 0; i < la.size(); ++i) n += la[i] != lb[i];
+  return n;
 }
 
 }  // namespace
@@ -157,6 +178,112 @@ TEST(encode_wire_round_trips) {
     Value out;
     CHECK(decode_wire(9, 11, w, &out) && out.s == "1920x1080");
   }
+}
+
+// The bundle's own VENC_MODE (60@1920x1080) and record (enable, explicit
+// 1920x1080) feed every patch_row case below; `cur` is the loaded Config
+// patch_row reads record.enable/width/height from -- never the text being
+// patched, which may have been edited out from under it.
+
+TEST(patch_row_venc_mode_rewrites_both_venc_lines) {
+  std::string text;
+  REQUIRE(read_text_file(bundle_path(), &text));
+  const Config cur = load_config(bundle_path());
+  std::string patched = text, followed, err;
+  // Same aspect as the bundle's record.size (1920x1080): only venc.fps
+  // actually changes text; venc.size is still patched, to the same value.
+  REQUIRE(patch_row(&patched, cfgparam::kVencModeRow, Value{Type::Str, false, 0, 0, "90@1920x1080"},
+                    cur, &followed, &err));
+  CHECK(followed.empty());
+  CHECK(changed_lines(text, patched) == 1);
+  std::string want = text;
+  REQUIRE(patch_toml_key(&want, "venc", "fps", "90"));
+  CHECK(patched == want);
+}
+
+TEST(patch_row_venc_mode_carries_record_size_across_aspect) {
+  std::string text;
+  REQUIRE(read_text_file(bundle_path(), &text));
+  const Config cur = load_config(bundle_path());
+  std::string patched = text, followed, err;
+  REQUIRE(patch_row(&patched, cfgparam::kVencModeRow,
+                    Value{Type::Str, false, 0, 0, "120@1728x816"}, cur, &followed, &err));
+  CHECK(followed == "record.size");
+  CHECK(changed_lines(text, patched) == 3);  // venc.fps, venc.size, record.size
+  ScratchFile f{"test_mav_params", ".toml"};
+  REQUIRE(write_file_fsync(f.path, patched));
+  const Config cand = load_config(f.path);
+  CHECK(cand.venc.core.fps == 120 && cand.venc.core.width == 1728 && cand.venc.core.height == 816);
+  CHECK(cand.record.width == 1728 && cand.record.height == 816);
+}
+
+TEST(patch_row_leaves_record_alone_when_recorder_off) {
+  std::string text;
+  REQUIRE(read_text_file(bundle_path(), &text));
+  Config cur = load_config(bundle_path());
+  cur.record.enable = false;  // the Config, not the text
+  std::string patched = text, followed, err;
+  REQUIRE(patch_row(&patched, cfgparam::kVencModeRow,
+                    Value{Type::Str, false, 0, 0, "120@1728x816"}, cur, &followed, &err));
+  CHECK(followed.empty());
+  CHECK(changed_lines(text, patched) == 2);  // venc.fps, venc.size only
+}
+
+TEST(patch_row_leaves_absent_record_size_alone) {
+  std::string text;
+  REQUIRE(read_text_file(bundle_path(), &text));
+  const std::string rec_size_line =
+      "size         = \"1920x1080\"        # recording resolution, same aspect ratio as "
+      "venc.size. It may differ\n";
+  const size_t at = text.find(rec_size_line);
+  REQUIRE(at != std::string::npos);
+  text.erase(at, rec_size_line.size());
+  REQUIRE(text.find("size         = \"1920x1080\"") == std::string::npos);
+
+  Config cur = load_config(bundle_path());
+  cur.record.width = 0;   // 0x0: "same as venc.size", the Config this absent line loads as
+  cur.record.height = 0;
+  std::string patched = text, followed, err;
+  REQUIRE(patch_row(&patched, cfgparam::kVencModeRow,
+                    Value{Type::Str, false, 0, 0, "120@1728x816"}, cur, &followed, &err));
+  CHECK(followed.empty());
+  // No `size` line was added back under [record]: a `width > 0` guard that
+  // regressed to "always follow" would try to patch a line that isn't
+  // there and patch_row would have failed above instead.
+  const size_t rec = patched.find("[record]");
+  REQUIRE(rec != std::string::npos);
+  const size_t rec_end = patched.find("\n[", rec);
+  const std::string rec_section =
+      rec_end == std::string::npos ? patched.substr(rec) : patched.substr(rec, rec_end - rec);
+  CHECK(rec_section.find("1728x816") == std::string::npos);
+}
+
+TEST(patch_row_reports_missing_key) {
+  std::string text;
+  REQUIRE(read_text_file(bundle_path(), &text));
+  const std::string venc_size_line = "size       = \"1920x1080\"\n";
+  const size_t at = text.find(venc_size_line);
+  REQUIRE(at != std::string::npos);
+  text.insert(at, "# ");
+  const Config cur = load_config(bundle_path());  // the unedited file
+  const std::string before = text;
+  std::string patched = text, followed, err;
+  CHECK(!patch_row(&patched, cfgparam::kVencModeRow,
+                   Value{Type::Str, false, 0, 0, "90@1280x720"}, cur, &followed, &err));
+  CHECK(err == "venc.size: key not found");
+  CHECK(patched == before);
+}
+
+TEST(patch_row_single_key_rows_unchanged) {
+  std::string text;
+  REQUIRE(read_text_file(bundle_path(), &text));
+  const Config cur = load_config(bundle_path());
+  std::string patched = text, followed, err;
+  REQUIRE(patch_row(&patched, 4, Value{Type::Int32, false, 30000}, cur, &followed, &err));
+  CHECK(followed.empty());
+  std::string want = text;
+  REQUIRE(patch_toml_key(&want, "encoder", "bitrate_max_kbps", "30000"));
+  CHECK(patched == want);
 }
 
 MTEST_MAIN

@@ -149,6 +149,12 @@ last `Rcf.rec` it sent) was "on", the next RCF after the rebuild
 re-issues it (`RcAgent::note_pipeline_rebuilt`) and recording resumes,
 into a new file.
 
+A `VENC_MODE` set that changes the sensor mode's aspect, while the
+recorder is on with an explicit `record.size`, rewrites `record.size` to
+the new venc size in the same candidate (`mavparam::patch_row`,
+`drone/src/mav_params.cpp`), so the aspect-ratio rule above is never
+broken by the fps/size set alone; `record.fps` never follows.
+
 ## Power-loss contract
 
 After every fragment cut, the writer calls `DvrMux::sync()` (`fflush` +

@@ -202,18 +202,18 @@ mavlink_param_ext_ack_t ack_of(const mavlink_message_t& m) {
   return a;
 }
 
-// A fake ConfigApplier port: submit() records the row and rendered value and
+// A fake ConfigApplier port: submit() records the row and decoded value and
 // refuses with refuse_with when set; an accepted submit leaves it busy until
 // take_result() hands the result over, as the real applier is; complete()
 // makes the next take_result()
 // return {ok, reason} and, for ok, also does the publish the real applier
-// would -- read, patch_toml_key the submitted row, publish_config under
-// lock_config_writes() -- so file-content assertions made after a set
-// resolves still see the same bytes a real apply would have produced.
+// would -- read, mavparam::patch_row the submitted row, publish_config
+// under lock_config_writes() -- so file-content assertions made after a
+// set resolves still see the same bytes a real apply would have produced.
 struct FakeApply {
   struct Submit {
     size_t row;
-    std::string rendered;
+    mavparam::Value value;
   };
   std::string path;
   std::vector<Submit> submits;
@@ -222,8 +222,8 @@ struct FakeApply {
   bool busy = false;
   ConfigApplyResult result{};
 
-  bool submit(size_t row, const std::string& rendered, std::string* why) {
-    submits.push_back({row, rendered});
+  bool submit(size_t row, const mavparam::Value& value, std::string* why) {
+    submits.push_back({row, value});
     if (!refuse_with.empty()) {
       if (why) *why = refuse_with;
       return false;
@@ -247,25 +247,14 @@ struct FakeApply {
       auto lock = lock_config_writes();
       std::string text;
       REQUIRE(read_text_file(path, &text));
-      const cfgparam::Row& row = cfgparam::kTable[s.row];
-      if (s.row == cfgparam::kVencModeRow) {
-        // VENC_MODE's one Str value spells both venc.fps and venc.size;
-        // s.rendered is the TOML-quoted "<fps>@<WxH>" text, same as the
-        // real applier sees.
-        std::string raw = s.rendered;
-        if (raw.size() >= 2 && raw.front() == '"' && raw.back() == '"') {
-          raw = raw.substr(1, raw.size() - 2);
-        }
-        int fps = 0, w = 0, h = 0;
-        REQUIRE(cfgparam::parse_mode_text(raw, &fps, &w, &h));
-        REQUIRE(patch_toml_key(&text, "venc", "fps", std::to_string(fps)));
-        REQUIRE(patch_toml_key(&text, "venc", "size",
-                               "\"" + std::to_string(w) + "x" + std::to_string(h) + "\""));
-      } else {
-        REQUIRE(patch_toml_key(&text, row.section, row.key, s.rendered));
-      }
-      std::string err;
-      REQUIRE(publish_config(path, text, "pre-param", &err) == PublishResult::Ok);
+      // mavparam::patch_row is the same function the real applier calls
+      // against its own `live_`; here that's just what the file loads as,
+      // since this fake never diverges from it.
+      const Config current = load_config(path);
+      std::string followed, err;
+      REQUIRE(mavparam::patch_row(&text, s.row, s.value, current, &followed, &err));
+      std::string publish_err;
+      REQUIRE(publish_config(path, text, "pre-param", &publish_err) == PublishResult::Ok);
     }
     result = ConfigApplyResult{ok, reason, apply_path_for(s.row), 5};
     has_result = true;
@@ -273,8 +262,8 @@ struct FakeApply {
 
   ApplyPort port() {
     return ApplyPort{
-        [this](size_t row, const std::string& rendered, std::string* why) {
-          return submit(row, rendered, why);
+        [this](size_t row, const mavparam::Value& value, std::string* why) {
+          return submit(row, value, why);
         },
         [this](ConfigApplyResult* out) { return take_result(out); },
         [this] { return busy; },
@@ -902,7 +891,7 @@ TEST(set_acks_in_progress_then_accepted_on_completion) {
   auto c = make(b.path());
   auto r = do_set(c, set_int("REC_FPS", 30));
   CHECK(r.ack.param_result == PARAM_ACK_IN_PROGRESS && wire_i32(r.ack.param_value) == 60);
-  CHECK(fake.submits.size() == 1 && fake.submits[0].row == 8 && fake.submits[0].rendered == "30");
+  CHECK(fake.submits.size() == 1 && fake.submits[0].row == 8 && fake.submits[0].value.i == 30);
   // handle_set's own candidate check writes and removes <path>.new; nothing
   // is left behind for a submit the applier is about to take over.
   CHECK(!exists(b.path() + ".new"));
@@ -1035,6 +1024,63 @@ TEST(repeat_of_the_pending_set_is_acked_in_progress_again) {
   auto msgs = drain(c);
   REQUIRE(msgs.size() == 1);
   CHECK(ack_of(msgs[0]).param_result == PARAM_ACK_ACCEPTED);
+}
+
+// The bundle fixture is 60@1920x1080 with the recorder on at an explicit
+// 1920x1080 / 60 fps, so a VENC_MODE set that crosses the aspect ratio
+// must carry record.size along in the same candidate (mavparam::patch_row,
+// drone/src/mav_params.cpp).
+
+TEST(venc_mode_set_crossing_aspect_patches_three_lines_in_one_set) {
+  ScratchBundle b;
+  auto c = make(b.path());
+  auto r = do_set(c, set_str("VENC_MODE", "120@1728x816"));
+  CHECK(r.ack.param_result == PARAM_ACK_IN_PROGRESS);   // the loader accepted the candidate
+  REQUIRE(fake.submits.size() == 1);
+  CHECK(fake.submits[0].row == cfgparam::kVencModeRow);
+  CHECK(fake.submits[0].value.s == "120@1728x816");
+  fake.complete(true, "");
+  c.poll_results();
+  auto msgs = drain(c);
+  REQUIRE(msgs.size() == 1);
+  const auto ack = ack_of(msgs[0]);
+  CHECK(ack.param_result == PARAM_ACK_ACCEPTED);
+  CHECK(std::string(ack.param_value) == "120@1728x816");
+  const std::string text = slurp(b.path());
+  CHECK(text.find("size         = \"1728x816\"") != std::string::npos);   // [record]'s own line
+}
+
+TEST(venc_mode_fps_only_change_still_patches_both_lines) {
+  ScratchBundle b;
+  auto c = make(b.path());
+  // Same aspect as the fixture's 1920x1080 record.size: no follow, but
+  // still a real two-line change, never the unchanged shortcut.
+  auto r = do_set(c, set_str("VENC_MODE", "90@1920x1080"));
+  CHECK(r.ack.param_result == PARAM_ACK_IN_PROGRESS);
+  REQUIRE(fake.submits.size() == 1);
+  CHECK(fake.submits[0].value.s == "90@1920x1080");
+}
+
+TEST(venc_mode_lower_fps_refused_by_record_fps_rule) {
+  ScratchBundle b;
+  const std::string before = slurp(b.path());
+  auto c = make(b.path());
+  auto r = do_set(c, set_str("VENC_MODE", "30@1920x1080"));
+  CHECK(r.ack.param_result == PARAM_ACK_FAILED);
+  REQUIRE(r.rest.size() == 1);
+  CHECK(statustext_of(r.rest[0]).rfind("record.fps", 0) == 0);
+  CHECK(slurp(b.path()) == before);
+  CHECK(fake.submits.empty());
+}
+
+TEST(venc_mode_equal_value_is_unchanged_shortcut) {
+  ScratchBundle b;
+  const std::string before = slurp(b.path());
+  auto c = make(b.path());
+  auto r = do_set(c, set_str("VENC_MODE", "60@1920x1080"));
+  CHECK(r.ack.param_result == PARAM_ACK_ACCEPTED);
+  CHECK(fake.submits.empty());
+  CHECK(slurp(b.path()) == before);
 }
 
 MTEST_MAIN

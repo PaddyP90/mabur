@@ -131,7 +131,7 @@ agent and TX threads.
   - a set to the value the file already holds writes nothing and answers
     `ACCEPTED` immediately, so a ground end may re-send a set whose ack
     it lost;
-  - otherwise the file's line for the key is patched in place (spacing
+  - otherwise the line(s) the row owns are patched in place (spacing
     and trailing comment kept byte for byte) and the candidate is
     written next to the file and verified with `mabur::load_config`
     before anything is submitted for applying. A candidate the loader
@@ -286,6 +286,10 @@ nothing; send the other key first. The rules the loader enforces:
 - `REC_SIZE` above 1920x1080 needs `VENC_MODE`'s fps ≤ 30 first.
 - `LOWPWR_ENABLE = 1` needs `MSP_ENABLE = 1` first; `MSP_ENABLE = 0` needs
   `LOWPWR_ENABLE = 0` first.
+- A `VENC_MODE` set that changes the sensor mode's aspect, while the
+  recorder is on with an explicit `record.size`, also rewrites
+  `record.size` to the new venc size in the same candidate; `record.fps`
+  never follows.
 
 Two loader rules involve keys the table does not expose:
 

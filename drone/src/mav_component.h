@@ -2,14 +2,15 @@
 // The drone's MAVLink component: answers MAVLink extended-parameter traffic
 // (PARAM_EXT_REQUEST_LIST / _REQUEST_READ / _SET) for the config keys in
 // cfgparam::kTable (common/include/mabur/config_params.h), and rewrites the
-// config file maburd loaded one key at a time.
+// config file one row at a time.
 //
 // The failure mode this file exists to prevent is the one config_write.h
 // guards against: a config maburd cannot load is a drone stuck in a 2 s
 // respawn loop with no console. A set therefore never hands on anything the
 // real loader would refuse. Under lock_config_writes() it reads the file,
-// patches the one key's line (patch_toml_key, so every comment survives)
-// and loads the candidate with mabur::load_config; cross-key rules
+// patches the row's own line(s) (mavparam::patch_row, built on
+// patch_toml_key, so every comment survives) and loads the candidate with
+// mabur::load_config; cross-key rules
 // (record.fps <= venc.fps, venc.size against the fps mode, low_power.enable
 // needs msp.enable) are the loader's, not this file's, so a set that breaks
 // one is answered PARAM_ACK_FAILED with the loader's message in a
@@ -65,7 +66,7 @@ namespace mabur {
 // submit/take_result/busy bind directly; a test supplies a fake so it can
 // drive the timing of a completion without a second thread.
 struct ApplyPort {
-  std::function<bool(size_t row, const std::string& rendered, std::string* why)> submit;
+  std::function<bool(size_t row, const mavparam::Value& want, std::string* why)> submit;
   std::function<bool(ConfigApplyResult*)> take_result;
   // True from an accepted submit until take_result hands its result over.
   // The applier holds lock_config_writes() for the whole apply, so a set

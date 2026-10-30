@@ -6,8 +6,8 @@
 // ConfigApplier runs each set on its own thread (a rebuild stops the encoder for about half a
 // second, too long for the MAVLink loop that submits it) in the order
 //
-//   re-read the file -> patch the one key -> load the result with the boot
-//   loader (the candidate) -> apply the candidate to the process -> publish
+//   re-read the file -> patch the row's line(s) -> load the result with the
+//   boot loader (the candidate) -> apply the candidate to the process -> publish
 //
 // holding lock_config_writes() from the re-read through the publish, so a
 // calibration publish can neither slip between them nor be overwritten by
@@ -41,6 +41,7 @@
 #include <thread>
 
 #include "config.h"
+#include "mav_params.h"
 
 namespace mabur {
 
@@ -90,7 +91,7 @@ class ConfigApplier {
   // running ("calibration in progress") or the row does not exist. One
   // apply is in flight from an accepted submit until take_result hands its
   // result over, so a result is never overwritten by the next submit.
-  bool submit(size_t row, const std::string& rendered_value, std::string* why);
+  bool submit(size_t row, const mavparam::Value& want, std::string* why);
   // Non-blocking: the finished apply's result, once. The MAV loop polls it.
   bool take_result(ConfigApplyResult* out);
   bool busy() const;
@@ -110,12 +111,16 @@ class ConfigApplier {
  private:
   struct Job {
     size_t row = 0;
-    std::string value;
+    mavparam::Value value{cfgparam::Type::Bool};
   };
 
   void run();
   ConfigApplyResult apply(const Job& job);
-  bool apply_locked(const Job& job, const std::string& field, std::string* reason);
+  // `followed`, non-null, is left empty unless mavparam::patch_row set it
+  // ("record.size": VENC_MODE crossed an aspect change with the recorder
+  // pinned to an explicit size) -- apply() appends it to the log line.
+  bool apply_locked(const Job& job, const std::string& field, std::string* reason,
+                    std::string* followed);
   bool dispatch(size_t row, const std::string& field, const Config& cand, std::string* reason);
   bool rebuild(const std::string& field, const Config& cand, std::string* reason);
   void log(const std::string& line) const;

@@ -42,28 +42,6 @@ bool is(const cfgparam::Row& row, const char* section, const char* key) {
   return std::strcmp(row.section, section) == 0 && std::strcmp(row.key, key) == 0;
 }
 
-// Every row but VENC_MODE is one key, one line. VENC_MODE's Str value
-// spells both venc.fps and venc.size, so it patches both lines together.
-// `rendered` is the TOML-quoted "<fps>@<WxH>" text (render_toml's own
-// quoting of the Str value, the same text MavComponent::handle_set
-// already proved loads); stripping the quotes recovers the plain text
-// cfgparam::parse_mode_text splits.
-bool patch_row_value(std::string* patched, size_t row_idx, const cfgparam::Row& row,
-                      const std::string& rendered) {
-  if (row_idx != cfgparam::kVencModeRow) {
-    return patch_toml_key(patched, row.section, row.key, rendered);
-  }
-  std::string raw = rendered;
-  if (raw.size() >= 2 && raw.front() == '"' && raw.back() == '"') {
-    raw = raw.substr(1, raw.size() - 2);
-  }
-  int fps = 0, w = 0, h = 0;
-  return cfgparam::parse_mode_text(raw, &fps, &w, &h) &&
-         patch_toml_key(patched, "venc", "fps", std::to_string(fps)) &&
-         patch_toml_key(patched, "venc", "size",
-                         "\"" + std::to_string(w) + "x" + std::to_string(h) + "\"");
-}
-
 }  // namespace
 
 ConfigApplyPath apply_path_for(size_t row) {
@@ -93,7 +71,7 @@ void ConfigApplier::log(const std::string& line) const {
   if (log_) log_(line);
 }
 
-bool ConfigApplier::submit(size_t row, const std::string& rendered_value, std::string* why) {
+bool ConfigApplier::submit(size_t row, const mavparam::Value& want, std::string* why) {
   auto refuse = [&](const char* text) {
     if (why) *why = text;
     return false;
@@ -113,7 +91,7 @@ bool ConfigApplier::submit(size_t row, const std::string& rendered_value, std::s
       return refuse("apply thread failed to start");
     }
   }
-  job_ = Job{row, rendered_value};
+  job_ = Job{row, want};
   has_job_ = true;
   busy_.store(true);
   cv_.notify_one();
@@ -166,11 +144,12 @@ ConfigApplyResult ConfigApplier::apply(const Job& job) {
   const cfgparam::Row& row = cfgparam::kTable[job.row];
   const std::string field = std::string(row.section) + "." + row.key;
   ConfigApplyResult r{false, "", apply_path_for(job.row), 0};
+  std::string followed;
   try {
     // Held from the re-read through the publish: a calibration publish
     // between them would be overwritten by this one's stale text.
     auto lock = lock_config_writes();
-    r.ok = apply_locked(job, field, &r.reason);
+    r.ok = apply_locked(job, field, &r.reason, &followed);
   } catch (const std::exception& e) {
     r.ok = false;
     r.reason = std::string("apply threw: ") + e.what();
@@ -180,12 +159,13 @@ ConfigApplyResult ConfigApplier::apply(const Job& job) {
                                    .count());
   ++(r.ok ? ok_ : failed_);
   log("apply " + std::string(row.id) + " " + path_name(r.path) + " " +
-      (r.ok ? std::string("ok") : "failed: " + r.reason) + " " + std::to_string(r.ms) + " ms");
+      (r.ok ? std::string("ok") : "failed: " + r.reason) +
+      (followed.empty() ? "" : " +" + followed) + " " + std::to_string(r.ms) + " ms");
   return r;
 }
 
-bool ConfigApplier::apply_locked(const Job& job, const std::string& field,
-                                 std::string* reason) {
+bool ConfigApplier::apply_locked(const Job& job, const std::string& field, std::string* reason,
+                                 std::string* followed) {
   const cfgparam::Row& row = cfgparam::kTable[job.row];
   std::string text;
   if (!read_text_file(cfg_path_, &text)) {
@@ -204,10 +184,7 @@ bool ConfigApplier::apply_locked(const Job& job, const std::string& field,
     }
   }
   std::string patched = text;
-  if (!patch_row_value(&patched, job.row, row, job.value)) {
-    *reason = field + ": key not found";
-    return false;
-  }
+  if (!mavparam::patch_row(&patched, job.row, job.value, live_, followed, reason)) return false;
   // The candidate is the patched text as the boot loader reads it: the
   // process is never handed a config maburd would refuse to start from.
   const std::string tmp = cfg_path_ + ".new";

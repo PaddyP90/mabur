@@ -72,22 +72,6 @@ const char* apply_path_name(ConfigApplyPath p) {
   return "rebuild";
 }
 
-// Every row but VENC_MODE is one key, one line. VENC_MODE's Str value
-// spells both venc.fps and venc.size, so it patches both lines together;
-// `want.s` already passed cfgparam::parse_mode_text in decode_wire, so
-// the split here cannot fail.
-bool patch_row_value(std::string* patched, size_t idx, const cfgparam::Row& row, const Value& want,
-                      const std::string& rendered) {
-  if (idx != cfgparam::kVencModeRow) {
-    return patch_toml_key(patched, row.section, row.key, rendered);
-  }
-  int fps = 0, w = 0, h = 0;
-  return cfgparam::parse_mode_text(want.s, &fps, &w, &h) &&
-         patch_toml_key(patched, "venc", "fps", std::to_string(fps)) &&
-         patch_toml_key(patched, "venc", "size",
-                         "\"" + std::to_string(w) + "x" + std::to_string(h) + "\"");
-}
-
 }  // namespace
 
 MavComponent::MavComponent(std::string cfg_path, ApplyPort port,
@@ -324,15 +308,19 @@ void MavComponent::handle_set(const char id16[16], const char value[128], uint8_
   // returned.
   auto lock = lock_config_writes();
 
-  Value cur{row.type};
-  std::string err;
-  if (!current_value(cfg_path_, idx, &cur, &err)) {
+  Config cur_cfg;
+  try {
+    cur_cfg = load_config(cfg_path_);
+  } catch (const std::exception& e) {
+    const std::string err = loader_reason(e.what());
     ack(nullptr, row_type, PARAM_ACK_FAILED);
     status(err);
     ++stats_.sets_refused;
     log("set " + shown + " refused: config does not load: " + err);
     return;
   }
+  Value cur{row.type};
+  mavparam::read(cur_cfg, idx, &cur);
   auto refuse = [&](uint8_t result, const std::string& why, bool tell) {
     ack(&cur, row_type, result);
     if (tell) status(why);
@@ -355,10 +343,12 @@ void MavComponent::handle_set(const char id16[16], const char value[128], uint8_
     return;
   }
   std::string patched = text;
-  if (!patch_row_value(&patched, idx, row, want, rendered)) {
-    refuse(PARAM_ACK_FAILED, field + ": key not found", true);
+  std::string followed, patch_err;
+  if (!mavparam::patch_row(&patched, idx, want, cur_cfg, &followed, &patch_err)) {
+    refuse(PARAM_ACK_FAILED, patch_err, true);
     return;
   }
+  const std::string followed_suffix = followed.empty() ? "" : " +" + followed;
   // Unchanged when the rendered line is already the file's, or when the
   // decoded value equals what the file loads as (a REAL32 line spelled
   // differently, "0.650"). Str rows are left to the text comparison: their
@@ -369,7 +359,7 @@ void MavComponent::handle_set(const char id16[16], const char value[128], uint8_
   if (patched == text || same_value) {
     ack(&cur, row_type, PARAM_ACK_ACCEPTED);
     ++stats_.sets_ok;
-    log("set " + shown + " = " + rendered + " (" + field + ", unchanged)");
+    log("set " + shown + " = " + rendered + " (" + field + followed_suffix + ", unchanged)");
     return;
   }
   // The candidate as the boot loader would see it, before handing this row
@@ -397,7 +387,7 @@ void MavComponent::handle_set(const char id16[16], const char value[128], uint8_
   std::remove(tmp.c_str());
 
   std::string why;
-  if (!port_.submit(idx, rendered, &why)) {
+  if (!port_.submit(idx, want, &why)) {
     refuse(PARAM_ACK_FAILED, why, true);
     return;
   }
@@ -412,7 +402,7 @@ void MavComponent::handle_set(const char id16[16], const char value[128], uint8_
   has_pending_ = true;
   ack(&cur, row_type, PARAM_ACK_IN_PROGRESS);
   ++stats_.sets_in_progress;
-  log("set " + shown + " = " + rendered + " (" + field + ") in progress");
+  log("set " + shown + " = " + rendered + " (" + field + followed_suffix + ") in progress");
 }
 
 void MavComponent::poll_results() {

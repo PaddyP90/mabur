@@ -1990,7 +1990,7 @@ int run_real_mode(const Config& cfg, uint8_t start_ch, const std::string& cfg_pa
   std::thread mav_thread([&]() {
     name_thread("mbr-mav");
     ApplyPort port;
-    port.submit = [&applier](size_t row, const std::string& rendered, std::string* why) {
+    port.submit = [&applier](size_t row, const mavparam::Value& want, std::string* why) {
 #ifndef MABUR_HAVE_VENC
       // No encoder in this build: every rung of the rebuild ladder would
       // fail and end in the exit rung, so a rebuild row is refused here.
@@ -1999,7 +1999,7 @@ int run_real_mode(const Config& cfg, uint8_t start_ch, const std::string& cfg_pa
         return false;
       }
 #endif
-      return applier.submit(row, rendered, why);
+      return applier.submit(row, want, why);
     };
     port.take_result = [&applier](ConfigApplyResult* out) { return applier.take_result(out); };
     port.busy = [&applier] { return applier.busy(); };

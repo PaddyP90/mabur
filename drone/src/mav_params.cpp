@@ -2,6 +2,8 @@
 
 #include <cmath>
 
+#include "config_write.h"
+
 namespace mabur::mavparam {
 
 namespace {
@@ -116,6 +118,67 @@ bool render_toml(const Value& v, std::string* out) {
     }
   }
   return false;
+}
+
+bool patch_row(std::string* text, size_t idx, const Value& v, const Config& current,
+               std::string* followed, std::string* err) {
+  if (followed) followed->clear();
+  if (idx >= cfgparam::kCount) {
+    if (err) *err = "no such parameter";
+    return false;
+  }
+  const cfgparam::Row& row = cfgparam::kTable[idx];
+
+  if (idx != cfgparam::kVencModeRow) {
+    std::string rendered;
+    if (!render_toml(v, &rendered)) {
+      if (err) *err = "value unsupported";
+      return false;
+    }
+    std::string candidate = *text;
+    if (!patch_toml_key(&candidate, row.section, row.key, rendered)) {
+      if (err) *err = std::string(row.section) + "." + row.key + ": key not found";
+      return false;
+    }
+    *text = std::move(candidate);
+    return true;
+  }
+
+  // VENC_MODE's Str value "<fps>@<WxH>" spells both venc.fps and venc.size.
+  // A malformed shape can't be rendered into either line, so it is "value
+  // unsupported", the same answer render_toml's own refusal gives above --
+  // never a report of a missing key.
+  int fps = 0, w = 0, h = 0;
+  if (v.type != Type::Str || !cfgparam::parse_mode_text(v.s, &fps, &w, &h)) {
+    if (err) *err = "value unsupported";
+    return false;
+  }
+  std::string candidate = *text;
+  if (!patch_toml_key(&candidate, "venc", "fps", std::to_string(fps))) {
+    if (err) *err = "venc.fps: key not found";
+    return false;
+  }
+  const std::string size_text = "\"" + std::to_string(w) + "x" + std::to_string(h) + "\"";
+  if (!patch_toml_key(&candidate, "venc", "size", size_text)) {
+    if (err) *err = "venc.size: key not found";
+    return false;
+  }
+  // The recorder follows this aspect change only when it is on and pinned
+  // to an explicit size (width > 0; 0x0 means "same as venc.size" and
+  // already tracks it with no line to patch). Cross-multiplied so this
+  // never depends on float rounding; record.fps never follows, so a
+  // VENC_MODE set alone can't feed it a frame rate the loader would refuse.
+  if (current.record.enable && current.record.width > 0 &&
+      static_cast<int64_t>(w) * current.record.height !=
+          static_cast<int64_t>(current.record.width) * h) {
+    if (!patch_toml_key(&candidate, "record", "size", size_text)) {
+      if (err) *err = "record.size: key not found";
+      return false;
+    }
+    if (followed) *followed = "record.size";
+  }
+  *text = std::move(candidate);
+  return true;
 }
 
 }  // namespace mabur::mavparam
