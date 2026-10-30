@@ -57,6 +57,15 @@ int32_t star6e_runtime_sensor_offset(void);
 /** Tear the pipeline and the MI libraries down. Idempotent per field. */
 void star6e_runtime_teardown(Star6eRunnerContext *ctx);
 
+/** Stop and rebuild the pipeline with a new cfg while MI_SYS stays
+ *  initialized (no MI_SYS_Exit/MI_SYS_Init, no module re-open) — see
+ *  docs/findings/2026-09-07-boot-time.md for the per-module open cost this
+ *  avoids. Requires ctx->system_initialized (i.e. star6e_runtime_init has
+ *  already run and star6e_runtime_teardown has not). Returns 0 on success;
+ *  on failure ctx->pipeline_started is left 0 and the caller must still run
+ *  star6e_runtime_teardown(). */
+int star6e_runtime_pipeline_restart(Star6eRunnerContext *ctx, const VencCfg *cfg);
+
 #ifdef __cplusplus
 }
 #endif

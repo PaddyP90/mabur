@@ -621,3 +621,38 @@ void star6e_runtime_teardown(Star6eRunnerContext *ctx)
 	}
 	star6e_mi_deinit();
 }
+
+/* Stop and rebuild the pipeline under the same MI_SYS_Init session: the
+ * module clients (VIF/VPE/ISP/VENC) stay connected across the stop/start
+ * pair instead of being dlclose'd and re-opened, which is what keeps a
+ * resolution/fps change to ~0.5 s instead of paying the per-module open
+ * cost again (docs/findings/2026-09-07-boot-time.md). Mirrors
+ * star6e_runtime_teardown's stop half and star6e_runtime_init's start half,
+ * minus the MI_SYS_Init/MI_SYS_Exit and mi_init/mi_deinit bracketing either
+ * one does. */
+int star6e_runtime_pipeline_restart(Star6eRunnerContext *ctx, const VencCfg *cfg)
+{
+	int ret;
+
+	if (!ctx || !cfg || !ctx->system_initialized)
+		return -1;
+
+	star6e_cus3a_request_stop();
+	if (ctx->pipeline_started) {
+		star6e_controls_reset();
+		star6e_pipeline_stop(&ctx->ps);
+		ctx->pipeline_started = 0;
+	}
+	star6e_cus3a_join();
+
+	ctx->cfg = *cfg;
+	g_running = 1;
+	g_fault_what[0] = '\0';
+	star6e_pipeline_cus3a_reset();
+	ret = star6e_pipeline_start(&ctx->ps, &ctx->cfg, &g_sdk_quiet);
+	if (ret != 0)
+		return ret;
+	ctx->pipeline_started = 1;
+
+	return star6e_runtime_apply_startup_controls(ctx);
+}

@@ -20,6 +20,19 @@ typedef struct {
 int venc_core_start(const VencCfg *cfg, const VencCallbacks *cb);
 void venc_core_stop(void);
 
+/* Rebuild the running pipeline with a new cfg — stop the encoder thread,
+ * rebuild under the same MI_SYS session (star6e_runtime_pipeline_restart),
+ * restart the encoder thread. Not callable from the encoder thread itself
+ * (it joins that thread, which would deadlock). Holds g_verb_lock for the
+ * whole call, same as the verbs below, so it cannot run concurrently with
+ * them or with venc_core_start/stop; since it clears the running flag
+ * before doing anything else, a verb that arrives while a restart is in
+ * flight sees the core as not running and returns -1 rather than acting on
+ * a pipeline mid-rebuild. Returns 0 with the core left running, or -1 with
+ * the core left NOT running (caller must venc_core_start again, same as a
+ * boot failure). */
+int venc_core_restart(const VencCfg *cfg);
+
 /* Optional, before venc_core_start: dlopen the SigmaStar MI libraries
  * (~0.4 s of page-in from squashfs on a cold boot). Touches no MI device --
  * the kernel modules need not be loaded yet -- so a boot path can run it on

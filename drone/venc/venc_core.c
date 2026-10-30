@@ -331,6 +331,63 @@ void venc_core_stop(void)
 	g_cur_bitrate_kbps = -1;
 }
 
+/* Rebuild the running pipeline with a new cfg in place: stop the encoder
+ * thread, rebuild under the same MI_SYS session
+ * (star6e_runtime_pipeline_restart — no MI_SYS_Exit/Init, no module
+ * re-open), restart the encoder thread. Takes g_verb_lock for the whole
+ * call so it serialises against the verbs the same way venc_core_start/stop
+ * already serialise against each other by being main-thread-only; clearing
+ * g_started before touching anything else means a verb that lands mid-
+ * restart sees the core as not running rather than racing the rebuild. Must
+ * not be called from the encoder thread (it joins it). On failure the core
+ * is left not running — the caller's only recourse is venc_core_start. */
+int venc_core_restart(const VencCfg *cfg)
+{
+	pthread_mutex_lock(&g_verb_lock);
+
+	if (!cfg || !venc_core_running()) {
+		pthread_mutex_unlock(&g_verb_lock);
+		return -1;
+	}
+
+	/* Close the verb window first, same as venc_core_stop: the pipeline
+	 * restart below destroys and recreates the channel out from under
+	 * any call that assumes it is live. */
+	__atomic_store_n(&g_started, 0, __ATOMIC_RELEASE);
+
+	star6e_runtime_request_stop();
+	if (g_enc_thread_started) {
+		pthread_join(g_enc_thread, NULL);
+		g_enc_thread_started = 0;
+	}
+	g_cur_bitrate_kbps = -1;
+
+	if (star6e_runtime_pipeline_restart(&g_ctx, cfg) != 0) {
+		fprintf(stderr, "ERROR: venc_core_restart: pipeline restart failed\n");
+		pthread_mutex_unlock(&g_verb_lock);
+		return -1;
+	}
+
+	__atomic_store_n(&g_started, 1, __ATOMIC_RELEASE);
+
+	if (pthread_create(&g_enc_thread, NULL, venc_encoder_thread,
+	    &g_ctx) != 0) {
+		fprintf(stderr, "ERROR: venc_core_restart: encoder thread create failed\n");
+		__atomic_store_n(&g_started, 0, __ATOMIC_RELEASE);
+		pthread_mutex_unlock(&g_verb_lock);
+		return -1;
+	}
+	g_enc_thread_started = 1;
+	pthread_setname_np(g_enc_thread, "venc-enc");
+
+	printf("> venc_core: restarted (%ux%u@%u)\n",
+		(unsigned)cfg->width, (unsigned)cfg->height, (unsigned)cfg->fps);
+	fflush(stdout);
+
+	pthread_mutex_unlock(&g_verb_lock);
+	return 0;
+}
+
 /* ── Verbs ────────────────────────────────────────────────────────────── */
 
 int venc_set_bitrate_kbps(int kbps)
