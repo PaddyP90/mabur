@@ -267,8 +267,12 @@ void MavComponent::handle_set(const char id16[16], const char value[128], uint8_
   const uint8_t row_type = cfgparam::mav_type(row.type);
   const std::string field = std::string(row.section) + "." + row.key;
 
-  // Held from the read of the current file to the publish, so a concurrent
-  // writer (calibration) can't publish between them and be overwritten.
+  // Held from the read of the current file through the candidate write and
+  // load and the hand-off to the applier, so the applier's own use of
+  // <cfg_path>.new and a concurrent calibration publish can't interleave
+  // with this read-patch-check sequence. The applier takes the same lock
+  // again for its own re-read through its publish, once this function has
+  // returned.
   auto lock = lock_config_writes();
 
   Value cur{row.type};
@@ -323,11 +327,14 @@ void MavComponent::handle_set(const char id16[16], const char value[128], uint8_
   // to the applier: a row the loader would refuse (an ordering rule, an
   // out-of-range value past render_toml's own checks) is caught here, the
   // same way publish_config's own verify step used to, so the applier is
-  // never asked to apply a candidate that can't boot. On success the file
-  // is left as-is; the applier re-reads, re-patches and publishes it under
-  // its own lock, so there's nothing to clean up here.
+  // never asked to apply a candidate that can't boot. This is only a check
+  // -- the applier re-reads, re-patches, re-verifies and publishes its own
+  // candidate under its own hold of the lock -- so the scratch file is
+  // removed right after the check, win or lose, the same as
+  // publish_config and ConfigApplier::apply_locked do with theirs.
   const std::string tmp = cfg_path_ + ".new";
   if (!write_file_fsync(tmp, patched)) {
+    std::remove(tmp.c_str());
     refuse(PARAM_ACK_FAILED, "failed to write " + tmp, true);
     return;
   }
@@ -338,6 +345,7 @@ void MavComponent::handle_set(const char id16[16], const char value[128], uint8_
     refuse(PARAM_ACK_FAILED, loader_reason(e.what()), true);
     return;
   }
+  std::remove(tmp.c_str());
 
   std::string why;
   if (!port_.submit(idx, rendered, &why)) {

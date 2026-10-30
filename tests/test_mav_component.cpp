@@ -880,6 +880,9 @@ TEST(set_acks_in_progress_then_accepted_on_completion) {
   auto r = do_set(c, set_int("REC_FPS", 30));
   CHECK(r.ack.param_result == PARAM_ACK_IN_PROGRESS && wire_i32(r.ack.param_value) == 60);
   CHECK(fake.submits.size() == 1 && fake.submits[0].row == 9 && fake.submits[0].rendered == "30");
+  // handle_set's own candidate check writes and removes <path>.new; nothing
+  // is left behind for a submit the applier is about to take over.
+  CHECK(!exists(b.path() + ".new"));
   fake.complete(true, "");
   c.poll_results();
   auto msgs = drain(c);

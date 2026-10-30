@@ -123,7 +123,7 @@ class MavComponent {
   void queue(const Msg& m, bool list_value = false);
   // A PARAM_EXT_VALUE for row idx; list_value marks one queued by a list.
   void queue_value(size_t idx, const mavparam::Value& v, bool list_value = false);
-  // A PARAM_EXT_ACK, shared by handle_set's immediate acks and poll_result's
+  // A PARAM_EXT_ACK, shared by handle_set's immediate acks and poll_results'
   // completion ack.
   void queue_ack(const char id16[16], const mavparam::Value* v, uint8_t mav_type, uint8_t result);
   void queue_status(const std::string& text);
