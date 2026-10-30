@@ -8,7 +8,7 @@ extern "C" {
 
 typedef struct {
   /* Encoder thread context. All callbacks fire on venc-internal threads;
-   * marshal to your own thread (RcAgent polls atomics — Task B6). */
+   * marshal to your own thread (RcAgent polls atomics). */
   void (*on_chain_break)(void *user); /* ring-full drop killed a ref frame */
   void (*on_fault)(void *user, const char *what); /* unrecoverable MI error */
   void *user;
@@ -16,24 +16,36 @@ typedef struct {
 
 /* Boot the sensor→ISP→VENC pipeline and the encoder/AE/AWB threads.
  * Frames appear in the shared /mabur_f ring. Returns 0 or -1 (boot
- * failure — caller logs and exits; the wrapper respawn is the retry). */
+ * failure — caller logs and exits; the wrapper respawn is the retry).
+ * Refused while a session is open: venc_core_stop first. */
 int venc_core_start(const VencCfg *cfg, const VencCallbacks *cb);
+/* Ends the MI_SYS session whatever state the core is in — running, or left
+ * not running by a failed venc_core_restart — so a venc_core_start after it
+ * always opens a fresh session. A no-op when no session is open. */
 void venc_core_stop(void);
 
-/* Rebuild the running pipeline with a new cfg — stop the encoder thread,
- * rebuild under the same MI_SYS session (star6e_runtime_pipeline_restart),
- * restart the encoder thread. Not callable from the encoder thread itself
- * (it joins that thread, which would deadlock). Holds g_verb_lock for the
- * whole call, same as the verbs below, so it serialises against them;
- * since it clears the running flag before doing anything else, a verb that
- * arrives while a restart is in flight sees the core as not running and
- * returns -1 rather than acting on a pipeline mid-rebuild. g_verb_lock
- * does NOT serialise against venc_core_start/stop — like them, this must
- * never be called concurrently with venc_core_start/stop; that is caller
- * discipline, the same convention venc_core_start/stop rely on between
- * each other. Returns 0 with the core left running, or -1 with the core
- * left NOT running (caller must venc_core_start again, same as a boot
- * failure). */
+/* Rebuild the pipeline with a new cfg — stop the encoder thread, rebuild
+ * under the same MI_SYS session (star6e_runtime_pipeline_restart), restart
+ * the encoder thread. Not callable from the encoder thread itself (it joins
+ * that thread, which would deadlock). Holds g_verb_lock for the whole call,
+ * same as the verbs below, so it serialises against them; since it clears
+ * the running flag before doing anything else, a verb that arrives while a
+ * restart is in flight sees the core as not running and returns -1 rather
+ * than acting on a pipeline mid-rebuild. Like venc_core_start/stop it must
+ * never run concurrently with them; that is caller discipline.
+ *
+ * The contract the rebuild failure ladder relies on:
+ *   - Returns 0 with the core running on `cfg`.
+ *   - Returns -1 with the core NOT running and the MI_SYS session still
+ *     open. Another venc_core_restart (with any cfg) is allowed and may
+ *     succeed: the restart is gated on the open session, not on the core
+ *     running. venc_core_stop then venc_core_start is the cold fallback;
+ *     the stop really closes the session.
+ *   - Returns -1 at once, touching nothing, when no session is open (never
+ *     started, or stopped).
+ * MABUR_VENC_FAIL_RESTARTS=N in maburd's environment at its first
+ * venc_core_start fails the next N restarts after the old pipeline is
+ * stopped (a bench knob for the ladder; docs/mavlink.md). */
 int venc_core_restart(const VencCfg *cfg);
 
 /* Optional, before venc_core_start: dlopen the SigmaStar MI libraries

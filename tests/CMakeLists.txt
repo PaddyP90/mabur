@@ -180,6 +180,15 @@ if(MABUR_BUILD_DRONE)
   add_mtest(test_sensor_steer test_sensor_steer.cpp ${MABUR_VENC_DIR}/sensor_steer.c)
   target_include_directories(test_sensor_steer PRIVATE ${MABUR_VENC_DIR}
     ${CMAKE_SOURCE_DIR}/common/include)
+  # The real venc_core.c facade over a fake star6e runtime: its lifecycle
+  # guards are what the rebuild failure ladder stands on.
+  add_mtest(test_venc_core test_venc_core.cpp venc_core_fake.c
+    ${MABUR_VENC_DIR}/venc_core.c)
+  target_include_directories(test_venc_core PRIVATE ${MABUR_VENC_DIR}
+    ${CMAKE_SOURCE_DIR}/drone/vendor)
+  target_compile_definitions(test_venc_core PRIVATE
+    PLATFORM_STAR6E HAVE_BACKEND_STAR6E=1 _GNU_SOURCE)
+  target_link_libraries(test_venc_core PRIVATE pthread)
 
   add_test(NAME host_e2e COMMAND bash ${CMAKE_SOURCE_DIR}/tests/integration/run_host_e2e.sh)
   set_tests_properties(host_e2e PROPERTIES

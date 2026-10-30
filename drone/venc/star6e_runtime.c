@@ -629,8 +629,12 @@ void star6e_runtime_teardown(Star6eRunnerContext *ctx)
  * cost again (docs/findings/2026-09-07-boot-time.md). Mirrors
  * star6e_runtime_teardown's stop half and star6e_runtime_init's start half,
  * minus the MI_SYS_Init/MI_SYS_Exit and mi_init/mi_deinit bracketing either
- * one does. */
-int star6e_runtime_pipeline_restart(Star6eRunnerContext *ctx, const VencCfg *cfg)
+ * one does. A pipeline that is not running (a previous restart failed) is
+ * simply started. inject_fail fails the start after the old pipeline is
+ * stopped and before star6e_pipeline_start touches the SDK: the bench's way
+ * to drive a caller's failure handling on real hardware. */
+int star6e_runtime_pipeline_restart(Star6eRunnerContext *ctx, const VencCfg *cfg,
+	int inject_fail)
 {
 	int ret;
 
@@ -649,6 +653,11 @@ int star6e_runtime_pipeline_restart(Star6eRunnerContext *ctx, const VencCfg *cfg
 	g_running = 1;
 	g_fault_what[0] = '\0';
 	star6e_pipeline_cus3a_reset();
+	if (inject_fail) {
+		fprintf(stderr, "venc: injected pipeline start failure "
+			"(MABUR_VENC_FAIL_RESTARTS)\n");
+		return -1;
+	}
 	ret = star6e_pipeline_start(&ctx->ps, &ctx->cfg, &g_sdk_quiet);
 	if (ret != 0)
 		return ret;
