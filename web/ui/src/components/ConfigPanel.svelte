@@ -7,7 +7,7 @@
   const uid = $props.id();   // unique per mounted instance -- two panels (sidebar + immersive side panel) never share a radio group.
 
   const groupClass = $derived(variant === 'card' ? 'card cardg' : 'group');
-  const set = (key, val) => onChange(applyEdit(cfg, key, val), describeEdit(key, val));
+  const set = (key, val) => onChange(applyEdit(cfg, key, val), describeEdit(key, val, ui.osdFonts));
   const setRung = (i, key, val) => {
     const next = applyRungEdit(cfg, i, key, val);
     onChange(next, describeRungEdit(next, i, key, val));
