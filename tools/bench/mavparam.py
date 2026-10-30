@@ -15,11 +15,18 @@ protocol: PARAM_EXT_REQUEST_LIST / PARAM_EXT_REQUEST_READ / PARAM_EXT_SET
 answered with PARAM_EXT_VALUE / PARAM_EXT_ACK, plus a STATUSTEXT after a
 refused set.
 
+A `set` that the drone applies answers PARAM_EXT_ACK IN_PROGRESS first
+(holding the current value) and then a final ACCEPTED or FAILED (also
+followed by a STATUSTEXT reason on FAILED); this tool prints the
+IN_PROGRESS line and waits up to 15 s from it for the final ack before
+giving up.
+
 Exit: 0 on an ACCEPTED set or a successful list/get; 1 on a runtime
 failure (no heartbeat from the drone, a request that timed out after
-retries, an incomplete list, or an ack other than ACCEPTED); 2 on a
-usage error (missing GS/PORT, a bad command line, an unknown parameter
-id, or a value that doesn't parse for its type).
+retries, an incomplete list, a set whose final ack never arrived within
+15 s of an IN_PROGRESS, or an ack other than ACCEPTED); 2 on a usage
+error (missing GS/PORT, a bad command line, an unknown parameter id, or
+a value that doesn't parse for its type).
 """
 import os
 import struct
@@ -32,6 +39,30 @@ import time
 # exit 2 rather than fail on the import. main() binds this name at module
 # scope (`global mavutil`) before any other function needs it.
 mavutil = None
+
+# The four MAV_PARAM_ACK_* result codes, resolved once at import time so
+# wait_final_ack() and its test (which has no pymavlink installed) can use
+# them without going through the lazy `mavutil` global above. The common
+# dialect's numbering (ACCEPTED 0, VALUE_UNSUPPORTED 1, FAILED 2,
+# IN_PROGRESS 3) is the fallback when pymavlink isn't importable.
+try:
+    from pymavlink import mavutil as _mavutil_ack_codes
+    PARAM_ACK_ACCEPTED = _mavutil_ack_codes.mavlink.PARAM_ACK_ACCEPTED
+    PARAM_ACK_VALUE_UNSUPPORTED = _mavutil_ack_codes.mavlink.PARAM_ACK_VALUE_UNSUPPORTED
+    PARAM_ACK_FAILED = _mavutil_ack_codes.mavlink.PARAM_ACK_FAILED
+    PARAM_ACK_IN_PROGRESS = _mavutil_ack_codes.mavlink.PARAM_ACK_IN_PROGRESS
+except ImportError:
+    PARAM_ACK_ACCEPTED = 0
+    PARAM_ACK_VALUE_UNSUPPORTED = 1
+    PARAM_ACK_FAILED = 2
+    PARAM_ACK_IN_PROGRESS = 3
+
+RESULT_NAMES = {
+    PARAM_ACK_ACCEPTED: "ACCEPTED",
+    PARAM_ACK_IN_PROGRESS: "IN_PROGRESS",
+    PARAM_ACK_FAILED: "FAILED",
+    PARAM_ACK_VALUE_UNSUPPORTED: "VALUE_UNSUPPORTED",
+}
 
 DRONE_SYSTEM = 1
 DRONE_COMPONENT = 191  # MAV_COMP_ID_ONBOARD_COMPUTER
@@ -207,28 +238,102 @@ def cmd_get(conn, pid):
     return 0
 
 
+def wait_final_ack(conn, pid, first_timeout=2.0, final_timeout=15.0, recv=None):
+    """Wait for the drone's response to a PARAM_EXT_SET for `pid`.
+
+    A set the drone applies answers IN_PROGRESS first (holding the
+    current value) and then a final ACCEPTED or FAILED (also current
+    value; FAILED is followed by a STATUSTEXT reason, read separately by
+    the caller) -- normally within ~1 s, up to ~10 s on the fallback
+    path. A set the drone refuses outright (unknown id, bad value)
+    answers VALUE_UNSUPPORTED with no IN_PROGRESS at all.
+
+    Waits up to `first_timeout` for the first ack for `pid`. If that ack
+    is IN_PROGRESS, prints "IN_PROGRESS  <value>" and keeps waiting --
+    still only for `pid`, ignoring acks for any other parameter, and
+    tolerating further IN_PROGRESS acks on the fallback path -- for up
+    to `final_timeout` measured from the IN_PROGRESS (not from this
+    call) for a terminal one.
+
+    Returns (result_name, final_msg): result_name is one of "ACCEPTED",
+    "FAILED", "VALUE_UNSUPPORTED" or "TIMEOUT"; final_msg is the ack
+    that produced it, or None on TIMEOUT.
+
+    `recv` is a `timeout_s -> PARAM_EXT_ACK-like or None` callable; it
+    defaults to a thin wrapper over recv_one(conn, "PARAM_EXT_ACK", t)
+    so a test can inject a fake connection with no pymavlink installed.
+    """
+    if recv is None:
+        recv = lambda timeout: recv_one(conn, "PARAM_EXT_ACK", timeout)
+
+    def recv_for_pid(deadline):
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return None
+            ack = recv(remaining)
+            if ack is None:
+                return None
+            if ack.param_id != pid:
+                continue  # a stray ack for some other parameter
+            return ack
+
+    ack = recv_for_pid(time.time() + first_timeout)
+    if ack is None:
+        return "TIMEOUT", None
+    if ack.param_result != PARAM_ACK_IN_PROGRESS:
+        return RESULT_NAMES.get(ack.param_result, "FAILED"), ack
+
+    _, value = decode_value(ack)
+    print("IN_PROGRESS  %s" % value)
+
+    deadline = time.time() + final_timeout
+    while True:
+        ack = recv_for_pid(deadline)
+        if ack is None:
+            return "TIMEOUT", None
+        if ack.param_result == PARAM_ACK_IN_PROGRESS:
+            continue  # another placeholder on the fallback path; the
+                      # final deadline does not restart
+        return RESULT_NAMES.get(ack.param_result, "FAILED"), ack
+
+
 def cmd_set(conn, pid, wtype, raw):
     """`wtype`/`raw` are already validated and encoded by main() before any
     network I/O (an unknown id or a value that fails to encode is a usage
-    error, reported before a connection is even opened)."""
+    error, reported before a connection is even opened).
+
+    Resends the PARAM_EXT_SET up to 3 times (1 try + 3 retries) while no
+    ack for `pid` has arrived at all. The moment any ack for `pid`
+    arrives -- including an IN_PROGRESS placeholder -- resending stops:
+    the drone refuses a PARAM_EXT_SET for a parameter it is still
+    applying ("apply in progress"), so wait_final_ack is left to wait
+    out the final ack on its own instead of cmd_set resending into it.
+    """
     pid_b = pid.encode("ascii")
-    ack = None
+    got_ack = [False]
+
+    def recv(timeout):
+        msg = recv_one(conn, "PARAM_EXT_ACK", timeout)
+        if msg is not None and msg.param_id == pid:
+            got_ack[0] = True
+        return msg
+
+    result, final = "TIMEOUT", None
     for _ in range(4):  # 1 try + 3 retries
         conn.mav.param_ext_set_send(DRONE_SYSTEM, DRONE_COMPONENT, pid_b, raw, MAV_TYPE[wtype])
-        ack = recv_one(conn, "PARAM_EXT_ACK", 2.0)
-        if ack is not None:
+        result, final = wait_final_ack(conn, pid, recv=recv)
+        if result != "TIMEOUT" or got_ack[0]:
             break
-    if ack is None:
-        print("no PARAM_EXT_ACK for %s after 3 retries" % pid, file=sys.stderr)
+
+    if result == "TIMEOUT":
+        if got_ack[0]:
+            print("no final PARAM_EXT_ACK for %s within 15 s of IN_PROGRESS" % pid, file=sys.stderr)
+        else:
+            print("no PARAM_EXT_ACK for %s after 3 retries" % pid, file=sys.stderr)
         return 1
-    result_names = {
-        mavutil.mavlink.PARAM_ACK_ACCEPTED: "ACCEPTED",
-        mavutil.mavlink.PARAM_ACK_IN_PROGRESS: "IN_PROGRESS",
-        mavutil.mavlink.PARAM_ACK_FAILED: "FAILED",
-        mavutil.mavlink.PARAM_ACK_VALUE_UNSUPPORTED: "VALUE_UNSUPPORTED",
-    }
-    result = result_names.get(ack.param_result, str(ack.param_result))
-    _, value = decode_value(ack)
+
+    _, value = decode_value(final)
     print("%s  %s" % (result, value))
     status = recv_one(conn, "STATUSTEXT", 1.0)
     if status is not None:

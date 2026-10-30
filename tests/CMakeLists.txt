@@ -417,6 +417,8 @@ if(Python3_EXECUTABLE)
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/test_maburtop.py)
   set_tests_properties(test_maburtop PROPERTIES
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/tools)
+  add_test(NAME test_mavparam
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/test_mavparam.py)
   add_test(NAME test_gen_font
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/test_gen_font.py
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
