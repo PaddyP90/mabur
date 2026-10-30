@@ -84,12 +84,13 @@ first re-read round.
 1. **The "applied" log line drops `+record.size`.** The in-progress line
    and the applier's line name the followed key; `[mav] set … applied` does
    not.
-2. **The tab jumps to Stats after the operator opened VTX.** The page's
-   "on live → Stats" rule fired after the VTX tab was already in use in
-   one connect. The one lost edit of the session happened around it. It
-   was typed into the panel, showed no result line and never reached the
-   drone; it did not reproduce in later tab round-trips or reconnects.
-   Cause not found.
+2. **One edit never reached the drone.** It was typed into the panel just
+   after the sidebar had switched from VTX to Stats, showed no result line,
+   and never reached the drone. The operator was clicking in the same
+   Chrome window during the session (the Config/VTX tab flips the sampler
+   recorded were theirs), so the switch and the lost edit are most likely
+   that interference, not the page. It did not reproduce in later tab
+   round-trips or reconnects.
 
 ## Device state afterwards
 
