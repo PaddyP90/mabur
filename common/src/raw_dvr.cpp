@@ -172,6 +172,13 @@ void RawDvr::feed(const uint8_t* au, size_t n, uint32_t pts_us, bool complete) {
 void RawDvr::stop() {
   if (state_ == State::Recording) mux_.close();
   sink_.reset();  // an unopened sink: dropped unwritten
+  // A deferred roll (see roll()) leaves state() at WaitSync, not
+  // Recording, so the close() above never ran for it and there is no sink
+  // or file to tear down -- the file named by path_ was never opened. But
+  // the flag itself must still clear: left set, the next start(sink, ...)
+  // would wrongly think it was resuming this (now stopped) roll and keep
+  // its rolls()/last_sealed_bytes() instead of starting a fresh recording.
+  roll_deferred_ = false;
   if (state_ != State::Off) state_ = State::Off;
 }
 

@@ -617,4 +617,45 @@ TEST(a_roll_can_defer_to_the_core_loop) {
   CHECK(samples_in(next_path) == 2);   // the 1080p IDR and its P -- not the lost, earlier one
 }
 
+// stop() while a roll is deferred (the operator stopped the recording
+// before the caller got around to resuming it off the core loop) must not
+// leave roll_deferred() set: left set, the NEXT start(sink, ...) -- for an
+// unrelated, later recording -- would wrongly think it was resuming this
+// stopped roll and keep its rolls()/last_sealed_bytes() instead of
+// starting with fresh counters.
+TEST(stop_during_a_deferred_roll_clears_it_for_the_next_recording) {
+  const std::string path = scratch("rawdvr_defer_stop.mp4");
+  const std::string deferred_next = scratch("rawdvr_defer_stop_next.mp4");
+  const std::string fresh_next = scratch("rawdvr_defer_stop_fresh.mp4");
+  std::remove(path.c_str());
+  std::remove(deferred_next.c_str());
+  std::remove(fresh_next.c_str());
+  RawDvr d;
+  d.set_next_sink([&](std::string* name) {
+    *name = deferred_next;
+    return std::unique_ptr<mabur::DvrSink>();  // defer every roll in this test
+  });
+  d.start(path, 0, 0);
+  feed(d, idr_au_720(1), 0);
+  feed(d, idr_au_1080(2), 16667);   // defers: old file sealed, waiting on a sink
+  CHECK(d.roll_deferred());
+  CHECK(d.state() == RawDvr::State::WaitSync);
+
+  d.stop();
+  CHECK(!d.roll_deferred());
+  CHECK(d.state() == RawDvr::State::Off);
+  CHECK(!exists(deferred_next));   // never opened -- nothing to seal or report
+
+  // A later, unrelated recording: fresh counters, not the stopped roll's.
+  d.start(mabur::open_file_sink(fresh_next), 0, 0);
+  CHECK(d.rolls() == 0);
+  CHECK(d.last_sealed_bytes() == 0);
+  feed(d, idr_au_720(3), 33334);
+  CHECK(d.state() == RawDvr::State::Recording);
+  CHECK(d.rolls() == 0);
+  d.stop();
+  CHECK(exists(fresh_next));
+  CHECK(samples_in(fresh_next) == 1);
+}
+
 MTEST_MAIN

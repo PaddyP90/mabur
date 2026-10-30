@@ -543,7 +543,11 @@ int live_loop(const LiveOpts& o, const maburgs::Config& cfg, uint8_t ch, int wid
       }
     }
 #ifdef WEBGS_PAGE
-    if (dvr.roll_deferred()) {
+    // lrec_armed is belt and braces: stop() (seal_local_rec(), above)
+    // already clears roll_deferred() itself, but a deferred roll of a
+    // recording the operator has since stopped must never open a file
+    // under any future reordering of this loop.
+    if (dvr.roll_deferred() && lrec_armed) {
       // The size-change roll deferred here (the next_sink lambda above
       // never opens OPFS itself -- that await needs the core loop, not an
       // AU callback, opfs_file.h): finish it now, from the loop, exactly
