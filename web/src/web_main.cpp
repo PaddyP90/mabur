@@ -418,6 +418,12 @@ int live_loop(const LiveOpts& o, const maburgs::Config& cfg, uint8_t ch, int wid
   // <base>-r<N>.mp4, N counting up within this recording; recFileName (the
   // page's collision check) never produces that suffix, so it can never
   // collide with a later recording's own name.
+  //
+  // This callback runs on the core thread from inside the AU callback
+  // (RawDvr::feed() calls it synchronously), where OpfsFile::open() must
+  // never run: its ASYNCIFY await needs the core loop, not an AU callback
+  // (opfs_file.h). So it only computes the rolled name and returns nullptr
+  // with it set, deferring the open -- picked up below, in the loop.
   dvr.set_next_sink([&](std::string* name) {
     report_rec_closed(lrec_name, dvr.last_sealed_bytes(), 0);
     std::string base = lrec_base_name;
@@ -429,9 +435,7 @@ int live_loop(const LiveOpts& o, const maburgs::Config& cfg, uint8_t ch, int wid
     const std::string rolled = base + "-r" + std::to_string(++lrec_roll_n) + ".mp4";
     *name = rolled;
     lrec_name = rolled;
-    std::unique_ptr<mabur::DvrSink> sink;
-    if (auto f = webgs::OpfsFile::open(rolled)) sink = std::make_unique<OpfsSink>(std::move(f));
-    return sink;
+    return std::unique_ptr<mabur::DvrSink>();
   });
 #endif
   auto seal_local_rec = [&]() {
@@ -538,6 +542,22 @@ int live_loop(const LiveOpts& o, const maburgs::Config& cfg, uint8_t ch, int wid
         }
       }
     }
+#ifdef WEBGS_PAGE
+    if (dvr.roll_deferred()) {
+      // The size-change roll deferred here (the next_sink lambda above
+      // never opens OPFS itself -- that await needs the core loop, not an
+      // AU callback, opfs_file.h): finish it now, from the loop, exactly
+      // like a fresh start(). A failed open leaves dvr in Error with
+      // lrec_armed still set, which the Error check below seals and
+      // reports the same way any other open failure is.
+      std::unique_ptr<mabur::DvrSink> sink;
+      if (auto f = webgs::OpfsFile::open(dvr.path())) sink = std::make_unique<OpfsSink>(std::move(f));
+      dvr.start(std::move(sink), 0, 0);
+      // The new file opens on an IRAP only: ask the drone for one now,
+      // same as a fresh start() does.
+      g_idr_req.fetch_add(1, std::memory_order_acq_rel);
+    }
+#endif
     {
       // Outbound MAVLink (webgs_mav_push): whatever the page queued since
       // the last iteration, forwarded to the tunnel's parser once per

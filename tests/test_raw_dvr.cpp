@@ -471,9 +471,15 @@ TEST(size_change_at_irap_rolls_to_the_next_sink) {
   CHECK(calls == 1);
   CHECK(d.rolls() == 1);
   CHECK(d.path() == roll2);
+  // last_sealed_bytes() must count the WHOLE sealed file, including the
+  // fragment that was still pending when the roll closed it (read after
+  // close(), not before -- an earlier version undercounted by exactly that
+  // fragment).
+  const uint64_t sealed_bytes = d.last_sealed_bytes();
   d.stop();
   CHECK(exists(roll1));
   CHECK(exists(roll2));
+  CHECK(sealed_bytes == read_whole_file(roll1).size());
   CHECK(moov_size_of(roll1) == std::make_pair(1280, 720));
   CHECK(moov_size_of(roll2) == std::make_pair(1920, 1080));
   CHECK(samples_in(roll2) == 2);         // the 1080 IDR and its P
@@ -547,6 +553,68 @@ TEST(roll_baseline_is_the_sps_not_the_override) {
   // size is the SPS size that forced it, not the first file's override
   // (same numeric value here, 1920x1080, but for a different reason).
   CHECK(moov_size_of(next_path) == std::make_pair(1920, 1080));
+}
+
+// Mirrors the web GS: next_sink can't produce a sink synchronously from
+// inside feed() (OpfsFile::open() awaits through ASYNCIFY, which must run
+// from the core loop, never from an AU callback -- opfs_file.h) -- it
+// writes the rolled name and returns nullptr, and the caller finishes the
+// roll later with start(sink, ...).
+TEST(a_roll_can_defer_to_the_core_loop) {
+  const std::string path = scratch("rawdvr_defer.mp4");
+  const std::string next_path = scratch("rawdvr_defer_next.mp4");
+  std::remove(path.c_str());
+  std::remove(next_path.c_str());
+  RawDvr d;
+  int calls = 0;
+  d.set_next_sink([&](std::string* name) {
+    ++calls;
+    *name = next_path;
+    return std::unique_ptr<mabur::DvrSink>();  // defer: no sink yet
+  });
+  d.start(path, 0, 0);
+  feed(d, idr_au_720(1), 0);
+  feed(d, p_au(2), 16667);
+  feed(d, idr_au_1080(3), 33333);   // size changes: defers rather than opening inline
+  CHECK(calls == 1);
+  CHECK(d.state() == RawDvr::State::WaitSync);
+  CHECK(d.roll_deferred());
+  CHECK(d.path() == next_path);
+  CHECK(exists(path));                                      // the old file is sealed...
+  CHECK(moov_size_of(path) == std::make_pair(1280, 720));    // ...and playable
+  CHECK(!exists(next_path));                                 // nothing opened for it yet
+  const uint64_t rolls_at_defer = d.rolls();
+  const uint64_t sealed_at_defer = d.last_sealed_bytes();
+  CHECK(rolls_at_defer == 1);
+  CHECK(sealed_at_defer == read_whole_file(path).size());
+
+  // Nothing was written for the triggering IDR -- it is lost to the gap
+  // between the old file's last sample and the new file's first one, by
+  // design (roll()'s comment). A non-key AU is still just ignored
+  // (ordinary WaitSync semantics).
+  feed(d, p_au(4), 50000);
+  CHECK(d.state() == RawDvr::State::WaitSync);
+  // A further IRAP arriving before the caller resumes must not reopen
+  // anything with the not-yet-real sink_/path_ the defer left behind.
+  feed(d, idr_au_1080(5), 66666);
+  CHECK(d.state() == RawDvr::State::WaitSync);
+  CHECK(d.roll_deferred());
+  CHECK(calls == 1);          // next_sink was not asked again
+
+  // The caller (the web GS, off the core loop by now) has a real sink.
+  d.start(mabur::open_file_sink(next_path), 0, 0);
+  CHECK(!d.roll_deferred());
+  CHECK(d.rolls() == rolls_at_defer);               // old counters intact: not reset...
+  CHECK(d.last_sealed_bytes() == sealed_at_defer);  // ...by the resuming start()
+
+  feed(d, idr_au_1080(6), 83333);   // the deferred file's first sample
+  feed(d, p_au(7), 100000);
+  CHECK(d.state() == RawDvr::State::Recording);
+  CHECK(d.rolls() == 1);
+  d.stop();
+  CHECK(exists(next_path));
+  CHECK(moov_size_of(next_path) == std::make_pair(1920, 1080));
+  CHECK(samples_in(next_path) == 2);   // the 1080p IDR and its P -- not the lost, earlier one
 }
 
 MTEST_MAIN
