@@ -48,21 +48,6 @@ std::string printable_id(const char id16[16]) {
   return s;
 }
 
-// load_config's message is "config: <file>:<line>: <field>: <why>". The
-// file is the publisher's scratch candidate, meaningless to the operator,
-// and STATUSTEXT holds 50 chars: keep the field and the reason.
-std::string loader_reason(std::string s) {
-  static const std::string kPrefix = "config: ";
-  if (s.compare(0, kPrefix.size(), kPrefix) == 0) s.erase(0, kPrefix.size());
-  for (size_t i = 0; i < s.size(); ++i) {
-    if (s[i] != ':') continue;
-    size_t j = i + 1;
-    while (j < s.size() && std::isdigit(static_cast<unsigned char>(s[j]))) ++j;
-    if (j > i + 1 && s.compare(j, 2, ": ") == 0) return s.substr(j + 2);
-  }
-  return s;
-}
-
 // The current value of row `idx` as the config file holds it. False with
 // *err set when the file doesn't load.
 bool current_value(const std::string& path, size_t idx, Value* out, std::string* err) {

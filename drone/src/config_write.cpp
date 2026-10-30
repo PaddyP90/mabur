@@ -117,25 +117,6 @@ void fsync_parent_dir(const std::string& path) {
   }
 }
 
-bool write_file_fsync(const std::string& path, const std::string& content) {
-  const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-  if (fd < 0) return false;
-  bool ok = true;
-  size_t off = 0;
-  while (ok && off < content.size()) {
-    const ssize_t n = ::write(fd, content.data() + off, content.size() - off);
-    if (n < 0) {
-      ok = false;
-      break;
-    }
-    off += static_cast<size_t>(n);
-  }
-  if (ok && ::fsync(fd) != 0) ok = false;
-  if (::close(fd) != 0) ok = false;
-  if (ok) fsync_parent_dir(path);
-  return ok;
-}
-
 // Best-effort cleanup of the scratch file: never let a failed run leave a
 // stale "<path>.new" sitting next to a live config (confusing at best, and
 // a later successful run's O_TRUNC would clobber it anyway -- this just
@@ -165,6 +146,25 @@ bool write_file_atomic(const std::string& path, const std::string& content) {
 }
 
 }  // namespace
+
+bool write_file_fsync(const std::string& path, const std::string& content) {
+  const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+  if (fd < 0) return false;
+  bool ok = true;
+  size_t off = 0;
+  while (ok && off < content.size()) {
+    const ssize_t n = ::write(fd, content.data() + off, content.size() - off);
+    if (n < 0) {
+      ok = false;
+      break;
+    }
+    off += static_cast<size_t>(n);
+  }
+  if (ok && ::fsync(fd) != 0) ok = false;
+  if (::close(fd) != 0) ok = false;
+  if (ok) fsync_parent_dir(path);
+  return ok;
+}
 
 bool patch_toml_key(std::string* text, const std::string& section,
                     const std::string& key, const std::string& rendered_value) {
@@ -201,6 +201,18 @@ bool read_text_file(const std::string& path, std::string* out) {
   ss << f.rdbuf();
   *out = ss.str();
   return true;
+}
+
+std::string loader_reason(std::string s) {
+  static const std::string kPrefix = "config: ";
+  if (s.compare(0, kPrefix.size(), kPrefix) == 0) s.erase(0, kPrefix.size());
+  for (size_t i = 0; i < s.size(); ++i) {
+    if (s[i] != ':') continue;
+    size_t j = i + 1;
+    while (j < s.size() && std::isdigit(static_cast<unsigned char>(s[j]))) ++j;
+    if (j > i + 1 && s.compare(j, 2, ": ") == 0) return s.substr(j + 2);
+  }
+  return s;
 }
 
 PublishResult publish_config(const std::string& path, const std::string& content,

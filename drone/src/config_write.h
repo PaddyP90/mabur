@@ -105,6 +105,19 @@ std::unique_lock<std::recursive_mutex> lock_config_writes();
 // Reads the whole file at `path` into *out. False if it cannot be opened.
 bool read_text_file(const std::string& path, std::string* out);
 
+// Writes `content` to `path` (create or truncate), fsyncs it and its
+// parent directory. The step-1 scratch write publish_config uses; a caller
+// that wants a load_config verdict on a candidate before applying it writes
+// the same "<path>.new" with this. False on any open/write/fsync failure,
+// leaving whatever was written behind for the caller to remove.
+bool write_file_fsync(const std::string& path, const std::string& content);
+
+// load_config's message is "config: <file>:<line>: <field>: <why>". The
+// file is a scratch candidate, meaningless to the operator, and a MAVLink
+// STATUSTEXT holds 50 chars: returns "<field>: <why>". A message without
+// that shape comes back with only the "config: " prefix removed.
+std::string loader_reason(std::string s);
+
 // Counts how many times this process has attempted to PUBLISH (rename a
 // verified candidate onto) the most recently published config path,
 // successful or not -- keyed per path, so it reflects repeated calls
