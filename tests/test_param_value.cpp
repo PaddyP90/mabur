@@ -46,6 +46,13 @@ TEST(wire_round_trip_every_type) {
   CHECK(decode_wire(4, 6, w, &v) && v.i == -7);
   encode_wire(Value{Type::Str, false, 0, 0, "1280x720"}, w);
   CHECK(decode_wire(10, 11, w, &v) && v.s == "1280x720");
+  // A buffer the Bool row (row 1) would itself accept (wire[0] == 1, rest
+  // zero) — so the positive check pins row 1's mav_type to 1, and the
+  // negative check below is rejected ONLY by the mav_type mismatch, not by
+  // any byte-level content check.
+  std::memset(w, 0, 128);
+  w[0] = 1;
+  CHECK(decode_wire(1, 1, w, &v) && v.b);
   CHECK(!decode_wire(1, 6, w, &v));  // type mismatch: Bool row, Int32 sent
 }
 

@@ -55,6 +55,7 @@
 #include <vector>
 
 #include "config_apply.h"
+#include "mabur/param_value.h"
 #include "mav_params.h"
 
 namespace mabur {

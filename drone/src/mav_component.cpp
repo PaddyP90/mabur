@@ -12,6 +12,7 @@
 #include "config_write.h"
 #include "mabur/config_params.h"
 #include "mabur/mav.h"
+#include "mabur/param_value.h"
 #include "mabur/rc_proto.h"
 #include "mav_params.h"
 
