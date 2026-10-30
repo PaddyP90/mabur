@@ -673,10 +673,64 @@ A followed hop usually gets one soon, since the drone's retune and the GS's
 post-hop rung change both cost an IDR, but nothing on the spotter can ask
 for it.
 
+### VTX tab
+
+The drone's parameter table (`common/include/mabur/config_params.h`
+`kTable`, 12 rows), edited live over the MAVLink tunnel's `ParamClient`
+(see "MAVLink seam" below). `VtxPanel.svelte` groups the rows under the
+table's own section kickers (Radio, Camera, Encoder, Recorder, Power,
+Flight controller) in table order, and renders a header line that tracks
+the list state: "Waiting for the drone link…" before the session links,
+"Reading the drone's settings…" while the first list round is still out,
+"Some settings did not answer." if it came back partial, and nothing once
+it is complete. A dim "no heartbeat" tag sits beside the Refresh button
+when the session is linked but the drone's last Telem is stale — the rows
+stay editable, since the table itself is unaffected. The Refresh button
+(shown once the list has answered at all) re-lists from scratch, for a
+partial list or after a long disconnect from the flight controller.
+
+**Spotter mode** shows "VTX settings need GS mode." and every row as a
+greyed, read-only "—" — a spotter has no control channel to list or set
+anything over.
+
+**Committing a row** is always one `Session.paramSet(id, text)` per edit,
+never a batch: a Bool row is a switch that commits on toggle; Int, Real and
+Str rows commit on Enter or on blur, and only when the typed text parses
+for the row's type and differs from the drone's current value — an
+unparseable edit is left showing exactly what was typed, so the operator
+can fix it, rather than snapping back to the old value. **VENC_MODE** is
+the one composite row: a frame-rate number input (1–120) and a size
+`<select>` scoped to that rate's sensor mode (`docs/camera-modes.md`), with
+its own Apply button enabled only once the pair differs from the live
+value. Crossing a sensor-mode boundary while typing the rate re-selects
+the first size of the new mode, since the old size may not fit it.
+
+While a set is in flight, that row shows a busy state ("sending…" /
+"applying…") and every other row is disabled — the core applies one set at
+a time. The result line that follows reads "accepted" (fading 3 s after
+the push that reported it), "failed: `<reason>`", "unsupported: `<reason>`"
+to a row whose value or type the drone's loader refused, or "no answer" on
+a request that timed out. A badge next to the label reads "live" for a
+knob applied at once, or "restarts encoder ~0.6 s" for a rebuild (venc/record
+rows); a reprogram row (e.g. RADIO_LDPC, MSP_ENABLE) carries no badge, since
+nothing visible marks the change. A handful of rows also carry a one-line
+hint next to the badge (VENC_MODE/REC_FPS/REC_SIZE/LOWPWR_ENABLE/MSP_ENABLE)
+about another row it interacts with.
+
+The tab lives both on the windowed sidebar's **VTX** segment (see "Stats
+panel" below) and on the immersive layout's Config|VTX panel (see "Config
+form" below); nothing it shows or edits is written to `localStorage` — it
+is a live mirror of the drone's own state, not page config.
+
 ## Config form
 
 The Config tab (`web/ui/src/components/ConfigPanel.svelte`, and
 `ConfigSide.svelte` for the immersive/mobile layout) edits the following.
+In the immersive layout, `ConfigSide`'s own header carries a second
+segment, **Config | VTX** — the latter opens the VTX tab (above) in the
+same floating panel, with its own subtitle ("Live drone settings" against
+Config's "Editable while disconnected"); it starts on VTX while a session
+is live and back on Config once it drops.
 
 In both modes:
 
@@ -872,7 +926,8 @@ with its state in `uplink`; see "RCF heard %" below):
 
 Where the panel lives depends on the layout:
 
-- **Windowed:** the sidebar's Stats/Config/Debug tabs (`Sidebar.svelte`).
+- **Windowed:** the sidebar's Stats/Config/VTX/Debug tabs (`Sidebar.svelte`;
+  VTX is the parameter-table tab, see "VTX tab" above).
 - **Immersive/fullscreen or mobile:** a floating, draggable panel
   (`FloatStats.svelte`, `web/ui/src/lib/layout.js`), so it stays visible
   over the fullscreen video.

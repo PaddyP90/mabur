@@ -457,6 +457,12 @@ setting `[mavlink] bind` to the GS's LAN address in the GS's live config:
 back up `/etc/maburgs.toml`, edit it, restart `S96maburgs`
 (`docs/deploy.md`).
 
+## Operator UIs
+
+The web GS's VTX tab (`docs/web-gs.md` "VTX tab") renders the parameter
+table and drives it live; a `maburplay` screen onto the same table is not
+built.
+
 ## Later tenants
 
 Designed for, not built. Each is more traffic through the same tunnel and
@@ -474,7 +480,3 @@ one more case in the drone's routing; none needs a wire change.
 - **Calibration over MAVLink.** Needs a mabur dialect (running `mavgen`);
   calibration keeps its own `T_CAL_CMD`/`T_CAL_RESULT` frames until there
   is another reason to.
-- **Operator UIs.** A screen in `maburplay` and a form in the web GS
-  render from the parameter table: label, help, a widget per type, the
-  current value from a list, and the ack plus any status text as the
-  result. They sequence dependent sets by the ordering rules above.

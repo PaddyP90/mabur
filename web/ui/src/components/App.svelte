@@ -8,6 +8,7 @@
   import FsOverlay from './FsOverlay.svelte';
   import FloatStats from './FloatStats.svelte';
   import ConfigSide from './ConfigSide.svelte';
+  import VtxPanel from './VtxPanel.svelte';
   import { ui, saveMode, reloadToConfig, relaySavedAtLoad } from '../lib/ui.svelte.js';
   import { Session, WORKER_FAILED, isWindowWorkerFailure } from '../lib/session.js';
   import { VideoPipeline } from '../lib/video.js';
@@ -119,6 +120,10 @@
       osd.schedule();
     },
     onRecClosed: (n, b, e) => onRecClosed(n, b, e),
+    // The VTX tab's data (docs/web-gs.md "VTX tab"): the whole parameter
+    // table is replaced on every push, so the panel's "accepted" fade
+    // needs its own arrival stamp rather than trusting age_ms alone.
+    onParams: (p) => { ui.params = p; ui.paramsAt = Date.now(); },
     reload: reloadToConfig,
   });
 
@@ -133,12 +138,14 @@
   let prevState = 'idle';
   session.subscribe((s) => {
     sess = s;
-    // Left live (stopping/idle/error): free the hardware decoder now.
-    if (s.state !== 'live' && s.state !== 'connecting') { video.close(); clearOsd(); }
+    // Left live (stopping/idle/error): free the hardware decoder now, and
+    // drop the parameter table with it -- a stale drone's values must not
+    // outlive its session on the VTX tab.
+    if (s.state !== 'live' && s.state !== 'connecting') { video.close(); clearOsd(); ui.params = null; ui.paramsAt = null; }
     wake.set(s.state === 'live' || s.state === 'connecting');
-    if (s.state === 'live' && prevState !== 'live') { ui.tab = 'stats'; ui.cfgOpen = false; ui.statsVisible = true; }
-    if (prevState === 'stopping' && s.state === 'idle') { ui.tab = 'config'; ui.cfgOpen = true; }
-    if (s.state === 'error' && prevState === 'live') { ui.tab = 'config'; }
+    if (s.state === 'live' && prevState !== 'live') { ui.tab = 'stats'; ui.sideTab = 'vtx'; ui.cfgOpen = false; ui.statsVisible = true; }
+    if (prevState === 'stopping' && s.state === 'idle') { ui.tab = 'config'; ui.sideTab = 'config'; ui.cfgOpen = true; }
+    if (s.state === 'error' && prevState === 'live') { ui.tab = 'config'; ui.sideTab = 'config'; }
     if (s.state === 'error' && s.errorCode === 'relay-not-found') ui.relayFieldOpen = true;
     prevState = s.state;
   });
@@ -407,6 +414,10 @@
             onDisconnect={live ? disconnect : null} variant="rule" applied={ui.applied} recordings={recList}
             keyFp={keyFingerprint(ui.key)} {onLoadKey} {onClearKey} />
         {/snippet}
+        {#snippet vtx()}
+          <VtxPanel params={ui.params} paramsAt={ui.paramsAt} spotter={shownMode === 'spotter'}
+            onSet={(id, text) => session.paramSet(id, text)} onRefresh={() => session.paramRefresh()} />
+        {/snippet}
       </Sidebar>
     {/if}
   </div>
@@ -420,10 +431,16 @@
         onOpen={(o) => (ui.floatOpen = o)} onMove={(p) => (ui.fpos = p)} cw={LW} ch={LH} toLocal={frame.toLocal} />
     {/if}
     {#if ui.cfgOpen}
-      <ConfigSide onClose={() => (ui.cfgOpen = false)}>
-        <ConfigPanel cfg={ui.cfg} onChange={onCfgChange} locked={live || busy} spotter={ui.mode === 'spotter'}
-          onDisconnect={live ? disconnect : null} variant="card" applied={ui.applied} recordings={recList}
-          keyFp={keyFingerprint(ui.key)} {onLoadKey} {onClearKey} />
+      <ConfigSide onClose={() => (ui.cfgOpen = false)} tab={ui.sideTab} onTab={(t) => (ui.sideTab = t)}>
+        {#snippet config()}
+          <ConfigPanel cfg={ui.cfg} onChange={onCfgChange} locked={live || busy} spotter={ui.mode === 'spotter'}
+            onDisconnect={live ? disconnect : null} variant="card" applied={ui.applied} recordings={recList}
+            keyFp={keyFingerprint(ui.key)} {onLoadKey} {onClearKey} />
+        {/snippet}
+        {#snippet vtx()}
+          <VtxPanel params={ui.params} paramsAt={ui.paramsAt} spotter={shownMode === 'spotter'}
+            onSet={(id, text) => session.paramSet(id, text)} onRefresh={() => session.paramRefresh()} />
+        {/snippet}
       </ConfigSide>
     {/if}
   {/if}

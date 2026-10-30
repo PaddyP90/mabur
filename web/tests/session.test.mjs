@@ -20,6 +20,7 @@ function fakeModuleFactory({ exitOnStop = true, failStart = false } = {}) {
     const files = {};
     const m = {
       opts, files, recCalls: [], localCalls: [], utf8: [], freed: [], idrCalls: 0,
+      paramCalls: [], refreshCalls: 0,
       FS: { writeFile: (p, t) => { files[p] = t; } },
       _webgs_stop() { m.stopped = true; if (exitOnStop) queueMicrotask(() => opts.onExit(0)); },
       _webgs_set_rec(on) { m.recCalls.push(on); },
@@ -27,6 +28,8 @@ function fakeModuleFactory({ exitOnStop = true, failStart = false } = {}) {
       _free(p) { m.freed.push(p); },
       _webgs_set_local_rec(on, p) { m.localCalls.push([on, p]); },
       _webgs_request_idr() { m.idrCalls++; },
+      _webgs_param_set(a, b) { m.paramCalls.push([a, b]); return 0; },
+      _webgs_param_refresh() { m.refreshCalls++; return 0; },
     };
     for (const f of opts.preRun || []) f(m);
     made.push(m);
@@ -363,6 +366,43 @@ test('setLocalRec is ignored unless live', () => {
   s.setLocalRec('a.mp4');
   assert.equal(f.made.length, 0);
   assert.equal(s.snapshot.localWish, false);
+});
+
+// The core pushes the drone's parameter-table state as JSON via
+// Module.onParams, the same way onStats delivers stats_json -- GS mode on
+// every list-seq change, Spotter once at start.
+test('onParams delivers parsed state', async () => {
+  const got = [];
+  const f = fakeModuleFactory();
+  const s = new Session({
+    createModule: f.create, requestDevice: async () => {}, onAu: () => {}, onStats: () => {},
+    onParams: (p) => got.push(p), reload: () => {}, timers: fakeTimers(),
+  });
+  await s.connect({ mode: 'gs', ch: 136, w: 40, overlayToml: '' });
+  const payload = { linked: true, alive: true, list: 'complete', mismatch: false, pending: 0, rows: [] };
+  f.made[0].opts.onParams(JSON.stringify(payload));
+  assert.deepEqual(got, [payload]);
+});
+
+test('paramSet marshals two strings and frees them', async () => {
+  const { s, f } = mk();
+  s.paramSet('VENC_MODE', '90@1920x1080');   // no module yet: a no-op, not a throw
+  assert.equal(f.made.length, 0);
+  await s.connect({ mode: 'gs', ch: 136, w: 40, overlayToml: '' });
+  const m = f.made[0];
+  s.paramSet('VENC_MODE', '90@1920x1080');
+  assert.deepEqual(m.utf8.slice(-2), ['VENC_MODE', '90@1920x1080']);
+  assert.equal(m.freed.length, 2);
+  assert.deepEqual(m.paramCalls, [[42, 42]]);
+});
+
+test('paramRefresh is a no-op unless a module exists, otherwise calls the core', async () => {
+  const { s, f } = mk();
+  s.paramRefresh();
+  assert.equal(f.made.length, 0);
+  await s.connect({ mode: 'gs', ch: 136, w: 40, overlayToml: '' });
+  s.paramRefresh();
+  assert.equal(f.made[0].refreshCalls, 1);
 });
 
 test('onRecClosed reaches the page after the module exited (disconnect seals the file)', async () => {
