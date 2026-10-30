@@ -510,4 +510,43 @@ TEST(roll_without_a_next_sink_is_an_open_error) {
   d.stop();
 }
 
+// The roll baseline is the SPS's own coded size, never a caller's
+// width/height override: maburplay's configured screen mode (bcfg.width/
+// height) can legitimately differ from the drone's actual encoder output
+// (the documented fps/screen-mode mismatch), and that mismatch must not
+// look like a resolution change on every single IDR.
+TEST(roll_baseline_is_the_sps_not_the_override) {
+  const std::string path = scratch("rawdvr_override.mp4");
+  const std::string next_path = scratch("rawdvr_override_next.mp4");
+  std::remove(path.c_str());
+  std::remove(next_path.c_str());
+  RawDvr d;
+  int calls = 0;
+  d.set_next_sink([&](std::string* name) {
+    ++calls;
+    *name = next_path;
+    return mabur::open_file_sink(*name);
+  });
+  // Override 1920x1080 while the stream is actually 1280x720: the moov
+  // records the override, but the roll baseline tracks the real SPS.
+  d.start(path, 1920, 1080);
+  feed(d, idr_au_720(1), 0);
+  feed(d, p_au(2), 16667);
+  feed(d, idr_au_720(3), 33333);   // same 720p SPS again: must not roll
+  feed(d, p_au(4), 50000);
+  CHECK(d.rolls() == 0);
+  CHECK(calls == 0);
+  CHECK(moov_size_of(path) == std::make_pair(1920, 1080));   // the override, unchanged
+
+  feed(d, idr_au_1080(5), 66666);  // the SPS itself changes now: rolls
+  feed(d, p_au(6), 83333);
+  CHECK(d.rolls() == 1);
+  CHECK(calls == 1);
+  d.stop();
+  // After the roll the stream is the authority: the new file's declared
+  // size is the SPS size that forced it, not the first file's override
+  // (same numeric value here, 1920x1080, but for a different reason).
+  CHECK(moov_size_of(next_path) == std::make_pair(1920, 1080));
+}
+
 MTEST_MAIN

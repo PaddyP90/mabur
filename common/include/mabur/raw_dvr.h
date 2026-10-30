@@ -82,7 +82,16 @@ class RawDvr {
   std::unique_ptr<DvrSink> sink_;  // start(sink) until the file opens
   bool opened_ = false;
   int width_ = 0, height_ = 0, fragment_ms_ = 1000;
-  int width_open_ = 0, height_open_ = 0;  // the size the open file was created with
+  int width_open_ = 0, height_open_ = 0;  // the open file's declared (moov) size
+  // The SPS's own coded size observed when this file was opened or last
+  // rolled -- the roll baseline. Deliberately separate from
+  // width_open_/height_open_: a caller's width/height override (maburplay's
+  // configured screen mode) can legitimately differ from what the drone's
+  // encoder is actually sending (the documented fps/screen-mode mismatch),
+  // and that must never look like a mid-recording resolution change. 0x0
+  // when the SPS hasn't parsed successfully yet; the next IRAP whose SPS
+  // does parse adopts it as the baseline without rolling.
+  int sps_open_w_ = 0, sps_open_h_ = 0;
   NextSink next_sink_;
   uint64_t rolls_ = 0;
   uint64_t last_sealed_bytes_ = 0;

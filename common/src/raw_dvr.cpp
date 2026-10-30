@@ -21,6 +21,8 @@ void RawDvr::start(const std::string& path, int width, int height, int fragment_
   opened_ = false;
   width_open_ = 0;
   height_open_ = 0;
+  sps_open_w_ = 0;
+  sps_open_h_ = 0;
   err_ = Err::None;
   state_ = State::WaitSync;
   rolls_ = 0;
@@ -42,8 +44,13 @@ bool RawDvr::roll(int w, int h) {
     return false;
   }
   path_ = name;
+  // After a roll the stream is the authority: the width/height override (if
+  // any) only ever shaped the FIRST file, and the new file's declared size
+  // is exactly the SPS size that forced the roll.
   width_open_ = w;
   height_open_ = h;
+  sps_open_w_ = w;
+  sps_open_h_ = h;
   opened_ = true;
   ++rolls_;
   return true;
@@ -90,6 +97,14 @@ void RawDvr::feed(const uint8_t* au, size_t n, uint32_t pts_us, bool complete) {
     opened_ = true;
     width_open_ = w;
     height_open_ = h;
+    // Roll baseline: the SPS's OWN size, never the width/height override --
+    // a configured screen mode that mismatches the drone's actual encoder
+    // output (the documented fps/screen-mode mismatch case) must not look
+    // like a resolution change. 0x0 when it doesn't parse; see sps_open_w_.
+    if (!params_.sps_dimensions(&sps_open_w_, &sps_open_h_)) {
+      sps_open_w_ = 0;
+      sps_open_h_ = 0;
+    }
     state_ = State::Recording;
   } else if (opened_ && key) {
     // The file's header carries one size; a coded-size change (the drone
@@ -98,8 +113,16 @@ void RawDvr::feed(const uint8_t* au, size_t n, uint32_t pts_us, bool complete) {
     // changed the SPS. Changed VPS/SPS/PPS bytes at the SAME size are not a
     // roll -- the live GDR encoder rewrites them on every refresh start.
     int w = 0, h = 0;
-    if (params_.sps_dimensions(&w, &h) && (w != width_open_ || h != height_open_)) {
-      if (!roll(w, h)) return;
+    if (params_.sps_dimensions(&w, &h)) {
+      if (sps_open_w_ == 0 && sps_open_h_ == 0) {
+        // The SPS didn't parse at open (or the last roll): nothing to
+        // compare against yet, so this IRAP's SPS becomes the baseline
+        // without rolling.
+        sps_open_w_ = w;
+        sps_open_h_ = h;
+      } else if (w != sps_open_w_ || h != sps_open_h_) {
+        if (!roll(w, h)) return;
+      }
     }
   }
   mux_.write_sample(au, n, pts_us, key);
