@@ -1,8 +1,7 @@
 // Pure view logic for the web GS "VTX" tab (no DOM). The core pushes the
 // drone's parameter state as JSON via Module.onParams (common/include/
 // mabur/config_params.h kTable, 12 rows); VtxPanel.svelte renders what these
-// helpers compute. docs/mavlink.md documents the push shape and the apply
-// paths (knob/reprogram/rebuild) this file turns into badge text.
+// helpers compute. docs/mavlink.md documents the push shape.
 
 // docs/camera-modes.md: sensor field-of-view mode by fps, and the encoder
 // sizes that fit it.
@@ -17,29 +16,101 @@ export function modeSizes(fps) {
   return MODE_SIZES.find((m) => fps <= m.maxFps).sizes;
 }
 
-// The fps box's text as a frame rate: a plain integer 1..120, else null.
-// Never clamped -- the box keeps exactly what the operator typed.
-export function parseFps(text) {
-  const s = String(text ?? '').trim();
-  if (!/^\d{1,3}$/.test(s)) return null;
-  const n = Number(s);
-  return n >= 1 && n <= 120 ? n : null;
-}
-
-// The size options for `fps`: modeSizes(fps), plus the drone's own size
-// when it runs one outside that list in the same sensor mode (an ssh-set
-// custom size), so a fps-only change keeps it rather than silently
-// swapping in the mode's first size. Appended, so crossing into this mode
-// from another still lands on the mode's first standard size.
-export function modeOptions(fps, liveValue) {
-  const sizes = modeSizes(fps);
-  const live = parseMode(liveValue);
-  if (!live || sizes.length === 0 || modeSizes(live.fps) !== sizes || sizes.includes(live.size)) return sizes;
-  return [...sizes, live.size];
-}
-
 export function modeText(fps, size) {
   return `${fps}@${size}`;
+}
+
+// The camera-mode dropdown's frame rates, each offering every size of its
+// sensor mode.
+export const MODE_FPS = [60, 90, 100, 120];
+
+const sizeLabel = (size) => size.replace('x', '×');
+
+function modeLabel(fps, size) {
+  return `${fps} fps · ${sizeLabel(size)}${fps > 90 ? ' · cropped view' : ''}`;
+}
+
+// How far the display's refresh may sit from a camera rate and still
+// match it: the phase lock's own rate-mismatch window (docs/phase-lock.md
+// "Rate mismatch"). A whole multiple is not a match.
+export const DISPLAY_MATCH_HZ = 0.55;
+
+const matchesDisplay = (fps, hz) => Math.abs(fps - hz) <= DISPLAY_MATCH_HZ;
+const knownHz = (hz) => Number.isFinite(hz) && hz > 0;
+
+// The VENC_MODE dropdown, as { value: "<fps>@<WxH>", label }: every size
+// of each MODE_FPS rate, plus the drone's own value first when it runs one
+// outside that list (an ssh-set rate or size), so the dropdown always
+// shows what the drone runs. With the display's measured refresh
+// (`displayHz`), only the rates that match it are offered -- a mismatched
+// pair can't phase-lock and judders -- unless none does, or the rate isn't
+// known yet, when every choice is.
+export function modeChoices(liveValue, displayHz = null) {
+  let choices = [];
+  for (const fps of MODE_FPS) {
+    for (const size of modeSizes(fps)) choices.push({ value: modeText(fps, size), label: modeLabel(fps, size) });
+  }
+  if (knownHz(displayHz) && MODE_FPS.some((fps) => matchesDisplay(fps, displayHz))) {
+    choices = choices.filter((c) => c.value === liveValue || matchesDisplay(parseMode(c.value).fps, displayHz));
+  }
+  const live = parseMode(liveValue);
+  if (live && !choices.some((c) => c.value === liveValue)) {
+    choices.unshift({ value: liveValue, label: modeLabel(live.fps, live.size) });
+  }
+  return choices;
+}
+
+// The camera-mode hint's line about the display: whether the dropdown
+// follows its refresh, naming it; '' while the rate isn't known.
+export function modeDisplayNote(displayHz) {
+  if (!knownHz(displayHz)) return '';
+  const hz = Math.round(displayHz);
+  return MODE_FPS.some((fps) => matchesDisplay(fps, displayHz))
+    ? `Showing the rates that match this display (${hz} Hz).`
+    : `No camera rate matches this display (${hz} Hz).`;
+}
+
+// The REC_SIZE dropdown for the camera mode the drone runs (`modeValue`,
+// VENC_MODE's value): the sizes of that sensor mode, which share the
+// camera's aspect and fit the capture window the recorder's scaler reads
+// (docs/vtx-recorder.md), plus the camera's own size and the drone's
+// current recording size when either is outside that list. Nothing above
+// 1920x1080 is offered: that needs the 30 fps 4K sensor mode, which the
+// link cannot run beside.
+export function recSizeChoices(modeValue, recValue) {
+  const m = parseMode(modeValue);
+  const sizes = m ? [...modeSizes(m.fps)] : [];
+  if (m && sizes.length && !sizes.includes(m.size)) sizes.push(m.size);
+  if (recValue && !sizes.includes(recValue)) sizes.push(recValue);
+  return sizes.map((size) => ({ value: size, label: sizeLabel(size) }));
+}
+
+// VENC_SLICES is shown as On/Off: on is 4 row slices, off is 1 (whole
+// frames, so no slice salvage).
+export const SLICES_ON = '4';
+export const SLICES_OFF = '1';
+
+// Which widget a row gets: 'mode' and 'recsize' dropdowns, an On/Off
+// 'toggle', or a text/number 'input'.
+export function rowWidget(row) {
+  if (row.id === 'VENC_MODE') return 'mode';
+  if (row.id === 'REC_SIZE') return 'recsize';
+  if (row.type === 'bool' || row.id === 'VENC_SLICES') return 'toggle';
+  return 'input';
+}
+
+// The wire text an On/Off row sends for each side.
+export function toggleValues(row) {
+  return row.id === 'VENC_SLICES' ? { on: SLICES_ON, off: SLICES_OFF } : { on: '1', off: '0' };
+}
+
+// Which side of an On/Off row `shown` (its value) lights: 'on', 'off', or
+// null while the value is unknown. Any slice count above 1 is on.
+export function toggleState(row, shown) {
+  const t = toggleValues(row);
+  if (shown === t.off) return 'off';
+  if (row.id === 'VENC_SLICES') return /^\d+$/.test(shown ?? '') && Number(shown) > 1 ? 'on' : null;
+  return shown === t.on ? 'on' : null;
 }
 
 // Mirror of config_params.h parse_mode_text: "<fps>@<WxH>", each number a
@@ -80,45 +151,6 @@ export function commitText(type, input) {
   return null;
 }
 
-// The VENC_MODE row's draft: the fps box's raw text and the chosen size.
-// Empty until the drone's value is known -- never a made-up default an
-// Apply could send.
-export function modeDraftFrom(value) {
-  const m = parseMode(value);
-  return m ? { fpsText: String(m.fps), size: m.size } : { fpsText: '', size: '' };
-}
-
-function sameDraft(a, b) {
-  return a.fpsText === b.fpsText && a.size === b.size;
-}
-
-// One step of the VENC_MODE draft on a params push. st = { draft, seen,
-// pending }: `seen` is the drone value the draft was last synced from,
-// `pending` whether the row was sending/in_progress at the last step.
-// The draft follows the drone's value whenever that changes and the
-// operator hasn't edited it (it still equals what `seen` gives), and
-// always once a set of this row leaves sending/in_progress; while a set
-// is in flight it is left alone. Returns `st` itself when nothing changed.
-export function modeDraftNext(st, value, state) {
-  const pending = state === 'sending' || state === 'in_progress';
-  if (pending) return st.pending ? st : { ...st, pending: true };
-  const v = value ?? null;
-  if (st.pending) return { draft: modeDraftFrom(v), seen: v, pending: false };
-  if (v === st.seen) return st;
-  const clean = sameDraft(st.draft, modeDraftFrom(st.seen));
-  return { draft: clean ? modeDraftFrom(v) : st.draft, seen: v, pending: false };
-}
-
-// The "<fps>@<WxH>" an Apply would send, or null while Apply must stay
-// disabled: the fps text isn't an integer 1..120, no size is chosen, or
-// the pair is already the drone's live value.
-export function modeApplyText(draft, liveValue) {
-  const fps = parseFps(draft.fpsText);
-  if (fps == null || !draft.size) return null;
-  const text = modeText(fps, draft.size);
-  return text === liveValue ? null : text;
-}
-
 // The result line for text the page could not turn into the row's type
 // (commitText returned null): shown locally, nothing is sent.
 export function invalidText(type) {
@@ -126,12 +158,6 @@ export function invalidText(type) {
   if (type === 'real') return 'not a valid number';
   if (type === 'str') return 'not valid text: 1–127 printable characters, no " or \\';
   return 'not a valid value';
-}
-
-// The row label's dim config-key half. VENC_MODE spells two keys.
-export function rowKeys(row) {
-  if (row.id === 'VENC_MODE') return 'venc.fps + venc.size';
-  return `${row.section}.${row.key}`;
 }
 
 // The "no heartbeat" tag: GS mode, linked, and the drone's heartbeat was
@@ -155,22 +181,72 @@ export function commitAnswered(snap, row) {
   return snap.age_ms == null || row.age_ms < snap.age_ms;
 }
 
-// The tab's section order and headings.
+// The tab's section order and headings: Radio last, after the settings an
+// operator changes per flight.
 export const SECTION_KICKER = {
-  radio: 'Radio',
   venc: 'Camera',
   encoder: 'Encoder',
   record: 'Recorder',
   low_power: 'Power',
   msp: 'Flight controller',
+  radio: 'Radio',
+};
+const SECTION_ORDER = Object.keys(SECTION_KICKER);
+
+// Rows the tab leaves off: still in the drone's table (and editable over
+// MAVLink from elsewhere), but not an operator setting for this page.
+export const HIDDEN = new Set(['RADIO_WALL_MARGN']);
+
+// Each row's label: what the setting is, not its MAVLink id or config key.
+export const LABELS = {
+  RADIO_LDPC: 'LDPC coding',
+  VENC_MODE: 'Camera mode',
+  VENC_SLICES: 'Row slices',
+  ENC_BITRATE_MAX: 'Max bitrate (kbps)',
+  ENC_AIRTIME: 'Airtime budget',
+  REC_ENABLE: 'Onboard recording',
+  REC_BITRATE: 'Bitrate (kbps)',
+  REC_FPS: 'Frame rate',
+  REC_SIZE: 'Resolution',
+  LOWPWR_ENABLE: 'Low power while disarmed',
+  MSP_ENABLE: 'MSP',
 };
 
-// Groups the pushed rows by section, in table order (first appearance order,
-// since the core always pushes rows in kTable order already).
+export function rowLabel(row) {
+  return LABELS[row.id] ?? row.id;
+}
+
+// Help text in place of the table's, where the table's spells the wire
+// format or a config key rather than what the tab shows.
+const HELP = {
+  VENC_MODE: 'Camera frame rate and encoder size. Above 90 fps the sensor crops its view.',
+  VENC_SLICES: 'Encodes each frame as 4 row slices, so the ground station can patch a frame that lost a slice instead of dropping it. Off sends whole frames.',
+  REC_SIZE: 'Onboard recording resolution; the choices follow the camera mode.',
+  LOWPWR_ENABLE: 'Lower bitrate and frame rate while disarmed to keep the VTX cool. Needs MSP on for the arm state.',
+};
+
+// The hint line under a row's widget: its help, then the one sentence
+// about a row it interacts with, if any, each ending in a full stop.
+export function rowHint(row) {
+  const help = HELP[row.id] ?? row.help ?? '';
+  return [help, HINTS[row.id]].filter(Boolean).map((t) => t.replace(/\.?$/, '.')).join(' ');
+}
+
+// The recorder's own settings, left off the tab while REC_ENABLE reads off
+// (`recEnable`: its shown value). An unknown value hides nothing.
+export const REC_SETTINGS = new Set(['REC_BITRATE', 'REC_FPS', 'REC_SIZE']);
+
+export function rowShown(row, recEnable) {
+  return !(REC_SETTINGS.has(row.id) && recEnable === '0');
+}
+
+// Groups the pushed rows by section, in SECTION_KICKER order (a section it
+// doesn't name goes last), rows in table order, leaving out HIDDEN rows.
 export function groupRows(rows) {
   const groups = [];
   const bySection = new Map();
   for (const row of rows) {
+    if (HIDDEN.has(row.id)) continue;
     let g = bySection.get(row.section);
     if (!g) {
       g = { key: row.section, kicker: SECTION_KICKER[row.section] ?? row.section, rows: [] };
@@ -179,27 +255,15 @@ export function groupRows(rows) {
     }
     g.rows.push(row);
   }
-  return groups;
+  const rank = (g) => { const i = SECTION_ORDER.indexOf(g.key); return i < 0 ? SECTION_ORDER.length : i; };
+  return groups.sort((a, b) => rank(a) - rank(b));
 }
 
 // One sentence next to the rows this knob interacts with.
 export const HINTS = {
   VENC_MODE: 'A change of aspect also sets the recording size to the new camera size',
-  REC_FPS: 'At most the camera fps',
-  REC_SIZE: 'Same aspect as the camera size; above 1080p needs ≤ 30 fps',
-  LOWPWR_ENABLE: 'Needs MSP on',
   MSP_ENABLE: 'Turn low power off first',
 };
-
-// docs/mavlink.md "Applying a set": a knob takes effect at once with
-// nothing on the row to show for it; a reprogram changes a radio or
-// peripheral setting in place and is badged "live"; a rebuild stops and
-// restarts the encoder pipeline (about 0.5 s + ~0.1 s to first frame).
-export function applyBadge(apply) {
-  if (apply === 'reprogram') return 'live';
-  if (apply === 'rebuild') return 'restarts encoder ~0.6 s';
-  return '';
-}
 
 export function headerText(params, mode) {
   if (mode === 'spotter') return 'VTX settings need GS mode.';
@@ -255,8 +319,4 @@ export function rowView(row, idx, pending, typed, sincePushMs = 0) {
       break;
   }
   return { shown, disabled, busy, result, resultKind };
-}
-
-export function showRefresh(params) {
-  return params.list === 'complete' || params.list === 'partial';
 }

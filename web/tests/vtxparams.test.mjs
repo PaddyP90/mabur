@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {
   MODE_SIZES, modeSizes, modeText, parseMode, commitText, SECTION_KICKER, groupRows,
-  HINTS, applyBadge, headerText, rowView, showRefresh, parseFps, modeOptions, modeDraftFrom,
-  modeDraftNext, modeApplyText, invalidText, rowKeys, showNoHeartbeat, commitAnswered,
+  HINTS, LABELS, HIDDEN, rowLabel, rowHint, headerText, rowView, invalidText, showNoHeartbeat, commitAnswered,
+  MODE_FPS, modeChoices, recSizeChoices, rowWidget, toggleValues, toggleState, SLICES_ON, SLICES_OFF, REC_SETTINGS, rowShown, DISPLAY_MATCH_HZ, modeDisplayNote,
 } from '../ui/src/lib/vtxparams.js';
 
 test('modeSizes per sensor mode and at the boundaries', () => {
@@ -33,70 +33,115 @@ test('modeText and parseMode round trip', () => {
   assert.equal(parseMode('4294967356@1x1'), null);
 });
 
-test('parseFps takes only a plain integer 1..120, never clamps', () => {
-  assert.equal(parseFps('90'), 90);
-  assert.equal(parseFps(' 120 '), 120);
-  assert.equal(parseFps('1'), 1);
-  assert.equal(parseFps(''), null);
-  assert.equal(parseFps('0'), null);
-  assert.equal(parseFps('121'), null);
-  assert.equal(parseFps('190'), null);
-  assert.equal(parseFps('9.5'), null);
-  assert.equal(parseFps('6e1'), null);
-  assert.equal(parseFps(null), null);
+test('modeChoices: every size of each MODE_FPS rate, crop modes labelled', () => {
+  const c = modeChoices('90@1920x1080');
+  assert.deepEqual(MODE_FPS, [60, 90, 100, 120]);
+  assert.deepEqual(c.map((x) => x.value), [
+    '60@1920x1080', '60@1280x720', '90@1920x1080', '90@1280x720',
+    '100@1728x972', '100@1280x720', '120@1728x816', '120@1152x544', '120@864x408',
+  ]);
+  assert.equal(c[0].label, '60 fps · 1920×1080');
+  assert.equal(c[4].label, '100 fps · 1728×972 · cropped view');
 });
 
-test('modeOptions keeps a custom live size in its own sensor mode only', () => {
-  assert.deepEqual(modeOptions(60, '60@1920x1080'), ['1920x1080', '1280x720']);
-  assert.deepEqual(modeOptions(60, '60@1600x900'), ['1920x1080', '1280x720', '1600x900']);
-  assert.deepEqual(modeOptions(30, '60@1600x900'), ['1920x1080', '1280x720', '1600x900']);
-  assert.deepEqual(modeOptions(120, '60@1600x900'), ['1728x816', '1152x544', '864x408']);
-  assert.deepEqual(modeOptions(60, null), ['1920x1080', '1280x720']);
-  assert.deepEqual(modeOptions(0, '60@1600x900'), []);
+test('modeChoices puts an off-list live value first, and only then', () => {
+  assert.deepEqual(modeChoices('30@1280x720')[0], { value: '30@1280x720', label: '30 fps · 1280×720' });
+  assert.equal(modeChoices('30@1280x720').length, 10);
+  assert.equal(modeChoices('120@1152x544').length, 9);
+  assert.equal(modeChoices(null).length, 9);
+  assert.equal(modeChoices('').length, 9);
 });
 
-test('VENC_MODE draft: empty until the drone answers, then follows it', () => {
-  // Mounted before the first list: nothing to apply, no made-up default.
-  let st = { draft: modeDraftFrom(null), seen: null, pending: false };
-  assert.deepEqual(st.draft, { fpsText: '', size: '' });
-  assert.equal(modeApplyText(st.draft, null), null);
-  st = modeDraftNext(st, null, 'idle');
-  assert.deepEqual(st.draft, { fpsText: '', size: '' });
-  // The list arrives: the untouched draft takes the drone's value.
-  st = modeDraftNext(st, '60@1920x1080', 'idle');
-  assert.deepEqual(st.draft, { fpsText: '60', size: '1920x1080' });
-  assert.equal(modeApplyText(st.draft, '60@1920x1080'), null);
-  // A later change (a re-list after another set) is followed too.
-  st = modeDraftNext(st, '90@1280x720', 'idle');
-  assert.deepEqual(st.draft, { fpsText: '90', size: '1280x720' });
-  // An unchanged push returns the same object.
-  assert.equal(modeDraftNext(st, '90@1280x720', 'idle'), st);
+const values = (c) => c.map((x) => x.value);
+
+test('modeChoices keeps only the rates within DISPLAY_MATCH_HZ of the display', () => {
+  assert.equal(DISPLAY_MATCH_HZ, 0.55);
+  assert.deepEqual(values(modeChoices('60@1920x1080', 60.0)), ['60@1920x1080', '60@1280x720']);
+  assert.deepEqual(values(modeChoices('60@1920x1080', 59.94)), ['60@1920x1080', '60@1280x720']);
+  assert.deepEqual(values(modeChoices('100@1728x972', 100.4)), ['100@1728x972', '100@1280x720']);
+  assert.deepEqual(values(modeChoices('120@1728x816', 119.88)), ['120@1728x816', '120@1152x544', '120@864x408']);
+  // a multiple is not a match: 60 fps on a 120 Hz panel trips the rate check
+  assert.ok(!values(modeChoices('120@1728x816', 120)).includes('60@1920x1080'));
+  assert.deepEqual(values(modeChoices('60@1920x1080', 60.6)), values(modeChoices('60@1920x1080')));
 });
 
-test('VENC_MODE draft: an edited draft survives pushes until its own set settles', () => {
-  let st = modeDraftNext({ draft: modeDraftFrom(null), seen: null, pending: false }, '60@1920x1080', 'idle');
-  st = { ...st, draft: { fpsText: '60', size: '1280x720' } };   // the operator picks a size
-  assert.equal(modeApplyText(st.draft, '60@1920x1080'), '60@1280x720');
-  st = modeDraftNext(st, '50@1920x1080', 'idle');                // someone else's change
-  assert.deepEqual(st.draft, { fpsText: '60', size: '1280x720' });
-  st = modeDraftNext(st, '50@1920x1080', 'sending');
-  st = modeDraftNext(st, '50@1920x1080', 'in_progress');
-  assert.deepEqual(st.draft, { fpsText: '60', size: '1280x720' });
-  st = modeDraftNext(st, '60@1280x720', 'accepted');             // terminal: back on the drone's value
-  assert.deepEqual(st.draft, { fpsText: '60', size: '1280x720' });
-  assert.equal(st.pending, false);
-  st = modeDraftNext({ ...st, draft: { fpsText: '120', size: '1728x816' } }, '60@1280x720', 'sending');
-  st = modeDraftNext(st, '60@1280x720', 'failed');
-  assert.deepEqual(st.draft, { fpsText: '60', size: '1280x720' });
+test('modeChoices keeps the drone value when it does not match the display', () => {
+  assert.deepEqual(values(modeChoices('90@1280x720', 60)), ['60@1920x1080', '60@1280x720', '90@1280x720']);
+  assert.deepEqual(values(modeChoices('30@1280x720', 60)), ['30@1280x720', '60@1920x1080', '60@1280x720']);
 });
 
-test('modeApplyText refuses fps text that is not 1..120 and a pair equal to the live value', () => {
-  assert.equal(modeApplyText({ fpsText: '', size: '1920x1080' }, '60@1920x1080'), null);
-  assert.equal(modeApplyText({ fpsText: '190', size: '1920x1080' }, '60@1920x1080'), null);
-  assert.equal(modeApplyText({ fpsText: '90', size: '' }, '60@1920x1080'), null);
-  assert.equal(modeApplyText({ fpsText: '60', size: '1920x1080' }, '60@1920x1080'), null);
-  assert.equal(modeApplyText({ fpsText: '90', size: '1920x1080' }, '60@1920x1080'), '90@1920x1080');
-  assert.equal(modeApplyText({ fpsText: '90', size: '1920x1080' }, null), '90@1920x1080');
+test('modeChoices lists everything with no display rate or no matching rate', () => {
+  const all = values(modeChoices('90@1920x1080'));
+  assert.equal(all.length, 9);
+  assert.deepEqual(values(modeChoices('90@1920x1080', null)), all);
+  assert.deepEqual(values(modeChoices('90@1920x1080', 0)), all);
+  assert.deepEqual(values(modeChoices('90@1920x1080', NaN)), all);
+  assert.deepEqual(values(modeChoices('90@1920x1080', 144)), all);
+});
+
+test('modeDisplayNote names the display rate and whether the list follows it', () => {
+  assert.equal(modeDisplayNote(59.94), 'Showing the rates that match this display (60 Hz).');
+  assert.equal(modeDisplayNote(144.0), 'No camera rate matches this display (144 Hz).');
+  assert.equal(modeDisplayNote(null), '');
+  assert.equal(modeDisplayNote(0), '');
+});
+
+test('recSizeChoices follow the camera mode the drone runs', () => {
+  const v = (m, r) => recSizeChoices(m, r).map((x) => x.value);
+  assert.deepEqual(v('90@1280x720', '1920x1080'), ['1920x1080', '1280x720']);
+  assert.deepEqual(v('100@1728x972', '1728x972'), ['1728x972', '1280x720']);
+  assert.deepEqual(v('120@1728x816', '864x408'), ['1728x816', '1152x544', '864x408']);
+  assert.equal(recSizeChoices('60@1920x1080', '1280x720')[1].label, '1280×720');
+});
+
+test('recSizeChoices keep the camera size and the drone value when off the list', () => {
+  const v = (m, r) => recSizeChoices(m, r).map((x) => x.value);
+  assert.deepEqual(v('90@1600x900', '1600x900'), ['1920x1080', '1280x720', '1600x900']);
+  // an upscale left on the drone stays selectable as what it runs
+  assert.deepEqual(v('100@1728x972', '1920x1080'), ['1728x972', '1280x720', '1920x1080']);
+  assert.deepEqual(v(null, '1280x720'), ['1280x720']);
+  assert.deepEqual(v(null, ''), []);
+});
+
+test('rowShown hides the recorder settings only while REC_ENABLE reads off', () => {
+  for (const id of REC_SETTINGS) {
+    assert.equal(rowShown({ id }, '0'), false);
+    assert.equal(rowShown({ id }, '1'), true);
+    assert.equal(rowShown({ id }, ''), true);
+    assert.equal(rowShown({ id }, null), true);
+  }
+  assert.equal(rowShown({ id: 'REC_ENABLE' }, '0'), true);
+  assert.equal(rowShown({ id: 'ENC_BITRATE_MAX' }, '0'), true);
+});
+
+test('rowWidget per row', () => {
+  assert.equal(rowWidget({ id: 'VENC_MODE', type: 'str' }), 'mode');
+  assert.equal(rowWidget({ id: 'REC_SIZE', type: 'str' }), 'recsize');
+  assert.equal(rowWidget({ id: 'VENC_SLICES', type: 'int' }), 'toggle');
+  assert.equal(rowWidget({ id: 'RADIO_LDPC', type: 'bool' }), 'toggle');
+  assert.equal(rowWidget({ id: 'REC_FPS', type: 'int' }), 'input');
+});
+
+test('slices toggle: on sends 4, off sends 1, any count above 1 reads on', () => {
+  const row = { id: 'VENC_SLICES', type: 'int' };
+  assert.deepEqual(toggleValues(row), { on: SLICES_ON, off: SLICES_OFF });
+  assert.equal(SLICES_ON, '4');
+  assert.equal(SLICES_OFF, '1');
+  assert.equal(commitText('int', SLICES_ON), '4');
+  assert.equal(toggleState(row, '1'), 'off');
+  assert.equal(toggleState(row, '4'), 'on');
+  assert.equal(toggleState(row, '6'), 'on');
+  assert.equal(toggleState(row, ''), null);
+  assert.equal(toggleState(row, '0'), null);
+});
+
+test('bool toggle: 1 on, 0 off, unknown neither', () => {
+  const row = { id: 'RADIO_LDPC', type: 'bool' };
+  assert.deepEqual(toggleValues(row), { on: '1', off: '0' });
+  assert.equal(commitText('bool', '1'), '1');
+  assert.equal(toggleState(row, '1'), 'on');
+  assert.equal(toggleState(row, '0'), 'off');
+  assert.equal(toggleState(row, ''), null);
 });
 
 test('commitText per type', () => {
@@ -138,12 +183,19 @@ const ROWS = [
   { id: 'MSP_ENABLE', section: 'msp' },
 ];
 
-test('groupRows keeps table order under section kickers', () => {
+test('groupRows: SECTION_KICKER order with Radio last, rows in table order', () => {
   const groups = groupRows(ROWS);
   assert.deepEqual(groups.map((g) => g.kicker),
-    ['Radio', 'Camera', 'Encoder', 'Recorder', 'Power', 'Flight controller']);
+    ['Camera', 'Encoder', 'Recorder', 'Power', 'Flight controller', 'Radio']);
+  assert.equal(groupRows([{ id: 'X', section: 'other' }, ...ROWS]).at(-1).key, 'other');
   const camera = groups.find((g) => g.key === 'venc');
   assert.deepEqual(camera.rows.map((r) => r.id), ['VENC_MODE', 'VENC_SLICES']);
+});
+
+test('groupRows leaves out HIDDEN rows', () => {
+  const radio = groupRows(ROWS).find((g) => g.key === 'radio');
+  assert.deepEqual(radio.rows.map((r) => r.id), ['RADIO_LDPC']);
+  assert.ok(groupRows(ROWS).every((g) => g.rows.every((r) => !HIDDEN.has(r.id))));
 });
 
 test('invalidText names the row type', () => {
@@ -153,9 +205,19 @@ test('invalidText names the row type', () => {
   assert.equal(commitText('int', '1.5'), null);   // the case it is shown for
 });
 
-test('rowKeys: section.key, both keys for VENC_MODE', () => {
-  assert.equal(rowKeys({ id: 'REC_FPS', section: 'record', key: 'fps' }), 'record.fps');
-  assert.equal(rowKeys({ id: 'VENC_MODE', section: 'venc', key: 'fps' }), 'venc.fps + venc.size');
+test('rowLabel names the setting, falling back to the id', () => {
+  assert.equal(rowLabel({ id: 'RADIO_LDPC' }), 'LDPC coding');
+  assert.equal(rowLabel({ id: 'VENC_MODE' }), 'Camera mode');
+  assert.equal(rowLabel({ id: 'NEW_ROW' }), 'NEW_ROW');
+});
+
+test('rowHint: help then the interaction hint, each a full sentence', () => {
+  assert.equal(rowHint({ id: 'ENC_BITRATE_MAX', help: 'Bitrate ceiling, kbps' }), 'Bitrate ceiling, kbps.');
+  assert.equal(rowHint({ id: 'MSP_ENABLE', help: 'Flight-controller link for the OSD and arm state' }),
+    'Flight-controller link for the OSD and arm state. Turn low power off first.');
+  assert.equal(rowHint({ id: 'X', help: 'Already ends.' }), 'Already ends.');
+  assert.equal(rowHint({ id: 'X', help: '' }), '');
+  assert.doesNotMatch(rowHint({ id: 'VENC_MODE', help: 'Camera frame rate and encoder size, <fps>@<WxH>' }), /<fps>/);
 });
 
 test('showNoHeartbeat only once a heartbeat was seen and then lost', () => {
@@ -259,22 +321,10 @@ test('rowView result/resultKind for the remaining states', () => {
     { result: '', resultKind: '' });
 });
 
-test('applyBadge per apply path', () => {
-  assert.equal(applyBadge('knob'), '');
-  assert.equal(applyBadge('reprogram'), 'live');
-  assert.equal(applyBadge('rebuild'), 'restarts encoder ~0.6 s');
-});
-
-test('showRefresh only once listing has answered (complete or partial)', () => {
-  assert.equal(showRefresh({ list: 'none' }), false);
-  assert.equal(showRefresh({ list: 'pending' }), false);
-  assert.equal(showRefresh({ list: 'complete' }), true);
-  assert.equal(showRefresh({ list: 'partial' }), true);
-});
-
 // Drift guard: a renamed or re-sectioned row in the parameter table must
-// reach this page's hints and section kickers, or this test fails.
-test('HINTS keys and SECTION_KICKER sections name real rows in config_params.h', () => {
+// reach this page's labels, hints and section kickers, and a new row needs
+// a label (or a place in HIDDEN), or this test fails.
+test('HINTS, LABELS, HIDDEN and SECTION_KICKER name real rows in config_params.h', () => {
   const h = fs.readFileSync(new URL('../../common/include/mabur/config_params.h', import.meta.url), 'utf8');
   const ids = new Set();
   const sections = new Set();
@@ -286,6 +336,9 @@ test('HINTS keys and SECTION_KICKER sections name real rows in config_params.h',
   }
   assert.ok(ids.size >= 12, 'parsed the row table');
   for (const key of Object.keys(HINTS)) assert.ok(ids.has(key), `HINTS.${key} is not a row id`);
+  for (const key of Object.keys(LABELS)) assert.ok(ids.has(key), `LABELS.${key} is not a row id`);
+  for (const key of HIDDEN) assert.ok(ids.has(key), `HIDDEN ${key} is not a row id`);
+  for (const id of ids) assert.ok(HIDDEN.has(id) || LABELS[id], `row ${id} has no label`);
   for (const section of Object.keys(SECTION_KICKER)) {
     assert.ok(sections.has(section), `SECTION_KICKER.${section} is not a table section`);
   }

@@ -169,6 +169,9 @@
   let tag = $state({ label: 'Disconnected', on: false });
   let core = $state.raw(null);
   let rec = $state({ state: 'unknown', err: null }), recMs = $state(0);
+  // The display's measured refresh (GS mode, once video runs): the VTX tab
+  // offers only the camera rates that match it.
+  let displayHz = $state(null);
   function refresh() {
     const nowMs = performance.timeOrigin + performance.now();
     if (osdLayer.isStale(performance.now())) clearOsd();   // 5 s without MSP
@@ -177,6 +180,7 @@
     // Phase lock: a standing preference, not per-session state (phase.js),
     // so it's read off the form every tick rather than only on Connect.
     video.phase.enabled = ui.cfg.phaseLock;
+    displayHz = live && sess.mode === 'gs' ? video.phase.panelHz : null;
     view = statsView({ connected: live, connecting: sess.state === 'connecting', mode: shownMode, ch: sess.ch, w: live ? sess.w : ui.cfg.width,
       core, page: live ? tele.page : null, sessionCfg: live ? sessionCfg : ui.cfg, cfg: ui.cfg, videoSize: video.videoSize,
       colour: live ? video.colour : null });
@@ -415,8 +419,8 @@
             keyFp={keyFingerprint(ui.key)} {onLoadKey} {onClearKey} />
         {/snippet}
         {#snippet vtx()}
-          <VtxPanel params={ui.params} paramsAt={ui.paramsAt} spotter={shownMode === 'spotter'}
-            onSet={(id, text) => session.paramSet(id, text)} onRefresh={() => session.paramRefresh()} />
+          <VtxPanel params={ui.params} paramsAt={ui.paramsAt} {displayHz} spotter={shownMode === 'spotter'}
+            onSet={(id, text) => session.paramSet(id, text)} />
         {/snippet}
       </Sidebar>
     {/if}
@@ -438,8 +442,8 @@
             keyFp={keyFingerprint(ui.key)} {onLoadKey} {onClearKey} />
         {/snippet}
         {#snippet vtx()}
-          <VtxPanel params={ui.params} paramsAt={ui.paramsAt} spotter={shownMode === 'spotter'}
-            onSet={(id, text) => session.paramSet(id, text)} onRefresh={() => session.paramRefresh()} />
+          <VtxPanel params={ui.params} paramsAt={ui.paramsAt} {displayHz} spotter={shownMode === 'spotter'} variant="card"
+            onSet={(id, text) => session.paramSet(id, text)} />
         {/snippet}
       </ConfigSide>
     {/if}

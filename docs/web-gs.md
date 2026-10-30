@@ -678,8 +678,14 @@ for it.
 The drone's parameter table (`common/include/mabur/config_params.h`
 `kTable`, 12 rows), edited live over the MAVLink tunnel's `ParamClient`
 (see "MAVLink seam" below). `VtxPanel.svelte` groups the rows under the
-table's own section kickers (Radio, Camera, Encoder, Recorder, Power,
-Flight controller) in table order. The rows are on screen from the moment
+table's section kickers in the order Camera, Encoder, Recorder, Power,
+Flight controller, Radio (`SECTION_KICKER` in `vtxparams.js`), rows in
+table order, laid out like the Config form (the windowed sidebar's ruled
+groups, the immersive panel's cards). One row is left off the tab
+(`HIDDEN`): RADIO_WALL_MARGN, which stays in the drone's table and
+settable over MAVLink. While REC_ENABLE reads Off, the recorder's
+own rows (REC_BITRATE, REC_FPS, REC_SIZE: `REC_SETTINGS`) are hidden too;
+picking On shows them at once, from the moment the set goes out. The rows are on screen from the moment
 the core starts (its first `onParams` push), greyed until the session
 links. A header line tracks the link and the list: "Waiting for the drone
 link…" before the session links; "The drone's parameter table differs
@@ -687,52 +693,71 @@ from this page — redeploy." once a value arrives whose `param_count` is
 not this build's row count (the client's `table_mismatch`, which wins
 over the list states); "Reading the drone's settings…" while a list round
 is out; "Some settings did not answer." if it came back partial; and
-nothing once it is complete. A dim "no heartbeat" tag sits beside the
-Refresh button when the session is linked and the drone's component has
-sent a MAVLink `HEARTBEAT` on this link but none in the last 3 s (the
-JSON's `alive` false; before the first one `alive` is null and there is
-no tag) — the rows stay editable, since a set itself times out. The
-Refresh button (shown while the list stands complete or partial, and
-disabled while a set is in flight) asks the drone for the whole list again, keeping every value it
-already holds on show while the rows answer; a row that stays silent is
-re-read by index like on the first list.
+nothing once it is complete. A dim "no heartbeat" tag sits beside it
+when the session is linked and the drone's component has sent a MAVLink
+`HEARTBEAT` on this link but none in the last 3 s (the JSON's `alive`
+false; before the first one `alive` is null and there is no tag) — the
+rows stay editable, since a set itself times out. The tab has no refresh
+control: the list is read when the link forms (`Session.paramRefresh()`
+and the core's `webgs_param_refresh` still re-list on demand, but nothing
+on the page calls them).
 
-Each row's label is its MAVLink id in mono with the config key it maps to
-dimmed beside it (`section.key`; `venc.fps + venc.size` for VENC_MODE).
-Under the widget sit the row's help text from the table, always visible,
-and for a handful of rows (VENC_MODE/REC_FPS/REC_SIZE/LOWPWR_ENABLE/
-MSP_ENABLE) a second hint line about another row it interacts with.
+Each row's label names the setting in words ("LDPC coding", "Camera
+mode", "Max bitrate (kbps)", …: `LABELS` in `vtxparams.js`), never its
+MAVLink id or config key. Under the widget sits one hint line, always
+visible: the row's help text from the table (replaced on the page for
+VENC_MODE, VENC_SLICES, REC_SIZE and LOWPWR_ENABLE, whose table text
+spells the wire format, a config key, or a widget the page doesn't use),
+followed for VENC_MODE/MSP_ENABLE by a sentence about another row it
+interacts with.
 
 **Spotter mode** shows "VTX settings need GS mode." and every row as a
 greyed, read-only "—" — a spotter has no control channel to list or set
 anything over.
 
 **Committing a row** is always one `Session.paramSet(id, text)` per edit,
-never a batch: a Bool row is a switch that commits on toggle; Int, Real and
-Str rows commit on Enter or on blur, and only when the typed text differs
+never a batch. Bool rows and VENC_SLICES are On/Off segments that commit
+on a pick (VENC_SLICES sends 4 for On and 1 for Off; any count above 1
+the drone runs reads as On). VENC_MODE and REC_SIZE are dropdowns that
+commit on a pick (below). The other Int, Real and Str rows are text boxes
+that commit on Enter or on blur, and only when the typed text differs
 from the drone's current value. Text that cannot hold the row's type (say
 `1.5` in an Int row) sends nothing: the row shows a local result line —
 "not a valid integer", "not a valid number", or for Str the allowed
 spelling — and keeps exactly what was typed, so the operator can fix it;
 the line clears on that row's next edit.
 
-**VENC_MODE** is the one composite row: a frame-rate box (1–120) and a
-size `<select>` scoped to that rate's sensor mode (`docs/camera-modes.md`),
-with its own Apply button. The pair starts empty and takes the drone's
-value as soon as the list brings it, then follows every later change of
-that value for as long as the operator has not edited the pair; a pair
-being edited is left alone until its own set settles, when it returns to
-the drone's value. The rate box keeps exactly what was typed (it is never
-clamped or rewritten); Apply is enabled only while the box holds a whole
-number 1–120 and the pair differs from the drone's live value. Crossing a
-sensor-mode boundary while typing the rate re-selects the first size of
-the new mode, since the old size may not fit it. When the drone runs a
-size outside the mode's list (an ssh-set size), that size is offered too
-while the rate stays in its mode, so a rate-only change keeps it.
+**VENC_MODE** is one dropdown of "`<fps>` fps · `<W>`×`<H>`" choices: every
+size of the 60, 90, 100 and 120 fps sensor modes (`MODE_FPS`, sizes from
+`docs/camera-modes.md`), the two crop modes (100, 120) marked "cropped
+view". When the drone runs a value outside that list (an ssh-set rate or
+size), it is added as the first choice, so the dropdown always shows
+what the drone runs.
+
+The choices follow the display. A browser can measure only its current
+refresh, never the modes the display could switch to (there is no EDID),
+so the tab reads `PhaseController.panelHz` — the `VsyncGrid` fit of the
+rAF loop, which runs in GS mode from the first video frame whether the
+phase lock is on or off — and offers only the rates within 0.55 Hz of it
+(`DISPLAY_MATCH_HZ`, the phase lock's own rate-mismatch window; a whole
+multiple such as 60 fps on a 120 Hz display is no match), plus the
+drone's current value whatever its rate. The hint adds "Showing the
+rates that match this display (60 Hz)." While the rate is not known yet
+(no video, before the grid's first fit) or when no rate matches (a
+144 Hz monitor) every choice is listed, the latter with "No camera rate
+matches this display (144 Hz)." A phone that drops its refresh to save
+power measures, and filters, at the lower rate.
+
+**REC_SIZE** is a dropdown scoped to the camera mode the drone runs
+(VENC_MODE's value, not a pick still in flight): that sensor mode's
+sizes, which share the camera's aspect and fit the window the recorder's
+scaler reads (`docs/vtx-recorder.md`), plus the camera's own size and
+the drone's current recording size when either is off that list.
+Nothing above 1920x1080 is offered, since that needs the 30 fps 4K sensor
+mode.
 
 While a set is in flight, that row shows a small CSS spinner next to its
-busy state ("sending…" / "applying…", including the VENC_MODE row's Apply
-button) and every other row is disabled — the core applies one set at a
+busy state ("sending…" / "applying…") and every other row is disabled — the core applies one set at a
 time. Once the answer arrives (the row leaves sending/in_progress, or the
 client refuses the commit outright), the row's widget is rebuilt on the
 drone's value, so a refused toggle or edit never stays on screen beside
@@ -743,12 +768,8 @@ drone's loader or applier (the reason its `STATUSTEXT` carries, or
 "refused" if that never arrived); "unsupported:
 the drone refused this value's shape" for the drone's
 `PARAM_ACK_VALUE_UNSUPPORTED` — a type, shape or unknown-id refusal, which
-carries no reason text; or "no answer" on a set that timed out. A badge
-next to the label reads "live" for a reprogram row (e.g. RADIO_LDPC,
-MSP_ENABLE), or "restarts encoder ~0.6 s" for a rebuild (venc/record
-rows); a knob row (e.g. ENC_BITRATE_MAX, ENC_AIRTIME, LOWPWR_ENABLE)
-carries no badge, since it takes effect at once with nothing on the row
-to show for it.
+carries no reason text; or "no answer" on a set that timed out. The
+row's apply path (`docs/mavlink.md`) is not shown.
 
 The tab lives both on the windowed sidebar's **VTX** segment (see "Stats
 panel" below) and on the immersive layout's Config|VTX panel (see "Config
