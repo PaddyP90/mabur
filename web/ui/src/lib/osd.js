@@ -103,18 +103,18 @@ export class OsdPainter {
       ctx.drawImage(this.atlas, d.sx, d.sy, d.sw, d.sh, d.dx, d.dy, d.dw, d.dh);
   }
 
-  fetchAtlas() {
+    fetchAtlas() {
     if (this.atlasP || this.atlasFailed) return;
     const id = this.fontId;
     const p = Promise.resolve().then(() => this.loadAtlas(id)).then(
       (bmp) => { if (this.atlasP !== p) { bmp?.close?.(); return; } this.atlas = bmp; this.schedule(); },
-        (e) => {
+      (e) => {
         if (this.atlasP !== p) return;   // a font switch superseded this load
-        if (id && id !== DEFAULT_FONT) {
-          // The chosen font failed (missing file, bad download). The default atlas is
-          // always precached, so retry with it instead of switching the OSD off.
+        if (id && id !== DEFAULT_FONT.id) {
+          // The chosen font failed (missing file, bad download). The default atlas is always
+          // precached, so retry with it instead of switching the OSD off.
           this.log.error(`[webgs] OSD font "${id}" failed to load; falling back to the default font`, e);
-          this.fontId = DEFAULT_FONT;
+          this.fontId = DEFAULT_FONT.id;
           this.atlasP = null;
           this.schedule();
           return;
