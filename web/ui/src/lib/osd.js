@@ -3,6 +3,7 @@
 // char | page << 8; this file lays it out over the visible video box and
 // paints glyphs from the Betaflight atlas (web/ui/public/font_btfl.png, made
 // by tools/msp/gen_webfont.py from maburplay's font_btfl.mfont).
+import { DEFAULT_FONT } from './osdfonts.js';
 
 export const GLYPH_W = 36;
 export const GLYPH_H = 54;
@@ -53,10 +54,12 @@ export class OsdLayer {
 
 // Paints an OsdLayer onto the overlay canvas: one rAF repaint per burst of
 // schedule() calls, full clear + redraw (<= ~900 drawImage from one bitmap).
-// The atlas is fetched on the first paint that has a screen; a failed fetch
-// logs once and leaves the OSD off for the rest of that session (never a
-// refetch per screen) -- video is unaffected. resetAtlasFailure(), called on
-// Connect, allows one more attempt per session.
+// The atlas is fetched on the first paint that has a screen. If a non-default
+// font fails to load, that is logged once and the default atlas (always
+// precached) is loaded instead. If the default atlas itself fails, that is
+// logged once and the OSD stays off (never a refetch per screen) until
+// resetAtlasFailure() (called on Connect) or setFont() allows another try --
+// video is unaffected.
 export class OsdPainter {
   constructor({ layer, loadAtlas, fontId = null, raf = (f) => requestAnimationFrame(f), log = console }) {
     Object.assign(this, { layer, loadAtlas, fontId, raf, log });
@@ -105,8 +108,17 @@ export class OsdPainter {
     const id = this.fontId;
     const p = Promise.resolve().then(() => this.loadAtlas(id)).then(
       (bmp) => { if (this.atlasP !== p) { bmp?.close?.(); return; } this.atlas = bmp; this.schedule(); },
-      (e) => {
+        (e) => {
         if (this.atlasP !== p) return;   // a font switch superseded this load
+        if (id && id !== DEFAULT_FONT) {
+          // The chosen font failed (missing file, bad download). The default atlas is
+          // always precached, so retry with it instead of switching the OSD off.
+          this.log.error(`[webgs] OSD font "${id}" failed to load; falling back to the default font`, e);
+          this.fontId = DEFAULT_FONT;
+          this.atlasP = null;
+          this.schedule();
+          return;
+        }
         this.atlasFailed = true;
         this.log.error('[webgs] OSD font atlas failed to load; OSD off until the next Connect', e);
       });
