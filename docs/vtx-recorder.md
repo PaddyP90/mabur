@@ -141,14 +141,13 @@ in-process") rather than restarting `maburd`. Before the rebuild,
 `ConfigApplier` stops a recording in progress
 (`VtxRecorder::request(false)`, waited out with `settled()`) so the
 file closes on a whole fragment before the channel underneath it goes
-away, then hands the
-recorder the new `[record]` section and link size (`set_config` /
-`set_link_size`). The rebuild itself recreates ch1 in the same
-bind-before-the-link order as a boot (above) — a rebuild is not exempt
-from the invariant. If the GS's standing record wish (the last `Rcf.rec`
-it sent) was "on", the next RCF after the rebuild re-issues it
-(`RcAgent::note_pipeline_rebuilt`) and recording resumes, into a new
-file.
+away, then hands the recorder the new `[record]` section and link size
+(`set_config` / `set_link_size`). The rebuild itself recreates ch1 in
+the same bind-before-the-link order as a boot (above) — a rebuild is
+not exempt from the invariant. If the GS's standing record wish (the
+last `Rcf.rec` it sent) was "on", the next RCF after the rebuild
+re-issues it (`RcAgent::note_pipeline_rebuilt`) and recording resumes,
+into a new file.
 
 ## Power-loss contract
 

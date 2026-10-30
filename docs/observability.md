@@ -1159,9 +1159,10 @@ key>: new pipeline refused` / `previous pipeline restored` / `previous
 pipeline refused` / `previous pipeline restored by a cold restart` /
 `cold restart failed` / `pipeline lost, requesting exit`. The `stats:`
 line always carries `mav_apply=<ok>/<failed>` (every finished apply,
-cumulative since start) and `mav_rebuild=<n>` (every `pipeline_restart`
-call the ladder made, so a rebuild that falls back twice counts twice),
-and gains
+cumulative since start) and `mav_rebuild=<n>` (every pipeline-only
+restart the ladder made: one for a set that applies, two for one that
+fell back to the previous config; the cold restart rung is a separate
+hook and is not counted), and gains
 `mav rx=<frames>/<packets> tx=<frames>/<packets> drop=<n> reject=<n>`
 on the ticks where any of those moved since the last time they were
 printed; the values are cumulative since start. `rx` counts verified
