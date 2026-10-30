@@ -54,6 +54,9 @@ export const ui = $state({
   // Selectable OSD fonts: the manifest (public/fonts/index.json) replaces
   // this at startup; the shipped Betaflight atlas is always available.
   osdFonts: [{ id: 'btfl', name: 'Betaflight', file: 'font_btfl.png' }],
+  sideTab: 'config',                   // ConfigSide's own Config|VTX segment
+  params: null,                        // the latest onParams push, null while disconnected
+  paramsAt: null,                      // Date.now() when that push arrived (VtxPanel's "accepted" fade)
 });
 
 // Field visibility is decided by what was saved when the page loaded, so

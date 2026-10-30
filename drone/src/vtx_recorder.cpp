@@ -52,7 +52,13 @@ std::optional<uint64_t> free_mb(const std::string& dir) {
 
 VtxRecorder::VtxRecorder(const RecordCfg& cfg, RecordChannel& ch, int width, int height,
                          RecorderPaths paths, RecorderLimits lim)
-    : cfg_(cfg), ch_(ch), width_(width), height_(height), paths_(std::move(paths)), lim_(lim) {
+    : cfg_(cfg),
+      ch_(ch),
+      paths_(std::move(paths)),
+      lim_(lim),
+      width_(width),
+      height_(height),
+      next_cfg_(cfg) {
   mint = [this](const std::string& d) { return namer_.next(d); };
   set_status(RecState::Off, RecErr::None);
 }
@@ -94,6 +100,22 @@ void VtxRecorder::request(bool on) {
   cv_.notify_all();
 }
 
+void VtxRecorder::set_link_size(int width, int height) {
+  std::lock_guard<std::mutex> lk(mx_);
+  width_ = width;
+  height_ = height;
+}
+
+bool VtxRecorder::settled() const {
+  std::lock_guard<std::mutex> lk(mx_);
+  return done_gen_.load() == gen_;
+}
+
+void VtxRecorder::set_config(const RecordCfg& cfg) {
+  std::lock_guard<std::mutex> lk(mx_);
+  next_cfg_ = cfg;
+}
+
 void VtxRecorder::on_au(const uint8_t* au, size_t n, uint32_t pts_us, bool key, bool prefixed) {
   // An Annex-B AU only reaches here when the encoder gave no usable NAL
   // table (packNum == 0, a slice without a start code), so its key flag may
@@ -126,9 +148,11 @@ bool VtxRecorder::service(int wait_ms) {
   });
   if (gen_ != handled_gen_) {
     handled_gen_ = gen_;
+    const uint64_t g = gen_;
     const bool want = desired_;
     lk.unlock();
     if (want) do_start(); else do_stop();
+    done_gen_.store(g);
     return true;
   }
   const bool idr = idr_wanted_;
@@ -157,6 +181,12 @@ RecErr VtxRecorder::probe() const {
 
 void VtxRecorder::do_start() {
   if (running_) return;
+  {
+    // Once per start: the probe and the recording that follows read this
+    // copy, never the one set_config may be replacing.
+    std::lock_guard<std::mutex> lk(mx_);
+    cfg_ = next_cfg_;
+  }
   const RecErr e = probe();
   if (e != RecErr::None) {
     set_status(RecState::Error, e);
@@ -243,7 +273,13 @@ void VtxRecorder::write_au(Au& a) {
   if (!file_open_) {
     if (!a.key || !params_.complete()) return;  // a file begins at a key AU with VPS/SPS/PPS
     path_ = mint(cfg_.dir);
-    if (!mux_.open(path_, params_.hvcc(), width_, height_, lim_.fragment_ms)) {
+    int w, h;
+    {
+      std::lock_guard<std::mutex> lk(mx_);
+      w = width_;
+      h = height_;
+    }
+    if (!mux_.open(path_, params_.hvcc(), w, h, lim_.fragment_ms)) {
       fail(RecErr::WriteError);
       return;
     }

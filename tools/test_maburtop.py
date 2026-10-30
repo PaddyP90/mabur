@@ -99,6 +99,17 @@ class TopBarTest(unittest.TestCase):
         # fingerprint, so a config mismatch shows up without reading logs.
         self.assertIn("key a1b2", text)
 
+    def test_mav_cell(self):
+        # link.mav: T_MAV frames tx/rx; absent while [mavlink] is off.
+        text, _ = panel_topbar(_fresh(), 100.2)[0]
+        self.assertIn("mav off", text)
+        d = dict(DGRAM, link=dict(DGRAM["link"],
+                                  mav={"tx": 4, "rx": 7, "reject": 1, "peer": True}))
+        text, _ = panel_topbar(_fresh(d), 100.2)[0]
+        self.assertIn("mav 4/7", text)
+        compact = " ".join(render_rows_compact(_fresh(d), 100.2, 200))
+        self.assertIn("mav 4/7", compact)
+
     def test_key_mismatch_state_bad_span(self):
         d = dict(DGRAM, link=dict(DGRAM["link"], state="key_mismatch"))
         text, spans = panel_topbar(_fresh(d), 100.2)[0]

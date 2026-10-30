@@ -29,6 +29,7 @@
 #include <string>
 #include <thread>
 #include <exception>
+#include <iterator>
 #include <vector>
 
 #include <unistd.h>  // _exit() — see the venc on_fault handler
@@ -47,10 +48,13 @@
 #include "cal_apply.h"
 #include "cal_sweep.h"
 #include "config.h"
+#include "config_apply.h"
+#include "config_write.h"
 #include "control_tx_mode.h"
 #include "debug_http.h"
 #include "frame_pipeline.h"
 #include "frame_source.h"
+#include "mav_component.h"
 #include "mabur/channel_file.h"
 #include "mabur/channel_set.h"
 #include "mabur/frame_wire.h"
@@ -306,6 +310,32 @@ struct VencRecordChannel : mabur::RecordChannel {
   }
 };
 
+// The radiotap of a control-modulation frame (control_tx_mode: DISC_ACK,
+// Telem, MSP, MAVLink) for the live LDPC flag. A parameter set can flip
+// that flag at run time: the setter stores the flag, then bumps the
+// generation, and each sender rebuilds its header the first time it sees a
+// generation other than the one it built at. One instance per sending
+// thread, so no thread ever reads a vector another one rebuilds. Null
+// pointers (dry run) mean LDPC on, built once.
+struct ControlRadiotap {
+  const std::atomic<bool>* ldpc = nullptr;
+  const std::atomic<uint32_t>* gen = nullptr;
+
+  const std::vector<uint8_t>& get() {
+    const uint32_t g = gen ? gen->load(std::memory_order_acquire) : 0;
+    if (rt_.empty() || g != built_gen_) {
+      const bool on = ldpc ? ldpc->load(std::memory_order_acquire) : true;
+      rt_ = devourer::build_stream_radiotap(control_tx_mode(on));
+      built_gen_ = g;
+    }
+    return rt_;
+  }
+
+ private:
+  std::vector<uint8_t> rt_;
+  uint32_t built_gen_ = 0;
+};
+
 // RealActuator bridges RcAgent's Actuator interface to the radio (RadioTx +
 // FrameSink), the hot-thread-owned UepEncoder (via the shared_op handoff),
 // and the in-process encoder (venc_core.h's verbs, called directly — the
@@ -373,8 +403,7 @@ struct RealActuator : mabur::Actuator {
   // one.
   std::atomic<bool>* cal_active = nullptr;
 
-  std::vector<uint8_t> control_radiotap;  // built once; control channel is fixed
-  bool ldpc = true;                       // cfg.radio.ldpc, for control_radiotap
+  ControlRadiotap control_rt;  // agent thread only, like send_control
   uint16_t control_seq = 0;
 
   // Last values commanded to the encoder — read by the telemetry collector
@@ -423,9 +452,7 @@ struct RealActuator : mabur::Actuator {
   }
 
   void send_control(const std::vector<uint8_t>& body) override {
-    if (control_radiotap.empty()) {
-      control_radiotap = devourer::build_stream_radiotap(control_tx_mode(ldpc));
-    }
+    const std::vector<uint8_t>& control_radiotap = control_rt.get();
     std::vector<uint8_t> frame;
     frame.reserve(control_radiotap.size() + kDot11HeaderLen + body.size());
     frame.insert(frame.end(), control_radiotap.begin(), control_radiotap.end());
@@ -1407,6 +1434,12 @@ int run_real_mode(const Config& cfg, uint8_t start_ch, const std::string& cfg_pa
   // book the new deltas as holes. Same shape as link_up_discont below.
   std::atomic<bool> fps_rate_change{false};
 
+  // The LDPC flag every control-modulation sender builds its radiotap from
+  // (ControlRadiotap). A parameter set stores the flag, then bumps the
+  // generation.
+  std::atomic<bool> live_ldpc{cfg.radio.ldpc};
+  std::atomic<uint32_t> radiotap_gen{0};
+
   RealActuator actuator;
   actuator.tx = &tx;
   actuator.sink = &dev_sink;
@@ -1418,7 +1451,8 @@ int run_real_mode(const Config& cfg, uint8_t start_ch, const std::string& cfg_pa
   actuator.tx_gate = &tx_gate;
   actuator.retune_waiting = &retune_waiting;
   actuator.cur = start_ch;
-  actuator.ldpc = cfg.radio.ldpc;
+  actuator.control_rt.ldpc = &live_ldpc;
+  actuator.control_rt.gen = &radiotap_gen;
   // Encoder starts at the "normal" ROI QP (RcAgent only calls set_roi_qp on
   // a low<->normal transition — see run_bitrate_policy's roi_low_ default),
   // so the telemetry collector needs this seeded to reflect what's actually
@@ -1488,20 +1522,24 @@ int run_real_mode(const Config& cfg, uint8_t start_ch, const std::string& cfg_pa
       std::fprintf(stderr, "waited %d ms for the MI modules\n", mi.waited_ms);
     }
   }
-  {
+  // The record channel's configuration from [record]: here at boot, and
+  // again by the config applier before every pipeline rebuild, since the
+  // record channel is part of the pipeline it rebuilds.
+  auto record_configure = [&vtx_rec](const Config& c) {
     VencRecordConfig rcfg{};
-    rcfg.enabled = cfg.record.enable ? 1 : 0;
-    rcfg.bitrate_kbps = static_cast<uint32_t>(cfg.record.bitrate_kbps);
-    rcfg.fps = static_cast<uint32_t>(cfg.record.fps);
-    rcfg.width = static_cast<uint32_t>(cfg.record.width);
-    rcfg.height = static_cast<uint32_t>(cfg.record.height);
+    rcfg.enabled = c.record.enable ? 1 : 0;
+    rcfg.bitrate_kbps = static_cast<uint32_t>(c.record.bitrate_kbps);
+    rcfg.fps = static_cast<uint32_t>(c.record.fps);
+    rcfg.width = static_cast<uint32_t>(c.record.width);
+    rcfg.height = static_cast<uint32_t>(c.record.height);
     venc_record_configure(
         &rcfg,
         [](void* u, const uint8_t* au, size_t n, uint32_t pts, int key, int prefixed) {
           static_cast<mabur::VtxRecorder*>(u)->on_au(au, n, pts, key != 0, prefixed != 0);
         },
         &vtx_rec);
-  }
+  };
+  record_configure(cfg);
   if (venc_core_start(&cfg.venc.core, &vcb) != 0) {
     // Boot failure, not a transient: the wrapper's 2 s respawn is the retry.
     // Release the USB device on the way out (same shape as the
@@ -1530,6 +1568,15 @@ int run_real_mode(const Config& cfg, uint8_t start_ch, const std::string& cfg_pa
   // caller is the TX writer thread), and RcAgent's on_rc_frame -- rc_queue's
   // consumer -- runs on the agent thread instead.
   RcQueue cal_queue;
+  // T_MAV lands here (RX callback, below), consumed by the MAV thread: a
+  // parameter set rewrites the config file, I/O that belongs on neither the
+  // RX nor the agent thread.
+  RcQueue mav_queue;
+  // MAV thread -> agent thread's stats line, cumulative. drop = frames that
+  // failed parse_mav plus packets the component dropped (not for us, bad
+  // MAVLink); reject = frames that parsed but failed the tag or the counter.
+  std::atomic<uint64_t> mav_rx_frames{0}, mav_rx_packets{0}, mav_tx_frames{0},
+      mav_tx_packets{0}, mav_drop{0}, mav_reject{0};
   std::atomic<uint64_t> rx_beat{0};
   // RX callback -> agent thread, per telemetry period (exchange(0) at each
   // Telem build): frames that were ours (CRC-clean RC from the GS), CRC-clean
@@ -1564,7 +1611,14 @@ int run_real_mode(const Config& cfg, uint8_t start_ch, const std::string& cfg_pa
   // of which thread sent the last frame.
   std::atomic<uint16_t> telem_wire_seq{0};
   std::atomic<uint16_t> telem_dot11_seq{0};
-  std::vector<uint8_t> telem_radiotap = devourer::build_stream_radiotap(control_tx_mode(cfg.radio.ldpc));
+  // Each Telem/MAVLink sender (agent thread, TX writer thread's calibration
+  // ack, MAV thread) builds its own radiotap from this.
+  auto make_control_radiotap = [&live_ldpc, &radiotap_gen] {
+    ControlRadiotap rt;
+    rt.ldpc = &live_ldpc;
+    rt.gen = &radiotap_gen;
+    return rt;
+  };
   // Minor 5 fix: the TX writer thread's calibration ack (below) starts from
   // the most recent REAL Telem the agent thread built, not a default-
   // constructed one -- otherwise the GS's `latest_telem` (its OSD/sideport
@@ -1678,6 +1732,8 @@ int run_real_mode(const Config& cfg, uint8_t start_ch, const std::string& cfg_pa
         cal_queue.push(body, body_len);
       } else if (rc_type == rc::T_NACK) {
         if (nack_hook) nack_hook(body, body_len);  // RX thread (fec-nack)
+      } else if (rc_type == rc::T_MAV) {
+        mav_queue.push(body, body_len);
       } else {
         rc_queue.push(body, body_len);
       }
@@ -1700,16 +1756,23 @@ int run_real_mode(const Config& cfg, uint8_t start_ch, const std::string& cfg_pa
     }
   };
 
+  // The MSP thread: reads the FC's serial link, sends its DisplayPort stream
+  // to the GS and polls the arm state for low-power mode. A restartable
+  // unit: boot starts it iff msp.enable, and a parameter set starts or stops
+  // it (start_msp/stop_msp, called from one thread at a time: boot, then the
+  // config applier, then teardown after the applier has shut down). `m` is
+  // the [msp] section it runs with; `stop` ends it within one serial read
+  // (MspSerial::read returns within its 100 ms VTIME).
   std::thread msp_thread;
-  if (cfg.msp.enable) {
-    msp_thread = std::thread([&]() {
+  std::atomic<bool> msp_stop{false};
+  auto run_msp = [&](std::atomic<bool>& stop, const MspCfg m) {
       name_thread("mbr-msp");
       // Robust control modulation, same tier as DISC_ACK; MSP is a third
       // producer on the mutex-guarded dev_sink.send() path (never the pool).
-      std::vector<uint8_t> radiotap = devourer::build_stream_radiotap(control_tx_mode(cfg.radio.ldpc));
+      ControlRadiotap msp_radiotap = make_control_radiotap();
       uint16_t seq = 0;
       std::random_device rd;
-      MspSource src(to_msp_source_cfg(cfg.msp),
+      MspSource src(to_msp_source_cfg(m),
         [&](const uint8_t* body, size_t n) {
           // Quiesce for the calibration session's duration -- the same
           // "non-sweep PPDUs in the characterized airtime" telemetry
@@ -1718,6 +1781,7 @@ int run_real_mode(const Config& cfg, uint8_t start_ch, const std::string& cfg_pa
           // only the TRANSMIT is skipped, so the UART side never desyncs or
           // overflows waiting out a session.
           if (cal_active.load(std::memory_order_relaxed)) return;
+          const std::vector<uint8_t>& radiotap = msp_radiotap.get();
           std::vector<uint8_t> frame;
           frame.reserve(radiotap.size() + kDot11HeaderLen + n);
           frame.insert(frame.end(), radiotap.begin(), radiotap.end());
@@ -1730,9 +1794,9 @@ int run_real_mode(const Config& cfg, uint8_t start_ch, const std::string& cfg_pa
         rd());  // random initial_seq (SwEncoder restart-safety contract)
       std::fprintf(stderr,
           "maburd msp: enabled symbol_size=%d window=%d block_payload=%d update_rate_hz=%.2g serial=%s baud=%d\n",
-          cfg.msp.symbol_size, cfg.msp.window,
-          cfg.msp.symbol_size + static_cast<int>(mabur::sw::kSwHeaderLen),
-          cfg.msp.update_rate_hz, cfg.msp.serial.c_str(), cfg.msp.baud);
+          m.symbol_size, m.window,
+          m.symbol_size + static_cast<int>(mabur::sw::kSwHeaderLen),
+          m.update_rate_hz, m.serial.c_str(), m.baud);
 
       // Low-power mode: ask the FC for its arm state.
       // MSP_STATUS is request/reply -- the FC pushes only DisplayPort on
@@ -1752,28 +1816,29 @@ int run_real_mode(const Config& cfg, uint8_t start_ch, const std::string& cfg_pa
       std::vector<uint8_t> status_req;
       mabur::msp_append_status_request(status_req);
       uint64_t last_poll_ms = 0;
-      if (cfg.low_power.enable)
-        src.set_message_hook([&](const mabur::MspMessage& m) {
-          if (auto armed = mabur::msp_status_armed(m))
-            agent.note_arm_state(*armed, now_steady_ms());
-        });
+      // Installed whether or not low power is on: low_power.enable is a live
+      // knob, and the poll below is what gates the replies.
+      src.set_message_hook([&](const mabur::MspMessage& msg) {
+        if (auto armed = mabur::msp_status_armed(msg))
+          agent.note_arm_state(*armed, now_steady_ms());
+      });
 
       MspSerial serial;
       uint8_t buf[512];
-      while (!g_devourer_should_stop) {
+      while (!stop.load(std::memory_order_relaxed) && !g_devourer_should_stop) {
         if (!serial.is_open()) {
-          if (!serial.open(cfg.msp.serial, cfg.msp.baud)) {
+          if (!serial.open(m.serial, m.baud)) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
             continue;
           }
           std::fprintf(stderr, "maburd msp: reading %s @ %d\n",
-                       cfg.msp.serial.c_str(), cfg.msp.baud);
+                       m.serial.c_str(), m.baud);
         }
         int n = serial.read(buf, sizeof buf);
         if (n > 0) src.on_serial_bytes(buf, static_cast<size_t>(n), now_steady_ms());
         else if (n < 0) serial.close();  // error -> reconnect
 
-        if (cfg.low_power.enable && serial.is_open()) {
+        if (agent.low_power_enabled() && serial.is_open()) {
           uint64_t t = now_steady_ms();
           if (t - last_poll_ms >= kArmPollMs) {
             last_poll_ms = t;
@@ -1781,8 +1846,220 @@ int run_real_mode(const Config& cfg, uint8_t start_ch, const std::string& cfg_pa
           }
         }
       }
+      std::fprintf(stderr, "maburd msp: stopped\n");
+  };
+  auto start_msp = [&](const MspCfg& m) {
+    if (msp_thread.joinable()) return;
+    msp_stop.store(false);
+    msp_thread = std::thread([&run_msp, &msp_stop, m] { run_msp(msp_stop, m); });
+  };
+  auto stop_msp = [&] {
+    if (!msp_thread.joinable()) return;
+    msp_stop.store(true);
+    msp_thread.join();
+    msp_thread = std::thread();
+  };
+  if (cfg.msp.enable) start_msp(cfg.msp);
+
+  // State a MAVLink parameter set changes in the running process, read by
+  // the threads that use it: the wall margin (calibration's reprogram and
+  // its post-session restore), and the H.265 slice geometry the hot thread
+  // stamps on every frame (re-read when geometry_changed is raised).
+  std::atomic<double> live_wall_margin{cfg.radio.wall_margin_db};
+  std::atomic<uint16_t> live_ctb_rows{
+      venc_cfg_ctb64_rows(static_cast<uint16_t>(cfg.venc.core.height))};
+  std::atomic<uint8_t> live_slice_rows{
+      venc_cfg_slice_rows(static_cast<uint16_t>(cfg.venc.core.height), cfg.venc.core.slices)};
+  std::atomic<bool> geometry_changed{false};
+
+  // Applies a MAVLink parameter set to this process (config_apply.h), on its
+  // own thread. Every hook runs on that thread. Without an encoder (host
+  // build) the pipeline hooks refuse, so a rebuild set walks the failure
+  // ladder to its end.
+  ConfigApplyHooks apply_hooks;
+  apply_hooks.set_knobs = [&agent](const Config& c) {
+    agent.set_live_knobs(c.encoder.bitrate_max_kbps, c.encoder.airtime_budget,
+                         c.low_power.enable, static_cast<int>(c.venc.core.fps));
+  };
+  apply_hooks.power_plan = [&](const Config& c, std::string* err) {
+    // The applier refuses a set during calibration already; the sweep owns
+    // the TX-power table, so this never reprograms under one either.
+    if (cal_active.load()) { *err = "calibration in progress"; return false; }
+    if (!rtl_device || !device_ready.load(std::memory_order_acquire)) {
+      *err = "radio not up";
+      return false;
+    }
+    if (c.radio.power_mode != "offset") { *err = "no offset power plan"; return false; }
+    bool ok;
+    {
+      // A device call: shared on tx_gate like calibration's restore, so it
+      // never overlaps a retune.
+      await_retune_gate(&retune_waiting);
+      std::shared_lock<std::shared_mutex> pg(tx_gate);
+      ok = apply_offset_power_plan(c.radio.rate_walls_rel, c.radio.legacy_wall_rel,
+                                   c.radio.wall_margin_db);
+    }
+    if (!ok) { *err = "SetTxPowerRateDiffs failed"; return false; }
+    live_wall_margin.store(c.radio.wall_margin_db);
+    return true;
+  };
+  apply_hooks.ldpc = [&](bool ldpc) {
+    live_ldpc.store(ldpc, std::memory_order_release);
+    radiotap_gen.fetch_add(1, std::memory_order_release);
+    agent.note_ldpc_changed(ldpc);
+  };
+  apply_hooks.msp = [&](bool enable, const Config& c) {
+    if (enable) start_msp(c.msp);
+    else stop_msp();
+  };
+  apply_hooks.recorder_stop = [&vtx_rec] {
+    // Stopped before the pipeline that feeds it goes away, so the file is
+    // closed on a whole fragment and the worker is not inside the record
+    // channel when the rebuild tears it down. settled(), not state(): an
+    // armed recorder already reads Off before its first file. The worker
+    // acts within one service() wait (200 ms); the wait is bounded at 1 s.
+    vtx_rec.request(false);
+    for (int i = 0; i < 100 && !vtx_rec.settled(); ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    if (!vtx_rec.settled())
+      std::fprintf(stderr, "maburd: config apply: recorder not stopped after 1 s\n");
+    else if (vtx_rec.state() != mabur::RecState::Off)
+      std::fprintf(stderr, "maburd: config apply: recorder stopped with an error\n");
+  };
+  apply_hooks.record_configure = [&](const Config& c) {
+#ifdef MABUR_HAVE_VENC
+    record_configure(c);
+#endif
+    // The recorder follows the rebuilt pipeline: its record channel exists
+    // only if [record] enables it, and its files carry the link's size.
+    vtx_rec.set_config(c.record);
+    vtx_rec.set_link_size(c.venc.core.width, c.venc.core.height);
+  };
+  apply_hooks.pipeline_restart = [](const Config& c) {
+#ifdef MABUR_HAVE_VENC
+    return venc_core_restart(&c.venc.core) == 0;
+#else
+    (void)c;
+    return false;
+#endif
+  };
+  apply_hooks.pipeline_cold_restart = [&](const Config& c) {
+#ifdef MABUR_HAVE_VENC
+    venc_core_stop();
+    return venc_core_start(&c.venc.core, &vcb) == 0;
+#else
+    (void)c;
+    return false;
+#endif
+  };
+  apply_hooks.after_rebuild = [&](const Config& c) {
+    const uint16_t h = static_cast<uint16_t>(c.venc.core.height);
+    live_ctb_rows.store(venc_cfg_ctb64_rows(h));
+    live_slice_rows.store(venc_cfg_slice_rows(h, c.venc.core.slices));
+    geometry_changed.store(true, std::memory_order_release);
+    fps_rate_change.store(true, std::memory_order_relaxed);
+    // The agent reasserts the fps verb from its live knob right after a
+    // rebuild: the knob must already hold the rebuilt pipeline's rate.
+    agent.set_live_knobs(c.encoder.bitrate_max_kbps, c.encoder.airtime_budget,
+                         c.low_power.enable, static_cast<int>(c.venc.core.fps));
+    agent.note_pipeline_rebuilt();
+  };
+  apply_hooks.request_exit = [] {
+    // The pipeline is gone and neither restart brought it back. Same policy
+    // as the encoder's on_fault: _exit, not exit, because destructors must
+    // not run on a live multi-threaded process; the wrapper respawns maburd
+    // from the unchanged file.
+    std::fprintf(stderr, "maburd: config apply: pipeline lost — exiting for wrapper respawn\n");
+    std::fflush(stderr);
+    _exit(3);
+  };
+  apply_hooks.calibration_active = [&cal_active] { return cal_active.load(); };
+  ConfigApplier applier(cfg_path, cfg, std::move(apply_hooks), [](const std::string& line) {
+    std::fprintf(stderr, "maburd config: %s\n", line.c_str());
+  });
+
+  // MAVLink parameter component. Verifies each T_MAV off mav_queue
+  // (RcAgent::check_mav), feeds the payload to the component, and sends its
+  // queued replies back as untagged T_MAV frames on the Telem path (control
+  // radiotap, the shared telem dot11 seq, the mutex-guarded dev_sink.send()),
+  // at most one frame per kMavUplinkMinMs so the tunnel never crowds Telem
+  // or the OSD stream. Uplink and the 1 Hz HEARTBEAT need a published
+  // session (nobody is listening without one), and both follow Telem's
+  // suppression while a calibration phase sweeps: replies wait queued. RcQueue has no
+  // condvar, so this polls at 5 ms, like cal_queue's consumer.
+  std::thread mav_thread([&]() {
+    name_thread("mbr-mav");
+    ApplyPort port;
+    port.submit = [&applier](size_t row, const mavparam::Value& want, std::string* why) {
+#ifndef MABUR_HAVE_VENC
+      // No encoder in this build: every rung of the rebuild ladder would
+      // fail and end in the exit rung, so a rebuild row is refused here.
+      if (apply_path_for(row) == ConfigApplyPath::Rebuild) {
+        if (why) *why = "no encoder in this build";
+        return false;
+      }
+#endif
+      return applier.submit(row, want, why);
+    };
+    port.take_result = [&applier](ConfigApplyResult* out) { return applier.take_result(out); };
+    port.busy = [&applier] { return applier.busy(); };
+    MavComponent comp(cfg_path, std::move(port), [](const std::string& line) {
+      std::fprintf(stderr, "%s\n", line.c_str());
     });
-  }
+    ControlRadiotap mav_radiotap = make_control_radiotap();
+    std::fprintf(stderr, "maburd mav: component sys %u comp %u, config %s\n",
+                 static_cast<unsigned>(MavComponent::sys_id()),
+                 static_cast<unsigned>(MavComponent::comp_id()), cfg_path.c_str());
+    uint32_t up_counter = 0;   // the GS drops a repeat of the last one: the second card's copy
+    uint64_t last_hb = 0, last_up = 0, bad_parse = 0, rejected = 0;
+    std::vector<uint8_t> body;
+    while (!g_devourer_should_stop) {
+      while (mav_queue.pop(body)) {
+        rc::Mav m;
+        switch (agent.check_mav(body.data(), body.size(), &m)) {
+          case RcAgent::MavCheck::kOk:
+            mav_rx_frames.fetch_add(1, std::memory_order_relaxed);
+            comp.on_payload(m.payload.data(), m.payload.size());
+            break;
+          case RcAgent::MavCheck::kMalformed: ++bad_parse; break;
+          case RcAgent::MavCheck::kRejected: ++rejected; break;
+        }
+      }
+      // Every pass, linked or not: the applier stays busy (refusing the
+      // next set) until its result is taken.
+      comp.poll_results();
+      const uint64_t now = now_steady_ms();
+      const bool linked = agent.has_published_session();
+      if (linked && !cal_sweeping.load(std::memory_order_relaxed) && now - last_hb >= 1000) {
+        comp.queue_heartbeat();
+        last_hb = now;
+      }
+      if (linked && !cal_sweeping.load(std::memory_order_relaxed) &&
+          comp.outbound_packets() > 0 && now - last_up >= kMavUplinkMinMs) {
+        rc::Mav m;
+        m.counter = up_counter++;
+        const int packets = comp.take_outbound(&m.payload);
+        const auto mav = rc::pack_mav(m, /*tagged=*/false);
+        const std::vector<uint8_t>& telem_radiotap = mav_radiotap.get();
+        std::vector<uint8_t> frame;
+        frame.reserve(telem_radiotap.size() + kDot11HeaderLen + mav.size());
+        frame.insert(frame.end(), telem_radiotap.begin(), telem_radiotap.end());
+        auto hdr = build_dot11_header(telem_dot11_seq.fetch_add(1, std::memory_order_relaxed) & 0xFFF);
+        frame.insert(frame.end(), hdr.begin(), hdr.end());
+        frame.insert(frame.end(), mav.begin(), mav.end());
+        dev_sink.send(frame.data(), frame.size());
+        mav_tx_frames.fetch_add(1, std::memory_order_relaxed);
+        mav_tx_packets.fetch_add(static_cast<uint64_t>(packets), std::memory_order_relaxed);
+        last_up = now;
+      }
+      const MavComponentStats& cs = comp.stats();
+      mav_rx_packets.store(cs.rx_packets, std::memory_order_relaxed);
+      mav_drop.store(bad_parse + cs.drop_not_for_us + cs.drop_bad_packet + cs.drop_queue_full,
+                     std::memory_order_relaxed);
+      mav_reject.store(rejected, std::memory_order_relaxed);
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+  });
 
   // TX body queue between the encode (hot) thread and the USB writer
   // thread: a bulk-OUT stall backs up HERE (bounded, drop-oldest =
@@ -2017,6 +2294,14 @@ int run_real_mode(const Config& cfg, uint8_t start_ch, const std::string& cfg_pa
         if (any) txq.flush();
       }
       if (n > 0) {
+        // A parameter set rebuilt the pipeline: frames from here on carry
+        // the new slice geometry. The rebuild also recreated the ring, so
+        // this lands with the re-attach below; marked here as well in case
+        // the re-attach was counted before the geometry was published.
+        if (geometry_changed.exchange(false, std::memory_order_acquire)) {
+          pipe.set_slice_geometry(live_ctb_rows.load(), live_slice_rows.load());
+          pipe.mark_discontinuity();
+        }
         if (fsrc.reattach_count() != last_reattach) {
           last_reattach = fsrc.reattach_count();
           pipe.mark_discontinuity();  // joined a new ring mid-GOP
@@ -2294,6 +2579,7 @@ int run_real_mode(const Config& cfg, uint8_t start_ch, const std::string& cfg_pa
     // shared tlm_seq/dot11_seq counters (see their declaration above) so
     // the wire's sequence stays single and monotonic no matter which
     // thread sent the last frame.
+    ControlRadiotap ack_radiotap = make_control_radiotap();
     auto send_cal_ack_telem = [&]() {
       // Start from the latest REAL Telem snapshot, not a default-constructed
       // one -- the GS's `latest_telem` (its OSD/sideport source) would
@@ -2320,6 +2606,7 @@ int run_real_mode(const Config& cfg, uint8_t start_ch, const std::string& cfg_pa
       t.pts_at_build = 0;
       t.flags |= 0x40;  // bit6 cal_active, OR'd onto the snapshot's real flags
       auto telem = rc::pack_telem(t);
+      const std::vector<uint8_t>& telem_radiotap = ack_radiotap.get();
       std::vector<uint8_t> frame;
       frame.reserve(telem_radiotap.size() + kDot11HeaderLen + telem.size());
       frame.insert(frame.end(), telem_radiotap.begin(), telem_radiotap.end());
@@ -2344,14 +2631,22 @@ int run_real_mode(const Config& cfg, uint8_t start_ch, const std::string& cfg_pa
       // margin_db that could silently disagree with this one. The anchor
       // itself stays drone-internal (cal_sweep.anchor_idx()) and is never
       // part of this write.
-      const int m = static_cast<int>(std::lround(cfg.radio.wall_margin_db * 4.0));
+      // The live margin: a parameter set may have moved it since boot.
+      const double margin_db = live_wall_margin.load();
+      const int m = static_cast<int>(std::lround(margin_db * 4.0));
       CalWrite w;
       for (int r = 0; r < 8; ++r) w.walls[r] = result.walls[r];
       w.legacy_wall = result.legacy_wall;
 
       std::string err;
-      const ApplyResult ar =
-          apply_calibration(cfg_path, w, cfg.radio.wall_margin_db, &err);
+      ApplyResult ar;
+      {
+        // Held across the write and the applier's notice, so its next apply
+        // re-reads the calibrated file rather than racing this write.
+        auto lk = lock_config_writes();
+        ar = apply_calibration(cfg_path, w, margin_db, &err);
+        if (ar == ApplyResult::Ok) applier.note_file_rewritten_externally();
+      }
       if (ar != ApplyResult::Ok) {
         std::fprintf(stderr, "maburd cal: apply_calibration failed: %s\n",
                      err.c_str());
@@ -2371,8 +2666,7 @@ int run_real_mode(const Config& cfg, uint8_t start_ch, const std::string& cfg_pa
       const int merged_legacy = (w.legacy_wall != rc::kWallUndetermined)
                                      ? w.legacy_wall
                                      : cfg.radio.legacy_wall_rel;
-      if (!apply_offset_power_plan(merged_walls, merged_legacy,
-                                   cfg.radio.wall_margin_db)) {
+      if (!apply_offset_power_plan(merged_walls, merged_legacy, margin_db)) {
         std::fprintf(stderr,
                      "maburd cal: SetTxPowerRateDiffs failed after apply\n");
       }
@@ -2472,7 +2766,7 @@ int run_real_mode(const Config& cfg, uint8_t start_ch, const std::string& cfg_pa
       if (live_cfg.radio.power_mode == "offset") {
         if (!apply_offset_power_plan(live_cfg.radio.rate_walls_rel,
                                      live_cfg.radio.legacy_wall_rel,
-                                     live_cfg.radio.wall_margin_db)) {
+                                     live_wall_margin.load())) {
           std::fprintf(stderr,
                        "maburd cal: SetTxPowerRateDiffs failed restoring "
                        "after session\n");
@@ -2685,17 +2979,20 @@ int run_real_mode(const Config& cfg, uint8_t start_ch, const std::string& cfg_pa
     uint64_t last_hot_beat = 0, last_rx_beat = 0;
     uint64_t last_hot_change_ms = start, last_rx_change_ms = start;
     uint64_t last_stats_ms = start;
+    // The MAV counters as of the last stats line printed with them.
+    uint64_t mav_last[6] = {};
 
     // T_TELEM: sent at ~1 Hz on this same periodic path, on the mutex-guarded
-    // dev_sink.send() the MSP thread also uses. Radiotap and the
-    // tlm_seq/dot11 seq counters are declared at run_real_mode scope (not
-    // here) — deliberately NOT the video path's tx.seq() or RealActuator's
-    // DISC_ACK control_seq, so a telemetry-send bug can never perturb either,
+    // dev_sink.send() the MSP thread also uses. The tlm_seq/dot11 seq
+    // counters are declared at run_real_mode scope (not here) — deliberately
+    // NOT the video path's tx.seq() or RealActuator's DISC_ACK control_seq,
+    // so a telemetry-send bug can never perturb either,
     // but shared with the TX writer thread's calibration ack, which sends
     // T_TELEM frames on this same wire sequence from a different thread — see
     // that declaration's comment for why a shared counter is load-bearing
     // there.
     uint64_t last_telem_ms = start;
+    ControlRadiotap agent_radiotap = make_control_radiotap();
     mabur::CpuBusySampler cpu_busy;  // /proc/stat delta per telemetry tick
 
     mabur::TickGate tick_gate(now_steady_ms(), cfg.link.tick_ms);
@@ -2776,6 +3073,7 @@ int run_real_mode(const Config& cfg, uint8_t start_ch, const std::string& cfg_pa
           std::memory_order_relaxed);
       auto telem = rc::pack_telem(telem_struct);
 
+      const std::vector<uint8_t>& telem_radiotap = agent_radiotap.get();
       std::vector<uint8_t> frame;
       frame.reserve(telem_radiotap.size() + kDot11HeaderLen + telem.size());
       frame.insert(frame.end(), telem_radiotap.begin(), telem_radiotap.end());
@@ -2892,11 +3190,33 @@ int run_real_mode(const Config& cfg, uint8_t start_ch, const std::string& cfg_pa
             snr_off = vs.sensor_off_mfps;
           }
 #endif
+          // MAV fields only when a counter moved since they were last shown.
+          char mav_part[128] = "";
+          const uint64_t mav_now[6] = {
+              mav_rx_frames.load(std::memory_order_relaxed),
+              mav_rx_packets.load(std::memory_order_relaxed),
+              mav_tx_frames.load(std::memory_order_relaxed),
+              mav_tx_packets.load(std::memory_order_relaxed),
+              mav_drop.load(std::memory_order_relaxed),
+              mav_reject.load(std::memory_order_relaxed)};
+          if (!std::equal(std::begin(mav_now), std::end(mav_now), std::begin(mav_last))) {
+            std::copy(std::begin(mav_now), std::end(mav_now), std::begin(mav_last));
+            std::snprintf(mav_part, sizeof mav_part,
+                          " mav rx=%llu/%llu tx=%llu/%llu drop=%llu reject=%llu",
+                          static_cast<unsigned long long>(mav_now[0]),
+                          static_cast<unsigned long long>(mav_now[1]),
+                          static_cast<unsigned long long>(mav_now[2]),
+                          static_cast<unsigned long long>(mav_now[3]),
+                          static_cast<unsigned long long>(mav_now[4]),
+                          static_cast<unsigned long long>(mav_now[5]));
+          }
+          const ConfigApplierStats apply_stats = applier.stats();
           std::fprintf(stderr,
                        "stats: state=%d hot_beat=%llu rx_beat=%llu seq=%u sent=%llu drops=%llu "
                        "txq=%zu txq_drop=%llu "
                        "thermal_delta=%d tx_failed=%llu venc_verb_fail=%llu "
-                       "enc_pk100=%uk lp=%d armed=%d snr_mhz=%u snr_off=%d\n",
+                       "enc_pk100=%uk lp=%d armed=%d snr_mhz=%u snr_off=%d "
+                       "mav_apply=%llu/%llu mav_rebuild=%llu%s\n",
                        static_cast<int>(agent.state()), static_cast<unsigned long long>(hb),
                        static_cast<unsigned long long>(rb), tx.seq(),
                        static_cast<unsigned long long>(tx.sent()),
@@ -2907,7 +3227,10 @@ int run_real_mode(const Config& cfg, uint8_t start_ch, const std::string& cfg_pa
                        static_cast<unsigned long long>(actuator.venc_verb_failures),
                        enc_peak.take_peak_kbps(),
                        static_cast<int>(agent.low_power()), static_cast<int>(agent.armed_latched()),
-                       snr_mhz, snr_off);
+                       snr_mhz, snr_off,
+                       static_cast<unsigned long long>(apply_stats.ok),
+                       static_cast<unsigned long long>(apply_stats.failed),
+                       static_cast<unsigned long long>(apply_stats.rebuilds), mav_part);
         }
 
         // Telemetry suppression: non-sweep PPDUs in the airtime a calibration
@@ -3035,10 +3358,14 @@ int run_real_mode(const Config& cfg, uint8_t start_ch, const std::string& cfg_pa
   // path too, so hot_thread/agent_thread (which key off the same flag) are
   // guaranteed to exit and these joins complete.
   g_devourer_should_stop = true;
+  // First: an apply in flight finishes here, and none starts after, so no
+  // hook (a pipeline restart, start_msp) runs against the teardown below.
+  applier.shutdown();
   if (hot_thread.joinable()) hot_thread.join();
   if (tx_thread.joinable()) tx_thread.join();
   if (agent_thread.joinable()) agent_thread.join();
-  if (msp_thread.joinable()) msp_thread.join();
+  stop_msp();
+  if (mav_thread.joinable()) mav_thread.join();
   tx_pool.stop();  // drain + join senders before device teardown
 
   vtx_rec.shutdown();   // close the file before the record channel is torn down

@@ -59,9 +59,10 @@ class LatTracker {
   // One completed frame, as frame.log records it: the AU meta copied at
   // submit (join key pts, plus what au.log also carries so a row reads on
   // its own), every absolute stamp of the chain (mono µs) and the segment
-  // tuple. t_submit precedes t_complete for a streamed frame (slices fed
-  // as they arrive), so dec = t_decoded - t_complete can be split into the
-  // ring-to-decoder hand-off and the decoder's own time.
+  // tuple. t_submit is the record's close on the player side (after the
+  // ring's t_complete on both paths); a streamed frame's slices were fed
+  // before it, so dec = t_decoded - t_complete is the only decode measure
+  // that reads the same for whole and streamed frames.
   struct FrameRow {
     uint32_t pts_us = 0;
     uint64_t frame_id64 = 0;
@@ -103,6 +104,7 @@ class LatTracker {
   struct Breakdown {
     bool valid = false;
     uint32_t ms[8] = {0, 0, 0, 0, 0, 0, 0, 0};  // rounded ms, same order
+    uint32_t e2e_us = 0;  // the frame's raw e2e, for abs_lat_ms()
   };
   Breakdown p99_frame() const;
   Breakdown p50_frame() const;
@@ -127,7 +129,7 @@ class LatTracker {
     uint32_t pts_us = 0;
     uint64_t pts64 = 0;         // anchor-unwrapped pts, for map_us() at flip
     uint64_t t_complete_us = 0;
-    uint64_t t_submit_us = 0;   // diagnostic only -- dec folds t_submit..t_complete in
+    uint64_t t_submit_us = 0;   // diagnostic only -- dec is measured from t_complete
     uint64_t t_decoded_us = 0;
     uint64_t t_release_us = 0;
     uint64_t t_commit_us = 0;
@@ -169,6 +171,14 @@ class LatTracker {
 
   Breakdown p99_frame_, p50_frame_;
 };
+
+// The OSD's absolute LAT: a frame's raw e2e plus the network floor, both
+// µs, rounded ONCE. Rounding the two halves separately and adding is off by
+// a millisecond whenever both round the same way.
+inline int abs_lat_ms(uint32_t e2e_us, int64_t floor_us) {
+  const int64_t sum = static_cast<int64_t>(e2e_us) + floor_us;
+  return static_cast<int>((sum + (sum >= 0 ? 500 : -500)) / 1000);
+}
 
 // frame.log's format marker and one row's payload (everything after the
 // writer's t_flip column), in the order docs/observability.md lists.

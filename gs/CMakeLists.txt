@@ -32,6 +32,8 @@ add_library(mabur_gs_core STATIC
   src/ladder_residual.cpp
   src/tx_selector.cpp
   src/rcf_slot.cpp
+  src/mav_tunnel.cpp
+  src/param_client.cpp
   src/msp_sink.cpp
   src/frame_stream.cpp
   src/slice_assembler.cpp

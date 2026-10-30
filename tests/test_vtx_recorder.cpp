@@ -79,6 +79,25 @@ void feed(VtxRecorder& r, const std::vector<uint8_t>& au, uint32_t pts, bool key
   r.on_au(au.data(), au.size(), pts, key);
 }
 
+// The tkhd box's width and height (16.16 fixed, version 0 layout: 76 bytes
+// of header fields after the box type) of the MP4 at `path`; 0x0 when the
+// file holds no tkhd.
+void tkhd_size(const std::string& path, uint32_t* w, uint32_t* h) {
+  std::ifstream f(path, std::ios::binary);
+  const std::vector<uint8_t> b((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+  *w = *h = 0;
+  const std::string tag = "tkhd";
+  for (size_t i = 0; i + 4 + 84 <= b.size(); ++i) {
+    if (std::string(b.begin() + i, b.begin() + i + 4) != tag) continue;
+    auto be32 = [&](size_t at) {
+      return (uint32_t(b[at]) << 24) | (uint32_t(b[at + 1]) << 16) | (uint32_t(b[at + 2]) << 8) | b[at + 3];
+    };
+    *w = be32(i + 4 + 76) >> 16;
+    *h = be32(i + 4 + 80) >> 16;
+    return;
+  }
+}
+
 }  // namespace
 
 TEST(rec_status_packing) {
@@ -305,6 +324,79 @@ TEST(length_prefixed_aus_record_without_rescanning) {
   const std::vector<char> b((std::istreambuf_iterator<char>(fb)), std::istreambuf_iterator<char>());
   CHECK(!a.empty());
   CHECK(a == b);
+}
+
+// A pipeline rebuild can change the link's size while the recorder object
+// lives on: the next file must carry the new size, not the constructor's.
+TEST(set_link_size_is_used_by_the_next_file) {
+  Tree t;
+  FakeChannel ch;
+  VtxRecorder r(t.cfg(), ch, 1280, 720, t.paths);
+  r.set_link_size(1920, 1080);
+  r.request(true);
+  r.service(0);
+  feed(r, key_au(), 1000, true);
+  for (uint32_t i = 1; i < 10; ++i) feed(r, p_au(), 1000 + i * 16667, false);
+  r.service(0);
+  CHECK(r.files() == 1);
+  const std::string path = r.current_path();
+  r.request(false);
+  r.service(0);
+  uint32_t w = 0, h = 0;
+  tkhd_size(path, &w, &h);
+  CHECK(w == 1920);
+  CHECK(h == 1080);
+}
+
+// A caller about to tear the record channel down (a pipeline rebuild) waits
+// for settled(): an armed recorder already reads Off before its first file,
+// so the state alone cannot say the worker has stopped the channel.
+TEST(settled_tracks_the_worker_acting_on_the_last_wish) {
+  Tree t;
+  FakeChannel ch;
+  VtxRecorder r(t.cfg(), ch, 1920, 1080, t.paths);
+  CHECK(r.settled());
+  r.request(true);
+  CHECK(!r.settled());
+  r.service(0);
+  CHECK(r.settled());
+  CHECK(r.state() == RecState::Off);  // armed, no file yet
+  r.request(false);
+  CHECK(!r.settled());
+  r.service(0);
+  CHECK(r.settled());
+  CHECK(ch.stops == 1);
+  r.request(false);                   // same wish: nothing to act on
+  CHECK(r.settled());
+}
+
+// A parameter set can turn [record] on or off while the recorder lives on:
+// the next start probes the config set_config last handed it.
+TEST(set_config_enables_and_disables_the_next_start) {
+  Tree t;
+  FakeChannel ch;
+  RecordCfg off = t.cfg();
+  off.enable = false;
+  VtxRecorder r(off, ch, 1920, 1080, t.paths);
+  r.set_config(t.cfg());
+  r.request(true);
+  r.service(0);
+  CHECK(ch.starts == 1);
+  feed(r, key_au(), 1000, true);
+  for (uint32_t i = 1; i < 10; ++i) feed(r, p_au(), 1000 + i * 16667, false);
+  r.service(0);
+  CHECK(r.state() == RecState::Recording);
+  CHECK(r.files() == 1);
+  r.request(false);
+  r.service(0);
+  CHECK(r.state() == RecState::Off);
+
+  r.set_config(off);
+  r.request(true);
+  r.service(0);
+  CHECK(r.state() == RecState::Error);
+  CHECK(r.err() == RecErr::Disabled);
+  CHECK(ch.starts == 1);
 }
 
 MTEST_MAIN

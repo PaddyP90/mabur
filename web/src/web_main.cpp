@@ -26,7 +26,9 @@
 #include "au_file.h"
 #include "config.h"
 #include "frame_file_source.h"
+#include "mabur/config_params.h"
 #include "mabur/raw_dvr.h"
+#include "mav_ring.h"
 #include "web_gs.h"
 #include "web_phase.h"
 #ifdef WEBGS_LIVE
@@ -93,6 +95,37 @@ struct LocalRecReq {
   std::string name;
 } g_lrec;
 
+// Page -> core parameter requests (webgs_param_refresh/webgs_param_set):
+// queued here, applied to WebGs::params() once per loop iteration. `sets`
+// is (id, text) pairs in call order; an id the table doesn't have
+// (mabur::cfgparam::find returns -1) is applied as an out-of-range row,
+// which ParamClient::set refuses without touching any row -- there is
+// nothing to record a refusal against.
+struct ParamReq {
+  std::mutex mu;
+  bool refresh = false;
+  std::vector<std::pair<std::string, std::string>> sets;
+} g_param;
+
+// MAVLink tunnel (mav_tunnel.h, no UI yet): the page's webgs_mav_push /
+// webgs_mav_take exports hand raw bytes across the page/core thread
+// boundary (WebGs itself is single-threaded, so this mutex is the seam).
+// `out`: outbound bytes queued by the page, drained into
+// WebGs::mav_push_outbound once per loop iteration. `in`: inbound packets
+// the core drained out of WebGs::mav_take_inbound one at a time -- a
+// bounded MavRing (mav_ring.h), since nothing calls webgs_mav_take without
+// a page MAVLink UI and the drone's once-a-second heartbeat would
+// otherwise grow it for the module's whole lifetime.
+struct MavBridge {
+  std::mutex mu;
+  std::vector<uint8_t> out;
+  webgs::MavRing in;
+} g_mav;
+// False before the core exists and after it exits: webgs_mav_push then
+// has nothing to drain into, so it refuses rather than growing `out`
+// forever.
+std::atomic<bool> g_mav_running{false};
+
 // ---- page / console reporting --------------------------------------------
 
 // `ERROR <reason>` lines: the page maps the reason to text. Natively a
@@ -118,6 +151,41 @@ void report_stats(const std::string& json) {
   std::printf("STATS %s\n", json.c_str());
   std::fflush(stdout);
 #endif
+}
+
+// `PARAMS <json>` line: the ParamClient readout (webgs::params_json), pushed
+// once at start (push_params_at_start) and then whenever its seq() moves
+// (push_params_if_changed).
+void report_params(const std::string& json) {
+#ifdef WEBGS_PAGE
+  MAIN_THREAD_ASYNC_EM_ASM({ if (Module['onParams']) Module['onParams'](UTF8ToString($0)); _free($0); },
+                           strdup(json.c_str()));
+#else
+  std::printf("PARAMS %s\n", json.c_str());
+  std::fflush(stdout);
+#endif
+}
+
+// The start-of-run push, in both modes: the page shows the table's rows
+// (greyed, values null) from the moment the core runs, not only once a GS
+// session links. Spotter has no client, so this is its only push; in GS
+// mode it also syncs the caller's seq cursor, so push_params_if_changed
+// only fires on what moves after it.
+void push_params_at_start(const webgs::WebGs& g, uint64_t now_ms, uint32_t& param_seq_seen) {
+  param_seq_seen = g.params() ? g.params()->seq() : 0;
+  report_params(webgs::params_json(g, now_ms));
+}
+
+// Pushes params_json to the page/console iff the client's seq moved since
+// the caller's own cursor -- never more than once per poll, never while
+// nothing changed. Spotter has no client (g.params() == nullptr): its only
+// push is push_params_at_start.
+void push_params_if_changed(const webgs::WebGs& g, uint64_t now_ms, uint32_t& param_seq_seen) {
+  if (!g.params()) return;
+  const uint32_t sq = g.params()->seq();
+  if (sq == param_seq_seen) return;
+  param_seq_seen = sq;
+  report_params(webgs::params_json(g, now_ms));
 }
 
 // One per armed recording, when it is sealed: the page downloads
@@ -313,6 +381,12 @@ int run_replay(const ReplayOpts& o) {
   wo.adaptive_gap = !o.fixed_gap;
   wo.rz_nonce = 1;   // reproducible DISC nonce + RCF tags (native/WASM parity)
   webgs::WebGs g(cfg, o.mode, cfg.radio.channels.front(), cfg.radio.width, {}, 0, std::move(io), wo);
+  // The PARAMS push (see push_params_if_changed): replay has no page to
+  // drive webgs_param_refresh/webgs_param_set, but it is the only CLI
+  // driver of WebGs there is, so it is what a by-hand check of the `PARAMS`
+  // line runs against (--fake-ack opens a GS session to list over).
+  uint32_t param_seq_seen = 0;
+  push_params_at_start(g, 0, param_seq_seen);
 
   uint64_t last_us = 0;
   bool first = true;
@@ -322,9 +396,11 @@ int run_replay(const ReplayOpts& o) {
     g.on_rx(*m);
     g.tick(m->mono_us);
     last_us = m->mono_us;
+    push_params_if_changed(g, m->mono_us / 1000, param_seq_seen);
   }
   // Match the dry-run's final poll on the ms clock: last_ms + gap + 1.
   g.tick((last_us / 1000 + static_cast<uint64_t>(cfg.video.frame_gap_timeout_ms) + 1) * 1000);
+  push_params_if_changed(g, last_us / 1000, param_seq_seen);
   rec.stop();
   if (!o.record.empty() && rec.err() != mabur::RawDvr::Err::None) {
     std::fprintf(stderr, "error: --record %s failed\n", o.record.c_str());
@@ -385,11 +461,39 @@ int live_loop(const LiveOpts& o, const maburgs::Config& cfg, uint8_t ch, int wid
   // page hand-off.
   mabur::RawDvr dvr;
   std::string lrec_name;       // the armed/last recording's file name
+  std::string lrec_base_name;  // the name it was armed with, before any roll suffix
+  uint32_t lrec_roll_n = 0;    // roll suffix counter, reset whenever a recording (re)arms
   bool lrec_armed = false;     // a recording is armed or open and not yet reported
   int lrec_err = 0;            // last reported code (3 = no OPFS)
   // lrec_err stays set after an error, so the stats show state 3 until the
   // next start: the UI keeps REC! until the next press.
   uint32_t lrec_seq = 0;
+#ifdef WEBGS_PAGE
+  // A coded-size change mid-recording seals the current OPFS file -- reported
+  // the same way the record button's own stop reports a seal -- and rolls to
+  // <base>-r<N>.mp4, N counting up within this recording; recFileName (the
+  // page's collision check) never produces that suffix, so it can never
+  // collide with a later recording's own name.
+  //
+  // This callback runs on the core thread from inside the AU callback
+  // (RawDvr::feed() calls it synchronously), where OpfsFile::open() must
+  // never run: its ASYNCIFY await needs the core loop, not an AU callback
+  // (opfs_file.h). So it only computes the rolled name and returns nullptr
+  // with it set, deferring the open -- picked up below, in the loop.
+  dvr.set_next_sink([&](std::string* name) {
+    report_rec_closed(lrec_name, dvr.last_sealed_bytes(), 0);
+    std::string base = lrec_base_name;
+    const std::string suffix = ".mp4";
+    if (base.size() >= suffix.size() &&
+        base.compare(base.size() - suffix.size(), suffix.size(), suffix) == 0) {
+      base.resize(base.size() - suffix.size());
+    }
+    const std::string rolled = base + "-r" + std::to_string(++lrec_roll_n) + ".mp4";
+    *name = rolled;
+    lrec_name = rolled;
+    return std::unique_ptr<mabur::DvrSink>();
+  });
+#endif
   auto seal_local_rec = [&]() {
     if (!lrec_armed) return;
     const int err = lrec_err_code(dvr);   // read before stop(): Error is sticky
@@ -421,6 +525,18 @@ int live_loop(const LiveOpts& o, const maburgs::Config& cfg, uint8_t ch, int wid
   std::vector<maburgs::LinkCard*> ptrs;
   for (auto& c : cards) ptrs.push_back(c.get());
   webgs::WebGs g(cfg, o.mode, ch, width, ptrs, n_usb, std::move(io));
+  {
+    // Fresh buffers for this run: a page reconnect must not replay bytes
+    // queued against the previous core.
+    std::lock_guard<std::mutex> lk(g_mav.mu);
+    g_mav.out.clear();
+    g_mav.in.clear();
+  }
+  g_mav_running.store(true, std::memory_order_release);
+  // The table's rows reach the page now, before any session (and, in
+  // Spotter, ever) gives the client a seq move to push on.
+  uint32_t param_seq_seen = 0;
+  push_params_at_start(g, now_us() / 1000, param_seq_seen);
 
 #ifndef WEBGS_PAGE
   std::signal(SIGINT, [](int) { g_stop.store(true); });
@@ -436,6 +552,9 @@ int live_loop(const LiveOpts& o, const maburgs::Config& cfg, uint8_t ch, int wid
   // The page's phase-lock offset, re-stamped on THIS clock (now_us(), not
   // the page's performance.now()) whenever webgs_phase_tick bumps the seq.
   uint32_t phase_seq_seen = 0;
+  // param_seq_seen (above) is the ParamClient's last-pushed seq, so the
+  // loop pushes a fresh PARAMS line at most once per iteration, only when
+  // something in it moved.
   int16_t phase_val = 0;
   uint64_t phase_set_us = 0;   // 0: snr_off_to_send reads this as stale -> 0
   for (int s = 0; o.secs == 0 || s < o.secs;) {
@@ -468,6 +587,8 @@ int live_loop(const LiveOpts& o, const maburgs::Config& cfg, uint8_t ch, int wid
           report_rec_closed(name, 0, 3);
         } else if (on) {
           lrec_name = name;
+          lrec_base_name = name;
+          lrec_roll_n = 0;
           lrec_err = 0;
 #ifdef WEBGS_PAGE
           // Created now, from the loop (the open awaits through ASYNCIFY);
@@ -484,10 +605,75 @@ int live_loop(const LiveOpts& o, const maburgs::Config& cfg, uint8_t ch, int wid
         }
       }
     }
+#ifdef WEBGS_PAGE
+    // lrec_armed is belt and braces: stop() (seal_local_rec(), above)
+    // already clears roll_deferred() itself, but a deferred roll of a
+    // recording the operator has since stopped must never open a file
+    // under any future reordering of this loop.
+    if (dvr.roll_deferred() && lrec_armed) {
+      // The size-change roll deferred here (the next_sink lambda above
+      // never opens OPFS itself -- that await needs the core loop, not an
+      // AU callback, opfs_file.h): finish it now, from the loop, exactly
+      // like a fresh start(). A failed open leaves dvr in Error with
+      // lrec_armed still set, which the Error check below seals and
+      // reports the same way any other open failure is.
+      std::unique_ptr<mabur::DvrSink> sink;
+      if (auto f = webgs::OpfsFile::open(dvr.path())) sink = std::make_unique<OpfsSink>(std::move(f));
+      dvr.start(std::move(sink), 0, 0);
+      // The new file opens on an IRAP only: ask the drone for one now,
+      // same as a fresh start() does.
+      g_idr_req.fetch_add(1, std::memory_order_acq_rel);
+    }
+#endif
+    {
+      // Outbound MAVLink (webgs_mav_push): whatever the page queued since
+      // the last iteration, forwarded to the tunnel's parser once per
+      // tick -- flush() (inside g.tick()) is what actually sends it.
+      std::vector<uint8_t> mav_out;
+      { std::lock_guard<std::mutex> lk(g_mav.mu); mav_out.swap(g_mav.out); }
+      if (!mav_out.empty()) g.mav_push_outbound(mav_out.data(), mav_out.size());
+    }
     batch.clear();
     q.drain(batch, 5);
     for (const auto& m : batch) g.on_rx(m);
     g.tick(now_us());
+    {
+      // Page param requests (webgs_param_refresh/webgs_param_set): queued
+      // since the last iteration, applied to the client now. A set's own
+      // PARAM_EXT_SET only reaches the tunnel's outbound queue here --
+      // mav_->flush() already ran this iteration's g.tick(), so it goes out
+      // on the NEXT one, the same one-iteration lag webgs_set_rec and the
+      // IDR bump already have.
+      bool refresh = false;
+      std::vector<std::pair<std::string, std::string>> sets;
+      {
+        std::lock_guard<std::mutex> lk(g_param.mu);
+        refresh = g_param.refresh;
+        g_param.refresh = false;
+        sets.swap(g_param.sets);
+      }
+      for (const auto& kv : sets) {
+        const int idx = mabur::cfgparam::find(kv.first.c_str());
+        std::string why;
+        g.param_set(idx >= 0 ? static_cast<size_t>(idx) : static_cast<size_t>(-1), kv.second, &why);
+      }
+      if (refresh) g.param_refresh();
+      push_params_if_changed(g, now_us() / 1000, param_seq_seen);
+    }
+    {
+      // Inbound MAVLink (webgs_mav_take): drain whatever the tunnel
+      // delivered this tick into the bridge, one whole packet at a time
+      // (mav_take_inbound's own contract); the bridge's ring applies its
+      // own cap, dropping the oldest queued packet(s) if the page never
+      // calls webgs_mav_take to make room.
+      uint8_t mbuf[512];   // > MAVLINK_MAX_PACKET_LEN (~280 B)
+      for (;;) {
+        const size_t n = g.mav_take_inbound(mbuf, sizeof mbuf);
+        if (n == 0) break;
+        std::lock_guard<std::mutex> lk(g_mav.mu);
+        g_mav.in.push(mbuf, n);
+      }
+    }
     if (const uint32_t sq = g_phase_seq.load(std::memory_order_acquire); sq != phase_seq_seen) {
       phase_seq_seen = sq;
       phase_val = static_cast<int16_t>(g_phase_val.load(std::memory_order_acquire));
@@ -553,6 +739,9 @@ int live_loop(const LiveOpts& o, const maburgs::Config& cfg, uint8_t ch, int wid
   // Every exit (Disconnect, card lost) seals the local recording before the
   // module goes away, so the page can download it.
   seal_local_rec();
+  // WebGs (and `g`) is about to go out of scope: webgs_mav_push must stop
+  // accepting bytes it would never drain into a core again.
+  g_mav_running.store(false, std::memory_order_release);
   return rc;
 }
 
@@ -739,6 +928,50 @@ EMSCRIPTEN_KEEPALIVE void webgs_set_local_rec(int on, const char* name) {
   g_lrec.on = on != 0;
   g_lrec.name = (on && name) ? name : "";
   ++g_lrec.seq;
+}
+
+// MAVLink tunnel seam (no UI): raw packet bytes both ways. webgs_mav_push
+// queues bytes from a local MAVLink peer for the core to parse and tunnel
+// to the drone; webgs_mav_take pops one whole packet (drone -> local peer)
+// per call, up to `cap` bytes -- never split, and never more than one
+// packet per call (loop until it returns 0 to drain everything queued). A
+// `cap` of at least MAVLINK_MAX_PACKET_LEN (~280 B) always succeeds; a
+// smaller one leaves a too-big packet queued rather than returning a
+// partial one. The ring behind this is bounded (mav_ring.h): with no page
+// MAVLink UI yet, nothing may call this for the module's whole lifetime,
+// so unread packets age out oldest-first instead of growing forever.
+EMSCRIPTEN_KEEPALIVE int webgs_mav_push(const uint8_t* p, int n) {
+  if (!g_mav_running.load(std::memory_order_acquire) || n <= 0) return 0;
+  std::lock_guard<std::mutex> lk(g_mav.mu);
+  g_mav.out.insert(g_mav.out.end(), p, p + n);
+  return n;
+}
+EMSCRIPTEN_KEEPALIVE int webgs_mav_take(uint8_t* out, int cap) {
+  if (cap <= 0) return 0;
+  std::lock_guard<std::mutex> lk(g_mav.mu);
+  return static_cast<int>(g_mav.in.take(out, static_cast<size_t>(cap)));
+}
+
+// webgs_param_refresh/webgs_param_set: queue a request for the loop to
+// apply to WebGs::params() (g_param, like g_lrec) -- both copy their
+// arguments into it before returning, since the page frees the strings it
+// passed right after the call. 0 queued, 1 refused (the core is not
+// running, so there is nothing to apply it to). An unknown id or a bad
+// value is not refused here: it reaches the client's own refusal path
+// (mabur::cfgparam::find, ParamClient::set) once the loop drains the
+// request, reported through the next `onParams`/`PARAMS` push, not through
+// this call's return value.
+EMSCRIPTEN_KEEPALIVE int webgs_param_refresh() {
+  if (!g_mav_running.load(std::memory_order_acquire)) return 1;
+  std::lock_guard<std::mutex> lk(g_param.mu);
+  g_param.refresh = true;
+  return 0;
+}
+EMSCRIPTEN_KEEPALIVE int webgs_param_set(const char* id, const char* text) {
+  if (!g_mav_running.load(std::memory_order_acquire)) return 1;
+  std::lock_guard<std::mutex> lk(g_param.mu);
+  g_param.sets.emplace_back(id ? id : "", text ? text : "");
+  return 0;
 }
 
 // webgs_phase_*: the page's phase lock (web_phase.h). The page calls

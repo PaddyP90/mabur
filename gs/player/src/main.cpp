@@ -1286,6 +1286,14 @@ int main(int argc, char** argv) {
   // Raw-mode recorder (common/raw_dvr.h): sync gate + params + mux. Its
   // Error state is what the GS overlay's REC "broken" reads.
   mabur::RawDvr dvr;
+  // A coded-size change mid-recording (the drone picked a new camera mode)
+  // seals the current file and rolls to the next namer-assigned one rather
+  // than erroring the recording out.
+  dvr.set_next_sink([&](std::string* name) {
+    *name = dvr_filename(cfg.dvr.dir);
+    std::fprintf(stderr, "maburplay: rec: ROLL (%s)\n", name->c_str());
+    return mabur::open_file_sink(*name);
+  });
   // Autostart: dvr.autostart armed rec_on before this point (see rec_on's
   // declaration above), but the actual start() call has to wait until here,
   // where bcfg is in scope.
@@ -2147,26 +2155,28 @@ int main(int argc, char** argv) {
       // an offset that puts the floor outside (-1ms, 1s) is estimator
       // garbage — stay relative (~) rather than display a fabricated
       // absolute.
-      int floor_ms = 0;
+      // The floor stays in µs: abs_lat_ms() rounds the sum once, so the
+      // cell never sits a millisecond off the rounded true sum.
+      int64_t floor_us = 0;
       gs_ps.lat_abs = false;
       if (gs_src && lat.anchor().usable()) {
         if (const auto& off = gs_src->snapshot().pts_off_us) {
           const int64_t f_us =
               maburgs::floor_us_from(lat.anchor().base_us(), *off);
           if (f_us > -1000 && f_us < 1'000'000) {
-            floor_ms = static_cast<int>((f_us + 500) / 1000);
+            floor_us = f_us;
             gs_ps.lat_abs = true;
           }
         }
       }
       if (gs_ps.lat_valid) {
-        gs_ps.lat_e2e_ms = static_cast<int>(bd.ms[7]) + floor_ms;
+        gs_ps.lat_e2e_ms = maburplay::abs_lat_ms(bd.e2e_us, floor_us);
         // Median row: same window, same anchor gate, same staleness
         // reasoning as the p99 one above -- p50_frame_ likewise survives
         // flush_all(), so it is gated on the AND, not on bd50.valid alone.
         const auto bd50 = lat.p50_frame();
         if (bd50.valid)
-          gs_ps.lat_p50_e2e_ms = static_cast<int>(bd50.ms[7]) + floor_ms;
+          gs_ps.lat_p50_e2e_ms = maburplay::abs_lat_ms(bd50.e2e_us, floor_us);
       }
       if (L.n > 0) {
         char lat_buf[256];

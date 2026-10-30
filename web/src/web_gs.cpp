@@ -144,6 +144,25 @@ WebGs::WebGs(const maburgs::Config& cfg, Mode mode, uint8_t start_ch, int width,
     vrx_ = std::make_unique<maburgs::VrxController>(vc);
     slot_ = std::make_unique<maburgs::RcfSlotter>(
         maburgs::RcfSlotCfg{cfg.link.rcf_slot_hold_ms, 100, 2, 3, 1});
+    // MAVLink tunnel (mav_tunnel.h): leaves like an RCF, offered to the
+    // same slotter and sent directly only when the slotter has nothing
+    // held. Inbound packets land in mav_in_ (mav_ring.h) for the page to
+    // drain one at a time (mav_take_inbound).
+    mav_ = std::make_unique<maburgs::MavTunnel>(
+        cfg.link.key,
+        [this](std::vector<uint8_t> frame) {
+          maburgs::SlotFrame sf{std::move(frame), 0, 0, false};
+          if (!slot_->offer(sf, now_us_ / 1000, false)) send_(sf);
+        },
+        [this](const uint8_t* b, size_t n) {
+          mav_in_.push(b, n);
+          params_->on_packet(b, n, now_us_ / 1000);
+        });
+    // ParamClient (gs/src/param_client.h): sends by pushing onto the same
+    // tunnel's outbound queue, so its PARAM_EXT_* traffic is tagged and
+    // slotted exactly like a local MAVLink peer's.
+    params_ = std::make_unique<maburgs::ParamClient>(
+        [this](const uint8_t* p, size_t n) { mav_->push_outbound(p, n); });
     if (cfg.link.nack.enable) {
       nack_ = std::make_unique<mabur::NackTracker>(cfg.link.nack);
       nack_lookback_ = static_cast<uint32_t>(cfg.link.nack.lookback);
@@ -186,6 +205,10 @@ WebGs::WebGs(const maburgs::Config& cfg, Mode mode, uint8_t start_ch, int width,
                       {f.body_mono_us, f.q_ms, f.enc_us, f.air_ms, f.sw_seq, true, f.retx});
   });
   agg_.set_rc_sink([this](uint8_t, const std::vector<uint8_t>& f, uint64_t us) {
+    if (mav_ && mabur::rc::frame_type(f.data(), f.size()) == mabur::rc::T_MAV) {
+      mav_->on_rc_frame(f.data(), f.size());
+      return;
+    }
     if (mabur::rc::frame_type(f.data(), f.size()) == mabur::rc::T_TELEM) {
       if (auto t = mabur::rc::parse_telem(f.data(), f.size())) {
         telem_ = t;
@@ -444,6 +467,28 @@ void WebGs::tick(uint64_t now_us) {
     poll_nack_(now_ms_u);
     drain_nack_window_(now_ms_u);
   }
+  if (mav_) {
+    // Tag outbound frames under the live session only: session_ctx() keeps
+    // reporting the held nonce while BEACONING, so an unlinked tick tags
+    // nothing and the tunnel drops (and counts) whatever is queued.
+    const bool mav_linked = vrx_->link_state() == maburgs::VrxState::SESSION;
+    mav_->set_session(mav_linked ? vrx_->session_ctx() : mabur::rc::TagCtx{});
+    // ParamClient re-lists on every session edge, and on a vtx_nonce
+    // change while still linked (a re-rendezvous that never drops through
+    // BEACONING) -- its held rows would otherwise go on describing a
+    // drone that is no longer the one on the other end. Checked before
+    // flush() so a fresh set_linked(true)'s PARAM_EXT_REQUEST_LIST goes
+    // out this same tick.
+    const uint32_t nonce = vrx_->session_ctx().vtx_nonce;
+    if (mav_linked != param_linked_ || (mav_linked && nonce != param_vtx_seen_)) {
+      if (param_linked_) params_->set_linked(false, now_ms_u);
+      if (mav_linked) params_->set_linked(true, now_ms_u);
+      param_linked_ = mav_linked;
+      param_vtx_seen_ = nonce;
+    }
+    params_->tick(now_ms_u);
+    mav_->flush();
+  }
   maburgs::LinkHealthInputs in;
   if (vrx_) {
     in.op = vrx_->cur_op();
@@ -506,6 +551,24 @@ void WebGs::set_vtx_rec(bool on) {
 void WebGs::set_idr_requests(uint32_t n) {
   idr_req_ = n;
   if (vrx_) vrx_->set_idr_epoch(static_cast<uint8_t>(n));
+}
+
+void WebGs::mav_push_outbound(const uint8_t* p, size_t n) {
+  if (mav_) mav_->push_outbound(p, n);
+}
+
+size_t WebGs::mav_take_inbound(uint8_t* out, size_t cap) { return mav_in_.take(out, cap); }
+
+bool WebGs::param_set(size_t row, const std::string& text, std::string* why) {
+  if (!params_) {
+    if (why) *why = "not linked";
+    return false;
+  }
+  return params_->set(row, text, now_us_ / 1000, why);
+}
+
+void WebGs::param_refresh() {
+  if (params_) params_->refresh(now_us_ / 1000);
 }
 
 Stats WebGs::stats() const {
@@ -697,6 +760,104 @@ std::string stats_json(const Stats& s) {
   } else {
     j["nack"] = nullptr;
   }
+  return j.dump();
+}
+
+namespace {
+const char* param_list_name(maburgs::ParamListState s) {
+  switch (s) {
+    case maburgs::ParamListState::None: return "none";
+    case maburgs::ParamListState::Pending: return "pending";
+    case maburgs::ParamListState::Complete: return "complete";
+    case maburgs::ParamListState::Partial: return "partial";
+  }
+  return "?";
+}
+const char* param_type_name(mabur::cfgparam::Type t) {
+  switch (t) {
+    case mabur::cfgparam::Type::Bool: return "bool";
+    case mabur::cfgparam::Type::Int32: return "int";
+    case mabur::cfgparam::Type::Real32: return "real";
+    case mabur::cfgparam::Type::Str: return "str";
+  }
+  return "?";
+}
+const char* param_row_state_name(maburgs::ParamRowState s) {
+  switch (s) {
+    case maburgs::ParamRowState::Idle: return "idle";
+    case maburgs::ParamRowState::Sending: return "sending";
+    case maburgs::ParamRowState::InProgress: return "in_progress";
+    case maburgs::ParamRowState::Accepted: return "accepted";
+    case maburgs::ParamRowState::Failed: return "failed";
+    case maburgs::ParamRowState::Unsupported: return "unsupported";
+    case maburgs::ParamRowState::Timeout: return "timeout";
+  }
+  return "?";
+}
+// accepted/failed/unsupported/timeout: the terminal states a result_ms was
+// stamped for, so age_ms means something. Idle/Sending/InProgress have none.
+bool param_row_terminal(maburgs::ParamRowState s) {
+  return s == maburgs::ParamRowState::Accepted || s == maburgs::ParamRowState::Failed ||
+         s == maburgs::ParamRowState::Unsupported || s == maburgs::ParamRowState::Timeout;
+}
+}  // namespace
+
+std::string params_json(const WebGs& g, uint64_t now_ms) {
+  nlohmann::json j;
+  const maburgs::ParamClient* pc = g.params();
+  nlohmann::json rows = nlohmann::json::array();
+  if (!pc) {
+    // Spotter: the static table, every value unknown (no session to read
+    // it over), every row idle.
+    j["linked"] = false;
+    j["mode"] = "spotter";
+    for (size_t i = 0; i < mabur::cfgparam::kCount; ++i) {
+      const auto& row = mabur::cfgparam::kTable[i];
+      nlohmann::json r;
+      r["id"] = row.id;
+      r["section"] = row.section;
+      r["key"] = row.key;
+      r["type"] = param_type_name(row.type);
+      r["apply"] = mabur::cfgparam::apply_name(row.apply);
+      r["help"] = row.help;
+      r["value"] = nullptr;
+      r["state"] = "idle";
+      r["status"] = "";
+      r["age_ms"] = nullptr;
+      rows.push_back(std::move(r));
+    }
+    j["rows"] = std::move(rows);
+    return j.dump();
+  }
+  const auto& st = pc->state();
+  j["linked"] = st.linked;
+  // null until the drone's first HEARTBEAT on this link (set_linked
+  // clears alive_ms), so a page doesn't flag "no heartbeat" in the moment
+  // between link-up and the first one.
+  j["alive"] = st.alive_ms == 0 ? nlohmann::json(nullptr) : nlohmann::json(pc->alive(now_ms));
+  j["list"] = param_list_name(st.list);
+  j["mismatch"] = st.table_mismatch;
+  j["pending"] = st.pending_row;
+  for (size_t i = 0; i < mabur::cfgparam::kCount; ++i) {
+    const auto& row = mabur::cfgparam::kTable[i];
+    const auto& rs = st.rows[i];
+    nlohmann::json r;
+    r["id"] = row.id;
+    r["section"] = row.section;
+    r["key"] = row.key;
+    r["type"] = param_type_name(row.type);
+    r["apply"] = mabur::cfgparam::apply_name(row.apply);
+    r["help"] = row.help;
+    r["value"] = rs.have_value ? nlohmann::json(mabur::paramval::format_text(rs.value))
+                                : nlohmann::json(nullptr);
+    r["state"] = param_row_state_name(rs.st);
+    r["status"] = rs.status;
+    r["age_ms"] = param_row_terminal(rs.st)
+                      ? nlohmann::json(static_cast<int64_t>(now_ms - rs.result_ms))
+                      : nlohmann::json(nullptr);
+    rows.push_back(std::move(r));
+  }
+  j["rows"] = std::move(rows);
   return j.dump();
 }
 

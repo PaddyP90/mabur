@@ -254,6 +254,7 @@ LatTracker::Line LatTracker::flush_line() {
       if (c.seg[7] == target) {
         out.valid = true;
         for (int i = 0; i < 8; ++i) out.ms[i] = static_cast<uint32_t>((c.seg[i] + 500) / 1000);
+        out.e2e_us = c.seg[7];
         return;
       }
     }

@@ -129,7 +129,8 @@ everything past scanout start (HDMI + display processing) — see
 Counts how the RCF slotter released each control-frame send: `au` (at an AU
 completion with idle ahead, incl. the in-grace immediate sends), `probe` (at
 the probe body's arrival), `timeout` (hold reached `link.rcf_slot_hold_ms`),
-`passthru` (slotter off, or no AU in the last 100 ms). Cumulative.
+`passthru` (slotter off, or no AU in the last 100 ms). Cumulative; the
+counts include `T_MAV` sends, which the slotter releases like an RCF.
 `tail_ub_ms` is the slotter's learned completion→probe deadline (a lost
 probe's fallback release; ceil(decaying max) + 1). Healthy video = almost
 all `au`+`probe`; at a high duty cycle `timeout` climbs and phase-locks to
@@ -160,6 +161,23 @@ while `[link.nack] enable`. `lead_skipped`: seqs whose request was withheld
 by `link.nack.min_lead_ms` because the answer could not land before the
 deadline. The drone side is `drone.nack` (below). maburtop draws a `nack:`
 line in the LADDER panel. Design: `docs/fec-nack.md`.
+
+### `link.mav` — MAVLink tunnel
+
+`link.mav{tx, rx, reject, peer}`: the GS's `MavTunnel` and its UDP endpoint,
+counters cumulative since the daemon started; present only while
+`[mavlink] enable`. `tx` counts T_MAV frames sent to the drone, `rx` T_MAV
+frames received from it (each once: the second card's copy of a frame is
+not counted), `reject` the MAVLink packets the tunnel refused in either
+direction (outbound while unlinked; a bad CRC, MAVLink 1 or a partial; an
+outbound packet larger than a frame's payload; a drone T_MAV frame that
+fails to parse) -- the sum of `MavTunnelStats` `drop_unlinked +
+drop_bad_packet + drop_oversize`. The second card's copies (`rx_dup`) and
+the GS's own tagged T_MAV heard by its other card (`rx_uplink_heard`) are
+neither `rx` nor `reject` and are not exported. `peer` is true
+once a UDP client has sent the endpoint a datagram. maburtop draws a
+`mav <tx>/<rx>` cell (`mav off` without the key) on the top bar beside
+`key`. Design: `docs/mavlink.md`.
 
 ### `link.refresh` — demand refresh
 
@@ -546,7 +564,9 @@ columns:
     t_flip pts fid sid len flags slices t_submit t_complete t_decoded t_release enc dq air fec dec reg dsp e2e exact t_commit pbits
 
 `t_flip` is the frame's scanout-start stamp (mono µs); `t_submit` is when
-the player handed the AU (or its first slice) to the decoder, `t_complete`
+the player closed the ring record and submitted it — for a whole AU the
+hand-off to the decoder, for a streamed frame the close after its slices
+were already fed — `t_complete`
 the ring's finish stamp (as `au.log`), `t_decoded` when the decoded picture
 came back, `t_release` when the release thread released it (its stamp,
 taken just before the frame goes to the display). `enc dq air fec dec
@@ -556,8 +576,9 @@ vblank event. `pts` joins the row to `au.log` (same value), which carries
 `nal0`, `t_first` and the GS stamps; `fid`, `sid`, `len`, `flags` and
 `slices` are copied from the AU record so a row reads on its own, `flags`
 in hex as `au.log` prints it (`framelog 1` printed it in decimal). A
-streamed frame has `t_submit < t_complete`, so `t_decoded − t_submit` is
-not decode time for it; split `dec` with `t_complete` instead.
+streamed frame's slices went to the decoder before `t_submit`, so
+`t_decoded − t_submit` is not decode time for it; split `dec` with
+`t_complete` instead.
 
 `t_commit` is when the frame's atomic commit ioctl returned (mono µs; 0
 when the presenter parked the frame in its mailbox because a flip was
@@ -932,7 +953,15 @@ in whichever `dvr.mode` is configured:
   REC indicator visibly lags the press. The sync point is decided by
   `mabur::RawDvr` (`common/include/mabur/raw_dvr.h`, shared with the web
   GS's local recording): a complete IRAP (`au_is_irap()`) once VPS+SPS+PPS
-  are known. Older raw files that open on a non-IRAP need repair — see
+  are known. A coded-size change mid-recording (a drone `VENC_MODE`
+  MAVLink set rebuilding the encoder pipeline in-process,
+  `docs/mavlink.md`, `docs/link-adaptation.md`, is the live case) rolls
+  to a new file at the next IRAP rather than mixing two sizes in one
+  header: `maburplay` names the next file through the GS DVR's namer and
+  logs `maburplay: rec: ROLL (<path>)`. The web GS's local recording
+  rolls the same way, naming the new file `<name>-rN.mp4` and resuming
+  at the next sync point (`docs/web-gs.md`, "Local (`web`) target").
+  Older raw files that open on a non-IRAP need repair — see
   `docs/findings/2026-09-29-web-gs-raw-dvr-irap-sync.md`.
 - **burned** re-encodes what the display scans out, with the OSD burnt
   in. The recorder taps the display's flip on the release thread
@@ -1046,6 +1075,17 @@ refresh").
   inject, expect `Lossy`/`probe_holds`, no promote). Host build: `cmake -S .
   -B build-losssim -DDEVOURER_DIR=$PWD/../devourer -DMABUR_LOSS_SIM=ON`
   (gitignored dir, separate from the normal `build/`).
+- **Rebuild failure ladder → `MABUR_VENC_FAIL_RESTARTS=N`** in
+  `maburd`'s environment (start it by hand, not from the init wrapper):
+  the next `N` in-process pipeline restarts fail after the old pipeline
+  is stopped, before the SDK is touched, so a `VENC_*`/`REC_*` MAVLink set
+  walks the ladder's restore rungs (`N=1`: "previous pipeline restored",
+  `N=2`: "previous pipeline restored by a cold restart";
+  `docs/mavlink.md` "Applying a set"). Boot logs `venc:
+  MABUR_VENC_FAIL_RESTARTS=<N>: the next <N> pipeline restarts will fail`,
+  each forced failure `venc: injected pipeline start failure
+  (MABUR_VENC_FAIL_RESTARTS)`. Read once at the first encoder start and
+  only counted down; a respawn without the variable is clean.
 - **Radio/PHY bring-up below mabur → devourer's own tools** (`rxdemo` with
   `DEVOURER_RX_ALLPATHS=1`, `doctor`, etc. — see
   `third_party/devourer/CLAUDE.md`). Use these when the question is about
@@ -1097,13 +1137,57 @@ deploy, no video) and you need to know whether the encoder is running.
 
 maburd's own stderr (`/tmp/mabur.log`): the 1 Hz `stats:` line (incl.
 `enc_pk100=`, the peak 100 ms encoder byte rate in kbit/s inside that
-second, `lp=`/`armed=` for low-power mode, `snr_mhz=`, the trimmed
+second — its frame-normalised window is sized from the boot config's
+`venc.fps` and is not rebuilt by a live `VENC_MODE` MAVLink set
+(`docs/mavlink.md`), so the window's own 100 ms no longer matches the
+running fps after one — `lp=`/`armed=` for low-power mode, `snr_mhz=`, the trimmed
 sensor rate in milli-Hz (same value as `GET /venc`'s `sensor_mhz`), and
 `snr_off=`, the phase-lock offset on the sensor in milli-fps (0 = the
 trim's own rate); `rc: low_power ENTER/EXIT` lines mark transitions,
 `[sensor] cal:` lines the trim's rounds and lock, `[sensor] steer:` lines
 the phase lock's first offset, clamps and refusals) and the 5 s
 `frame_ring:` line (below).
+
+The MAVLink parameter component (T_MAV, `drone/src/mav_component.h`) logs
+to the same stderr. At boot: `maburd mav: component sys 1 comp 191,
+config <path>`. Per request, `[mav] ` lines: `list: <n> values`,
+`read <id>: no such parameter` (`read #<index>: no such parameter` for a
+read by index), `set <id>: no such parameter`, `set <id> = <value>
+(<toml key>, unchanged)` when the file already held that line and
+nothing was written, `set <id> refused: <why>` for an immediate refusal
+(unknown id, a type mismatch, a loader refusal, "apply in progress",
+"calibration in progress"), and `... config does not load: <why>` when
+the file on disk itself fails to load. A set that is a real change past
+the loader check is handed to `ConfigApplier` (`docs/mavlink.md`
+"Applying a set") and logs two lines instead: `set <id> = <value>
+(<toml key>) in progress` at once, then — once the applier finishes —
+either `set <id> = <value> (<toml key>) applied <knob|reprogram|rebuild>
+<ms> ms` or `set <id> refused: <reason>`. A repeat of that set while it
+is still being applied logs `set <id> = <value> (<toml key>) in
+progress, repeat` and is resolved by the same final line. The applier
+itself, on its own thread (`mbr-apply`), logs one line per attempt, each
+prefixed `maburd config: `: `apply <id>
+<knob|reprogram|rebuild> ok <ms> ms` or `... failed: <reason> <ms> ms`,
+plus one line per rung for a rebuild that falls back: `rebuild <toml
+key>: new pipeline refused` / `previous pipeline restored` / `previous
+pipeline refused` / `previous pipeline restored by a cold restart` /
+`cold restart failed` / `pipeline lost, requesting exit`. The `stats:`
+line always carries `mav_apply=<ok>/<failed>` (every finished apply,
+cumulative since start) and `mav_rebuild=<n>` (every pipeline-only
+restart the ladder made: one for a set that applies, two for one that
+fell back to the previous config; the cold restart rung is a separate
+hook and is not counted), and gains
+`mav rx=<frames>/<packets> tx=<frames>/<packets> drop=<n> reject=<n>`
+on the ticks where any of those moved since the last time they were
+printed; the values are cumulative since start. `rx` counts verified
+T_MAV frames and the MAVLink 2 packets parsed out of them, `tx` the
+uplink T_MAV frames and the packets they carried (replies and the 1 Hz
+HEARTBEAT, sent only while a session is published), `drop` the frames
+that failed to parse plus the packets the component dropped (another
+target, an unhandled message, bad CRC, MAVLink 1, a partial, and a reply
+dropped because the 64-packet outbound queue was full), and
+`reject` the frames that parsed but failed the tag or the counter (these
+also raise Telem's `auth_reject`).
 
 ## Frame loss inside the drone ("wire clean" ≠ no frame loss)
 

@@ -199,6 +199,13 @@ socket     = "/run/mabur-au.sock"   # must match maburplay's socket
 slot_kb    = 512                    # largest frame that fits, in KB
 slot_count = 16                     # frames buffered
 
+# MAVLink UDP endpoint: a ground app or tools/bench/mavparam.py talks to the
+# drone through it (docs/mavlink.md). Whoever reaches the socket is trusted.
+[mavlink]
+enable = true
+bind   = "127.0.0.1"   # the GS's LAN address to let a ground app on the LAN connect
+port   = 14550         # MAVLink's conventional GCS port
+
 # Detailed per-session logs for troubleshooting; off by default.
 [debug_log]
 enable        = false

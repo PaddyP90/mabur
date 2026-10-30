@@ -102,8 +102,8 @@ same `PhaseLock`/`RateMatch` C++ sources through WASM exports
 instead of drawing it on arrival (`HoldQueue`). The offset reaches the
 drone the same way as from `maburplay`: through the core's RCF `snr_off`.
 Spotter mode sends no RCFs and runs no phase-lock calls at all. See
-`docs/web-gs.md` ("Phase lock") for the toggle, the hold, and the Stats
-panel group.
+`docs/web-gs.md` ("Phase lock") for the toggle, the hold, and the Debug
+tab group.
 
 ## Deploy
 

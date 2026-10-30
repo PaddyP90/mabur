@@ -217,6 +217,11 @@ export class PhaseController {
   }
 
   get enabled() { return this._enabled; }
+
+  // The display's refresh, Hz, fitted from the rAF loop (which runs with
+  // the lock on or off); null until the grid's first fit.
+  get panelHz() { return this.grid.period ? 1000 / this.grid.period : null; }
+
   // Off: nothing queued may outlive the moment it's disabled -- evict now,
   // not whenever the queue would otherwise have next drained.
   set enabled(on) {
@@ -351,7 +356,7 @@ export class PhaseController {
   // usually gets there first.
   tick(nowMs, { lowPower, visible }) {
     const mod = this._mod();
-    const panelHz = this.grid.period ? 1000 / this.grid.period : 0;
+    const panelHz = this.panelHz ?? 0;
     const lp = lowPower === true ? 1 : lowPower === false ? 0 : 2;
     const vis = this._enabled && visible ? 1 : 0;
     this._offset = mod ? mod._webgs_phase_tick(nowMs * 1000, panelHz, lp, vis) : 0;
@@ -381,7 +386,7 @@ export class PhaseController {
       errMs: mod ? mod._webgs_phase_err_ms() : NaN,
       offset: this._offset,
       centre: mod ? mod._webgs_phase_centre() : NaN,
-      panelHz: this.grid.period ? 1000 / this.grid.period : null,
+      panelHz: this.panelHz,
       srcHz: mod ? mod._webgs_phase_src_hz() : NaN,
       mismatch: mod ? !!mod._webgs_phase_mismatch() : false,
       held: this._held,

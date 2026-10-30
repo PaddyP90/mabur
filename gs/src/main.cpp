@@ -47,6 +47,8 @@
 #ifdef MABUR_LOSS_SIM
 #include "loss_control.h"
 #endif
+#include "mav_endpoint.h"
+#include "mav_tunnel.h"
 #include "mabur/cal_wire.h"
 #include "mabur/channel_file.h"
 #include "mabur/channel_set.h"
@@ -362,6 +364,20 @@ static int run_radio(const maburgs::Config& cfg) {
     std::fprintf(stderr,
                  "warning: calibration control port 8400 unusable; "
                  "`maburcal start` will not reach this daemon\n");
+  // MAVLink UDP endpoint ([mavlink], docs/mavlink.md): the socket a ground
+  // app reaches the drone's parameter component through. A bind failure is
+  // a warning, not fatal: the video link does not depend on it.
+  maburgs::MavEndpoint mav_ep;
+  if (!cfg.mavlink.enable)
+    std::fprintf(stderr, "maburgs: mavlink endpoint disabled\n");
+  else if (mav_ep.open(cfg.mavlink.bind, cfg.mavlink.port))
+    std::fprintf(stderr, "maburgs: mavlink endpoint udp %s:%d\n",
+                 cfg.mavlink.bind.c_str(), cfg.mavlink.port);
+  else
+    std::fprintf(stderr,
+                 "warning: mavlink endpoint udp %s:%d unusable; no ground app "
+                 "can reach the drone's parameters\n",
+                 cfg.mavlink.bind.c_str(), cfg.mavlink.port);
   // VTX onboard recorder wish from maburplay (rec_control.h). Loopback
   // only; a failure just means the drone never gets a known wish.
   maburgs::RecControl rec_ctl;
@@ -928,7 +944,28 @@ static int run_radio(const maburgs::Config& cfg) {
                  static_cast<unsigned>(from_seq), static_cast<unsigned>(to_seq),
                  old_dir.c_str(), debug.dir().c_str());
   };
+  // MAVLink tunnel (mav_tunnel.h): always built, the rc sink feeds it the
+  // drone's T_MAV frames whether or not the endpoint is open. Its frames
+  // leave like an RCF: offered to the slotter, never during a calibration
+  // sweep. flush() runs once per tick after mav_tick_ms / mav_tick_card are
+  // set to that tick's clock and TX card.
+  uint64_t mav_tick_ms = 0;
+  int mav_tick_card = 0;
+  uint32_t mav_vtx_seen = 0;   // the session the CAP_MAVLINK check last ran for
+  maburgs::MavTunnel mav_tunnel(
+      cfg.link.key,
+      [&](std::vector<uint8_t> frame) {
+        maburgs::SlotFrame sf{std::move(frame), 0, mav_tick_card, false};
+        if (!rcf_slot.offer(sf, mav_tick_ms, false) &&
+            !cal_session.radio_silent(mav_tick_ms))
+          send_control_frame(sf);
+      },
+      [&](const uint8_t* b, size_t n) { mav_ep.send_to_peer(b, n); });
   agg.set_rc_sink([&](uint8_t, const std::vector<uint8_t>& f, uint64_t us) {
+    if (mabur::rc::frame_type(f.data(), f.size()) == mabur::rc::T_MAV) {
+      mav_tunnel.on_rc_frame(f.data(), f.size());
+      return;
+    }
     if (mabur::rc::frame_type(f.data(), f.size()) == mabur::rc::T_TELEM) {
       // A CRC-clean frame can still fail to parse as a valid Telem (e.g. a
       // corrupted T_TELEM whose CRC happens to pass this layer but whose
@@ -1260,6 +1297,24 @@ static int run_radio(const maburgs::Config& cfg) {
           if (!cal_session.radio_silent(drained_ms)) send_control_frame(sf);
         }
       }
+    }
+    // MAVLink: tag under the live session only (session_ctx() keeps the
+    // held nonce while BEACONING; the drone takes T_MAV only when LINKED),
+    // then endpoint datagrams -> tunnel -> T_MAV frames. CAP_MAVLINK is
+    // display-only: one line per session, nothing is gated on it.
+    {
+      const bool mav_linked = vrx.link_state() == maburgs::VrxState::SESSION;
+      const mabur::rc::TagCtx mav_ctx = mav_linked ? vrx.session_ctx() : mabur::rc::TagCtx{};
+      if (mav_ctx.vtx_nonce != 0 && mav_ctx.vtx_nonce != mav_vtx_seen) {
+        mav_vtx_seen = mav_ctx.vtx_nonce;
+        if (cfg.mavlink.enable && (vrx.peer_caps() & mabur::rc::CAP_MAVLINK) == 0)
+          std::fprintf(stderr, "maburgs: mavlink: drone lacks CAP_MAVLINK\n");
+      }
+      mav_tunnel.set_session(mav_ctx);
+      mav_ep.poll(mav_tunnel);
+      mav_tick_ms = drained_ms;
+      mav_tick_card = sel.selected();
+      mav_tunnel.flush();
     }
     // Compiled into every prod build, unlike loss_ctl above (cal_control.h).
     const auto cal_state_before_poll = cal_session.state();
@@ -1765,6 +1820,11 @@ static int run_radio(const maburgs::Config& cfg) {
       sin.rcf_slot = {rcf_slot.released_au(), rcf_slot.released_timeout(),
                       rcf_slot.passthru(), rcf_slot.released_probe(),
                       rcf_slot.tail_ub_ms()};
+      if (cfg.mavlink.enable) {
+        sin.mav.enabled = true;
+        sin.mav.t = mav_tunnel.stats();
+        sin.mav.peer = mav_ep.has_peer();
+      }
       // link.nack: take_window() is destructive; safe here because the
       // block runs only on a poll that will emit.
       if (cfg.link.nack.enable) {

@@ -52,8 +52,8 @@ TEST(snap_down_to_minimum_offset) {
 }
 
 // (c) leak: two samples 1 s apart with off > base -> base rises by exactly
-//     kLeakPpm (integer math d * 60 / 1'000'000 per sample, same as the
-//     regulator's line 38 -- assert the exact integer result, not ~=).
+//     kLeakPpm (d * 60 / 1'000'000 with a zero carry -- assert the exact
+//     integer result, not ~=).
 TEST(leak_exact_integer_arithmetic) {
   PtsAnchor a;
   a.observe(0, kT0);  // seeds base = kT0
@@ -97,6 +97,24 @@ TEST(leak_exact_integer_arithmetic) {
   const auto o2 = a.observe(pts32_3, mono3);
   CHECK(!o2.discont);
   CHECK(a.base_us() == off3);
+}
+
+// (c2) leak at frame cadence: the creep must accumulate across frames whose
+//      individual d * kLeakPpm is below 1 µs. One second of 100 fps steps
+//      (d = 10'000 µs, 60 * d = 0.6 µs each) must raise the base by the
+//      full 60 µs, not by 100 truncated zeros.
+TEST(leak_accumulates_across_sub_microsecond_frames) {
+  PtsAnchor a;
+  a.observe(0, kT0);  // seeds base = kT0
+  const int64_t d = 10'000;  // 100 fps pts step
+  uint64_t pts = 0;
+  for (int i = 0; i < 100; ++i) {
+    pts += static_cast<uint64_t>(d);
+    // Arrivals 10 ms slower than the floor: never a snap-down, so only
+    // the leak moves the base.
+    a.observe(static_cast<uint32_t>(pts), kT0 + pts + 10'000);
+  }
+  CHECK(a.base_us() == static_cast<int64_t>(kT0) + 60);
 }
 
 // (d) discont: delta-pts of 3s -> discont=true, base_valid()==false, usable()

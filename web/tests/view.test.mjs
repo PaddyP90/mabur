@@ -98,7 +98,7 @@ test('debug groups carry the handoff keys verbatim + counters', () => {
   const g = debugGroups({ connected: true, mode: 'gs', core, ausRate: 60,
     hitches60: 0, hitchesTotal: 18, seg: { w1: {}, w60: {} } });
   assert.deepEqual(g.map((x) => x.title), ['Link', 'Channel', 'Radio', 'Drone', 'Client',
-    'Latency (ms; 1 s | 60 s windows)', 'Counters', 'NACK']);
+    'Latency (ms; 1 s | 60 s windows)', 'Counters', 'NACK', 'Phase lock']);
   assert.deepEqual(g[0].rows.map((r) => r.k),
     ['mode', 'session', 'peer_acked', 'rung', 'mcs', 'width', 'probe', 'key', 'key_mismatch']);
   assert.deepEqual(g[2].rows.map((r) => r.k), ['pre-FEC loss', 'residual', 'SNR', 'RSSI', 'RTT', 'RCF heard %']);
@@ -336,30 +336,31 @@ test('debug NACK group: tracker outcomes, fill ms, drone counters; off/null/spot
   assert.ok(grp({ ...args, connected: false, core: null }).rows.every((r) => r.v === '–'));
 });
 
-// Phase lock stats group (docs/web-gs.md "Phase lock"): statsView's own
-// group, built from PhaseController.snapshot() -- GS mode only, a spotter
-// collapses to one n/a row since it never steers (docs/phase-lock.md "Wire").
-test('statsView phase lock group', () => {
+// Phase lock Debug group (docs/web-gs.md "Phase lock"): built from
+// PhaseController.snapshot() -- GS mode only, a spotter collapses to one n/a
+// row since it never steers (docs/phase-lock.md "Wire").
+test('debugGroups phase lock group', () => {
+  const core = { mode: 'gs', session: true, peer_acked: true, rung: 0, mcs: 1, bw: 20 };
+  const args = { connected: true, mode: 'gs', core, ausRate: 60, hitches60: 0, hitchesTotal: 0,
+    seg: { w1: {}, w60: {} }, lrec: null };
+  const grp = (a) => debugGroups(a).find((x) => x.title === 'Phase lock');
   const phase = { state: 'lock', errMs: -0.2, offset: 12, centre: 9, panelHz: 59.997, srcHz: 59.988,
     mismatch: false, held: 10, late: 1, displaced: 0, enabled: true };
-  const v = statsView({ ...base, mode: 'gs', phase });
-  assert.equal(v.phaseGroup.title, 'Phase lock');
-  assert.equal(v.phaseGroup.rows.find((r) => r.k === 'state').v, 'lock · err -0.2 ms');
-  assert.equal(v.phaseGroup.rows.find((r) => r.k === 'offset').v, '+12 mfps (centre +9)');
-  assert.equal(v.phaseGroup.rows.find((r) => r.k === 'rates').v, 'panel 59.997 Hz · drone 59.988 Hz');
-  assert.equal(v.phaseGroup.rows.find((r) => r.k === 'hold').v, 'held 10 · late 1 · displaced 0');
+  const g = grp({ ...args, phase });
+  assert.equal(g.rows.find((r) => r.k === 'state').v, 'lock · err -0.2 ms');
+  assert.equal(g.rows.find((r) => r.k === 'offset').v, '+12 mfps (centre +9)');
+  assert.equal(g.rows.find((r) => r.k === 'rates').v, 'panel 59.997 Hz · drone 59.988 Hz');
+  assert.equal(g.rows.find((r) => r.k === 'hold').v, 'held 10 · late 1 · displaced 0');
   // mismatch appended to the rates row in caution text when set
-  const mv = statsView({ ...base, mode: 'gs', phase: { ...phase, mismatch: true } });
-  const mRow = mv.phaseGroup.rows.find((r) => r.k === 'rates');
+  const mRow = grp({ ...args, phase: { ...phase, mismatch: true } }).rows.find((r) => r.k === 'rates');
   assert.match(mRow.v, /mismatch/);
   assert.equal(mRow.tone, 'low');
   // Spotter never steers: the group collapses to one n/a row.
-  const s = statsView({ ...base, mode: 'spotter', phase });
-  assert.deepEqual(s.phaseGroup.rows, [{ k: 'state', v: 'n/a' }]);
+  assert.deepEqual(grp({ ...args, mode: 'spotter', phase }).rows, [{ k: 'state', v: 'n/a' }]);
   // No phase snapshot yet (disconnected, or before the first tick): dashes.
-  const off = statsView({ ...base, mode: 'gs', phase: null });
-  assert.ok(off.phaseGroup.rows.every((r) => r.v === '–'));
+  assert.ok(grp({ ...args, connected: false, core: null }).rows.every((r) => r.v === '–'));
   // Disabled: the C++ state isn't steering anything, so it isn't shown.
-  const dis = statsView({ ...base, mode: 'gs', phase: { ...phase, enabled: false } });
-  assert.deepEqual(dis.phaseGroup.rows, [{ k: 'state', v: 'off' }]);
+  assert.deepEqual(grp({ ...args, phase: { ...phase, enabled: false } }).rows, [{ k: 'state', v: 'off' }]);
+  // Not on the Stats tab any more.
+  assert.equal(statsView({ ...base, mode: 'gs' }).phaseGroup, undefined);
 });

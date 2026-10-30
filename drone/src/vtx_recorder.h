@@ -73,12 +73,26 @@ class VtxRecorder {
   void shutdown();       // join the worker, close the file; idempotent
 
   void request(bool on);
+  // The link's encoded size, written into the next file's header. A
+  // pipeline rebuild can change it while the recorder lives on; the file
+  // open in progress keeps the size it was opened with. Any thread.
+  void set_link_size(int width, int height);
+  // The [record] section the next start probes and records with: a
+  // parameter set can turn recording on or off, or move it, while the
+  // recorder lives on. A recording in progress keeps the section it started
+  // with. Any thread.
+  void set_config(const RecordCfg& cfg);
   // prefixed: the AU is already in MP4 layout (4-byte length before each
   // NAL) and `key` came from the encoder's NAL table -- the drain builds that
   // while copying, so nothing here rescans it. Otherwise it is Annex-B and
   // the key flag is double-checked against the bitstream.
   void on_au(const uint8_t* au, size_t n, uint32_t pts_us, bool key, bool prefixed = false);
   bool service(int wait_ms);   // one worker iteration; true if it did work
+  // True once the worker has finished acting on the latest request(): the
+  // channel is started or stopped as wished. An armed recorder reads Off
+  // before its first file, so state() alone cannot tell a caller about to
+  // tear the channel down that the stop has run. Any thread.
+  bool settled() const;
 
   uint8_t status_byte() const { return status_.load(std::memory_order_relaxed); }
   RecState state() const { return static_cast<RecState>(status_byte() & 0x03); }
@@ -107,14 +121,13 @@ class VtxRecorder {
     status_.store(pack_rec_status(s, e), std::memory_order_relaxed);
   }
 
-  RecordCfg cfg_;
+  RecordCfg cfg_;  // worker thread: the section the current start took
   RecordChannel& ch_;
-  int width_, height_;
   RecorderPaths paths_;
   RecorderLimits lim_;
   DvrNamer namer_;
 
-  std::mutex mx_;
+  mutable std::mutex mx_;
   std::condition_variable cv_;
   // Guarded by mx_:
   std::deque<Au> q_;
@@ -124,6 +137,8 @@ class VtxRecorder {
   bool idr_wanted_ = false;
   bool accepting_ = false;
   bool quit_ = false;
+  int width_, height_;       // the link's size, read when a file opens
+  RecordCfg next_cfg_;       // set_config's, copied into cfg_ by do_start
 
   // Worker thread only:
   bool running_ = false;
@@ -135,6 +150,7 @@ class VtxRecorder {
   std::string path_;
 
   std::atomic<uint8_t> status_{0};
+  std::atomic<uint64_t> done_gen_{0};  // the last gen_ the worker finished acting on
   std::atomic<uint64_t> dropped_{0};
   std::thread thr_;
   bool shut_ = false;

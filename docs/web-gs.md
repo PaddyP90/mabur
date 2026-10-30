@@ -673,10 +673,127 @@ A followed hop usually gets one soon, since the drone's retune and the GS's
 post-hop rung change both cost an IDR, but nothing on the spotter can ask
 for it.
 
+### VTX tab
+
+The drone's parameter table (`common/include/mabur/config_params.h`
+`kTable`, 12 rows), edited live over the MAVLink tunnel's `ParamClient`
+(see "MAVLink seam" below). `VtxPanel.svelte` groups the rows under the
+table's section kickers in the order Camera, Encoder, Recorder, Power,
+Flight controller, Radio (`SECTION_KICKER` in `vtxparams.js`), rows in
+table order, laid out like the Config form (the windowed sidebar's ruled
+groups, the immersive panel's cards). One row is left off the tab
+(`HIDDEN`): RADIO_WALL_MARGN, which stays in the drone's table and
+settable over MAVLink. While REC_ENABLE reads Off, the recorder's
+own rows (REC_BITRATE, REC_FPS, REC_SIZE: `REC_SETTINGS`) are hidden too;
+picking On shows them at once, from the moment the set goes out. The rows are on screen from the moment
+the core starts (its first `onParams` push), greyed until the session
+links. A header line tracks the link and the list: "Waiting for the drone
+link…" before the session links; "The drone's parameter table differs
+from this page — redeploy." once a value arrives whose `param_count` is
+not this build's row count (the client's `table_mismatch`, which wins
+over the list states); "Reading the drone's settings…" while a list round
+is out and some row has no value yet — the re-list `ParamClient` runs after
+an accepted rebuild set (a VENC_MODE set may move REC_SIZE) keeps every
+value on show and reads silently; "Some settings did not answer." if it came back partial; and
+nothing once it is complete. A dim "no heartbeat" tag sits beside it
+when the session is linked and the drone's component has sent a MAVLink
+`HEARTBEAT` on this link but none in the last 3 s (the JSON's `alive`
+false; before the first one `alive` is null and there is no tag) — the
+rows stay editable, since a set itself times out. The tab has no refresh
+control: the list is read when the link forms (`Session.paramRefresh()`
+and the core's `webgs_param_refresh` still re-list on demand, but nothing
+on the page calls them).
+
+Each row's label names the setting in words ("LDPC coding", "Camera
+mode", "Max bitrate (kbps)", …: `LABELS` in `vtxparams.js`), never its
+MAVLink id or config key. Under the widget sits one hint line, always
+visible: the row's help text from the table (replaced on the page for
+VENC_MODE, VENC_SLICES, REC_SIZE and LOWPWR_ENABLE, whose table text
+spells the wire format, a config key, or a widget the page doesn't use),
+followed for VENC_MODE/MSP_ENABLE by a sentence about another row it
+interacts with.
+
+**Spotter mode** shows "VTX settings need GS mode." and every row as a
+greyed, read-only "—" — a spotter has no control channel to list or set
+anything over.
+
+**Committing a row** is always one `Session.paramSet(id, text)` per edit,
+never a batch. Bool rows and VENC_SLICES are On/Off segments that commit
+on a pick (VENC_SLICES sends 4 for On and 1 for Off; any count above 1
+the drone runs reads as On). VENC_MODE and REC_SIZE are dropdowns that
+commit on a pick (below). The other Int, Real and Str rows are text boxes
+that commit on Enter or on blur, and only when the typed text differs
+from the drone's current value. Text that cannot hold the row's type (say
+`1.5` in an Int row) sends nothing: the row's status reads "Invalid" with
+a reason line — "not a valid integer", "not a valid number", or for Str
+the allowed spelling — and keeps exactly what was typed, so the operator
+can fix it; both clear on that row's next edit.
+
+**VENC_MODE** is one dropdown of "`<fps>` fps · `<W>`×`<H>`" choices: every
+size of the 60, 90, 100 and 120 fps sensor modes (`MODE_FPS`, sizes from
+`docs/camera-modes.md`), the two crop modes (100, 120) marked "cropped
+view". When the drone runs a value outside that list (an ssh-set rate or
+size), it is added as the first choice, so the dropdown always shows
+what the drone runs.
+
+The choices follow the display. A browser can measure only its current
+refresh, never the modes the display could switch to (there is no EDID),
+so the tab reads `PhaseController.panelHz` — the `VsyncGrid` fit of the
+rAF loop, which runs in GS mode from the first video frame whether the
+phase lock is on or off — and offers only the rates within 0.55 Hz of it
+(`DISPLAY_MATCH_HZ`, the phase lock's own rate-mismatch window; a whole
+multiple such as 60 fps on a 120 Hz display is no match), plus the
+drone's current value whatever its rate. The hint adds "Showing the
+rates that match this display (60 Hz)." While the rate is not known yet
+(no video, before the grid's first fit) or when no rate matches (a
+144 Hz monitor) every choice is listed, the latter with "No camera rate
+matches this display (144 Hz)." A phone that drops its refresh to save
+power measures, and filters, at the lower rate.
+
+**REC_SIZE** is a dropdown scoped to the camera mode the drone runs
+(VENC_MODE's value, not a pick still in flight): that sensor mode's
+sizes, which share the camera's aspect and fit the window the recorder's
+scaler reads (`docs/vtx-recorder.md`), plus the camera's own size and
+the drone's current recording size when either is off that list.
+Nothing above 1920x1080 is offered, since that needs the 30 fps 4K sensor
+mode.
+
+A row's status sits at the right end of its label line (`rowStatus` in
+`vtxparams.js`), so it never moves the layout. While a set is in flight
+the control already shows the picked value, it pulses in the accent colour,
+a thin bar sweeps along its bottom edge, and the status reads "Sending…"
+then "Applying…". Every other row dims slightly and stops taking input
+(`inert`) without greying out, since the core applies one set at a time.
+Once the answer arrives (the row leaves sending/in_progress, or the client
+refuses the commit outright), the row's widget is rebuilt on the drone's
+value, so a refused toggle or edit never stays on screen beside its
+refusal. On success the bar fills, the status reads "✓ Saved", and both
+fade after about 1.5 s. On an error the control gives one small shake, the
+status turns red, and a reason line appears under the hint (the only time
+the layout moves): "Failed" with the client's reason ("apply in
+progress", "not linked"), the drone's loader or applier reason (its
+`STATUSTEXT`, or "refused" if that never arrived), or "the drone refused
+this value's shape" for `PARAM_ACK_VALUE_UNSUPPORTED` (a type, shape or
+unknown-id refusal, which carries no reason text); or "No answer" with
+"The drone did not answer; it may not have applied the change." on a
+timeout. With reduced motion there is no sweep, pulse, shake or fade: the
+bar is static while busy and the status text carries the state. The row's
+apply path (`docs/mavlink.md`) is not shown.
+
+The tab lives both on the windowed sidebar's **VTX** segment (see "Stats
+panel" below) and on the immersive layout's Config|VTX panel (see "Config
+form" below); nothing it shows or edits is written to `localStorage` — it
+is a live mirror of the drone's own state, not page config.
+
 ## Config form
 
 The Config tab (`web/ui/src/components/ConfigPanel.svelte`, and
 `ConfigSide.svelte` for the immersive/mobile layout) edits the following.
+In the immersive layout, `ConfigSide`'s own header carries a second
+segment, **Config | VTX** — the latter opens the VTX tab (above) in the
+same floating panel, with its own subtitle ("Live drone settings" against
+Config's "Editable while disconnected"); it starts on VTX while a session
+is live and back on Config once it drops.
 
 In both modes:
 
@@ -783,6 +900,20 @@ into the file. Files recorded before 2026-09-29 used a different sync point;
 their history and repair recipe are in
 `docs/findings/2026-09-29-web-gs-raw-dvr-irap-sync.md`.
 
+A coded-size change mid-recording (a drone `VENC_MODE` MAVLink set
+rebuilding the encoder pipeline, `docs/mavlink.md`, is the live case)
+rolls to a new file rather than mixing two sizes in one header: one
+file's header can describe only one size. `RawDvr`'s OPFS open awaits
+through ASYNCIFY, which must run from the core loop and never from the
+AU callback that detects the change, so the roll defers — the current
+file seals immediately (reported through `onRecClosed` like any other
+stop) and the loop finishes the open on its next iteration. The new
+file is named `<base>-r<N>.mp4` (`N` counting up within this recording;
+`recFileName()`'s own collision suffix never produces that pattern, so
+it can't collide with a later recording's name) and opens on the next
+sync point — the core asks the drone for an IDR the moment the roll
+resolves, the same as a fresh Record press does.
+
 The file exists before the sync point, though. The (empty) OPFS file is
 created and opened right at the press (`OpfsFile::open()`, see Build,
 above), wrapped as a `DvrSink` (`OpfsSink` in `web_main.cpp`), and held by
@@ -858,7 +989,8 @@ with its state in `uplink`; see "RCF heard %" below):
 
 Where the panel lives depends on the layout:
 
-- **Windowed:** the sidebar's Stats/Config/Debug tabs (`Sidebar.svelte`).
+- **Windowed:** the sidebar's Stats/Config/VTX/Debug tabs (`Sidebar.svelte`;
+  VTX is the parameter-table tab, see "VTX tab" above).
 - **Immersive/fullscreen or mobile:** a floating, draggable panel
   (`FloatStats.svelte`, `web/ui/src/lib/layout.js`), so it stays visible
   over the fullscreen video.
@@ -1023,8 +1155,9 @@ In every eviction case the controller still owns the frame's
 `VideoFrame.close()` — nothing queued can outlive the moment it stops being
 wanted.
 
-**Stats group.** The Stats panel's **Phase lock** group
-(`statsView`'s `phaseGroup`, `web/ui/src/lib/view.js`) reads
+**Debug group.** The Debug tab's **Phase lock** group
+(`debugGroups()`'s `phaseGroup`, `web/ui/src/lib/view.js`, after the NACK
+group) reads
 `PhaseController.snapshot()` while a GS session is live (all dashes
 otherwise). With the toggle off it is a single `state` row reading `off`;
 on, it has:
@@ -1126,6 +1259,67 @@ counter across a same-nonce rejoin vs a new nonce, the stats block, the
 overlay loader) and `web/tests/{config,view}.test.mjs`. The page requests
 no IDR on a truncated AU (`Gate.onAu` → `skip: 'truncated'`). Bench record
 (USB, CPE relay, browser): `docs/findings/2026-10-07-web-gs-nack-bench.md`.
+
+## MAVLink seam
+
+The web core owns one `MavTunnel` (`gs/src/mav_tunnel.h`) in GS mode, wired
+exactly like `maburgs`'s: tagged under the live session only, flushed once
+per `tick()`, sent through the same `RcfSlotter` as RCFs. Two
+`EMSCRIPTEN_KEEPALIVE` exports move raw packet bytes across the page/core
+thread boundary, both ways, with no parsing on either side of the seam:
+`webgs_mav_push(p, n)` queues bytes from a local MAVLink peer for the core
+to parse and tunnel to the drone (0 if the core is not running), and
+`webgs_mav_take(out, cap)` pops one whole packet (drone -> local peer) per
+call, up to `cap` bytes -- never split, and never more than one packet per
+call, so a caller loops it until it returns 0 to drain everything queued. A
+`cap` of at least `MAVLINK_MAX_PACKET_LEN` (~280 B) always succeeds; a
+smaller one just leaves a too-big packet queued. The inbound side sits in a
+bounded ring (`web/src/mav_ring.h`, 64 KiB): the page has no MAVLink
+parser of its own (the VTX tab goes through the core's `ParamClient`,
+below, never these bytes), so nothing may ever call `webgs_mav_take`, and the drone's
+once-a-second heartbeat would otherwise grow an unbounded buffer for the
+page's whole session -- the ring drops the oldest queued packets instead. A
+page that wants to speak MAVLink pushes/pulls bytes through these two calls
+itself.
+
+Alongside that raw seam the core also runs its own `ParamClient`
+(`gs/src/param_client.h`), listing the drone's config rows over the same
+tunnel: its outbound PARAM_EXT_* traffic goes in through
+`MavTunnel::push_outbound`, so it is tagged and slotted exactly like a
+local MAVLink peer's, and the tunnel's `DeliverFn` hands it every inbound
+packet to the client (`ParamClient::on_packet`) as well as to `mav_in_`.
+`WebGs::tick()` re-lists it (a fresh `PARAM_EXT_REQUEST_LIST`, every row
+cleared) whenever the session links or its `vtx_nonce` changes while
+still linked, and drops every row back to the unlinked defaults when the
+session drops. `WebGs::params()` is the readout (`nullptr` in
+Spotter, which has no session to list over), `WebGs::param_set`/
+`param_refresh` drive a row edit or a fresh list round, and
+`webgs::params_json` renders the table for a page.
+
+Two more `EMSCRIPTEN_KEEPALIVE` exports move the page's side of that:
+`webgs_param_refresh()` queues a fresh list round and `webgs_param_set(id,
+text)` queues one row edit (both copy their arguments before returning, so
+the page may free them right after the call); each returns 0 queued or 1
+if the core is not running. The core loop drains both once per iteration
+and calls `WebGs::param_refresh`/`param_set` -- a set the client refuses on
+a known row (a bad value, one already in flight, or no session) lands on
+it as `state: "failed"` with `status` set to the reason, reported through
+the same push as everything else; an unknown id has no row to land on and
+is just dropped. The loop serialises `params_json` and calls
+`Module['onParams'](json)` the same way `onStats` is called (a native
+build prints a `PARAMS <json>` line instead) once when the core starts,
+in both modes, so the page has the table's rows before any session links;
+then, after each iteration, if the client's `seq()` moved since the last
+push. At most one push per iteration, none while nothing changed; Spotter
+has no client to move a seq, so its start push is its only one. The JSON
+mirrors `stats_json`'s style: `{linked, alive, list, mismatch, pending,
+rows: [{id, section, key, type, apply, help, value, state, status,
+age_ms}, ...]}` (`alive`: null until the drone's first `HEARTBEAT` on
+the current link, then whether one arrived within the last 3 s; `list`:
+none|pending|complete|partial; `state`: idle|sending|in_progress|
+accepted|failed|unsupported|timeout; `age_ms` only for a terminal state),
+or in Spotter `{linked: false, mode: "spotter", rows: [...]}` with every
+row's `value`/`age_ms` null and `state` idle.
 
 ## Colour correction
 

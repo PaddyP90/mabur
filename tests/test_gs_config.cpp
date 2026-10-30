@@ -1526,3 +1526,34 @@ TEST(tx_card_may_name_a_relay_after_the_explicit_cards) {
       "[radio]\ntx_card = 2\nrelays = [\"10.83.11.1:8310\"]\n[[radio.cards]]\nusb_pid = 34842\n")); });
   CHECK(w.find("radio.tx_card") != std::string::npos);
 }
+
+// [mavlink]: the MAVLink UDP endpoint. Absent = on, loopback, 14550.
+TEST(mavlink_section_defaults_parse_and_validate) {
+  auto d = maburgs::load_config(write_tmp(""));
+  CHECK(d.mavlink.enable);
+  CHECK(d.mavlink.bind == "127.0.0.1");
+  CHECK(d.mavlink.port == 14550);
+
+  auto c = maburgs::load_config(
+      write_tmp("[mavlink]\nenable = false\nbind = \"192.168.1.20\"\nport = 14551\n"));
+  CHECK(!c.mavlink.enable);
+  CHECK(c.mavlink.bind == "192.168.1.20");
+  CHECK(c.mavlink.port == 14551);
+
+  auto w = what_of([] { maburgs::load_config(write_tmp("[mavlink]\nport = 70000\n")); });
+  CHECK(w.find("mavlink.port") != std::string::npos);
+  w = what_of([] { maburgs::load_config(write_tmp("[mavlink]\nport = 0\n")); });
+  CHECK(w.find("mavlink.port") != std::string::npos);
+  w = what_of([] { maburgs::load_config(write_tmp("[mavlink]\nbind = \"localhost\"\n")); });
+  CHECK(w.find("mavlink.bind") != std::string::npos);
+  w = what_of([] { maburgs::load_config(write_tmp("[mavlink]\nsigning = true\n")); });
+  CHECK(w.find("mavlink.signing") != std::string::npos && w.find("unknown key") != std::string::npos);
+}
+
+TEST(mavlink_section_absent_is_reported_as_defaulted) {
+  std::vector<std::string> defaulted;
+  maburgs::load_config(write_tmp(""), &defaulted);
+  bool seen = false;
+  for (const auto& d : defaulted) seen |= d == "mavlink=(section absent)";
+  CHECK(seen);
+}

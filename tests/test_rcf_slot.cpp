@@ -275,10 +275,14 @@ TEST(probe_tail_blocks_the_grace_window) {
   RcfSlotter s(cfg);
   s.on_au_complete(20, true);                  // establishes have_au_/last_au_ms_
   CHECK(offer(s, 1, 21, false));                // since(1) < tail(2) -> held
+  // Same timeline with nothing held (a held frame would queue the next
+  // offer behind it): past the tail the grace window is open.
+  RcfSlotter s2(cfg);
+  s2.on_au_complete(20, true);
   SlotFrame f2 = sf(2);
-  CHECK(!s.offer(f2, 23, false));               // since(3) in [tail,grace] -> now
+  CHECK(!s2.offer(f2, 23, false));              // since(3) in [tail,grace] -> now
   CHECK(f2.reason == SlotReason::Grace);
-  CHECK(s.released_au() == 1);
+  CHECK(s2.released_au() == 1);
 }
 
 TEST(lost_probe_deadline_checks_idle_ahead_at_the_deadline) {
@@ -321,6 +325,35 @@ TEST(set_probe_tail_ms_clamps_negative_to_zero) {
   SlotFrame f = sf(1);
   CHECK(!s.offer(f, 1001, false));      // grace still works => tail clamped to 0
   CHECK(f.reason == SlotReason::Grace);
+}
+
+// A frame offered while others are held queues behind them, even when the
+// offer itself lands in the grace window: a counter-ordered sender (T_MAV,
+// whose drone side accepts only a greater counter) must never see a later
+// frame on air before an earlier held one.
+TEST(offer_while_held_queues_behind_even_in_grace) {
+  RcfSlotter s(RcfSlotCfg{20, 100, 2, 3, 1});
+  s.on_au_complete(1000, false);
+  CHECK(offer(s, 1, 1008, false));             // A: held, mid-burst risk
+  s.on_au_complete(1017, false);               // idle begins; the next offer is in grace
+  SlotFrame b = sf(2);
+  CHECK(s.offer(b, 1018, false));              // B: held behind A, not sent now
+  auto due = s.take_due(1018);
+  REQUIRE(due.size() == 2);
+  CHECK(due[0].seq == 1 && due[1].seq == 2);
+  CHECK(due[0].reason == SlotReason::Au && due[1].reason == SlotReason::Au);
+  CHECK(s.take_due(1019).empty());
+}
+
+TEST(bypass_while_held_still_passes_through) {
+  RcfSlotter s(RcfSlotCfg{20, 100, 2, 3, 1});
+  s.on_au_complete(1000, false);
+  CHECK(offer(s, 1, 1008, false));             // A held
+  CHECK(!offer(s, 2, 1009, true));             // bypass: straight out
+  CHECK(s.passthru() == 1);
+  s.on_au_complete(1017, false);
+  auto due = s.take_due(1017);
+  CHECK(due.size() == 1 && due[0].seq == 1);
 }
 
 MTEST_MAIN

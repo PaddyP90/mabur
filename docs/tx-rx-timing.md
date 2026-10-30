@@ -50,6 +50,7 @@ Drone → GS (the downlink, nearly all of the airtime):
 | NACK retransmits (sid 0 symbols) | on a verified `T_NACK` only | pushed at the TxQueue HEAD (`TxQueue::push_front`) | `[nack] air_pct`/`burst_ms` token bucket (`docs/fec-nack.md`) |
 | MSP OSD (sid 4) | `msp.update_rate_hz` 3 | `msp.symbol_size` 1312 B units | not slotted |
 | T_TELEM | 1 Hz | 54 B payload (`TELEM_LEN`) | not slotted |
+| T_MAV (MAVLink tunnel, untagged) | ≤ 1 per 50 ms | ≤ 600 B payload (`kMavMaxPayload`) | not slotted |
 | DISC_ACK | rendezvous only | small | not slotted |
 
 GS → drone (the uplink: a low duty cycle, but every send is a blast):
@@ -59,6 +60,7 @@ GS → drone (the uplink: a low duty cycle, but every send is a blast):
 | RCF (rate-control feedback) | every `link.feedback_ms`: code default 100, bundle 50 | slotted (§3.2); about 180 µs on air incl. preamble |
 | DISC keepalive | `beacon_keepalive_ms` 1000 | slotted like any RCF |
 | T_NACK (base selective repeat) | at most one per poll, when `link.nack.enable` (bundle: on) | **not slotted**: `send_control_frame` directly, mid-burst (`docs/fec-nack.md` "Packing and send") |
+| T_MAV (MAVLink tunnel, tagged) | on demand | slotted like RCF |
 | T_CAL_CMD | `maburcal` sessions only | not slotted; gated by the calibration radio-silence plan |
 
 Every uplink send is also gated by `ChannelCore::may_send` and by the
@@ -146,6 +148,9 @@ GS believes the drone is between bursts:
 - **No video.** With no AU in the last 100 ms (`video_recent_ms`:
   rendezvous, stalled video), everything passes through. DISC therefore
   needs no bypass.
+- **Order.** Frames offered while others are held queue behind them, so
+  every slotted sender keeps its order: a grace, no-video or pass-through
+  offer that finds the queue non-empty is held and released with it.
 
 `lead_ms`, `guard_ms`, `grace_ms` and `video_recent_ms` are compiled in
 (`RcfSlotCfg{hold, 100, 2, 3, 1}`). Only the hold is config.

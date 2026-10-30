@@ -20,7 +20,7 @@ export function latencyNow(snap, mode) {
 
 const signed = (v, d = 0) => (has(v) ? (Number(v) >= 0 ? '+' : '') + Number(v).toFixed(d) : D);
 
-// Phase lock stats group (docs/phase-lock.md "Web GS"): phase is
+// Phase lock Debug group (docs/phase-lock.md "Web GS"): phase is
 // PhaseController.snapshot(), or null when there is no live GS session to
 // report on (dashes). A spotter never steers (it sends 0, "Wire" in
 // docs/phase-lock.md), so its group collapses to the same single n/a row
@@ -49,8 +49,8 @@ function phaseGroup(phase, spot) {
 
 // ch/w: the session's start channel and width; cfg: the form (the
 // disconnected header line shows its link channel, or "auto"; while
-// connecting it shows ch). phase: PhaseController.snapshot(), or null.
-export function statsView({ connected, connecting = false, mode, ch, w, core, page, sessionCfg, cfg, videoSize, colour, phase = null }) {
+// connecting it shows ch).
+export function statsView({ connected, connecting = false, mode, ch, w, core, page, sessionCfg, cfg, videoSize, colour }) {
   const on = !!connected && !!core;
   const spot = mode === 'spotter';
   const pinned = !spot && sessionCfg.staticMcs >= 0;
@@ -90,7 +90,6 @@ export function statsView({ connected, connecting = false, mode, ch, w, core, pa
     codecLine: (on && videoSize ? `H.265 · ${videoSize.w}×${videoSize.h}` : 'H.265')
       + (colour === 'colortrans' ? ' · colortrans' : colour === 'unavailable' ? ' · colortrans unavailable' : ''),
     latencyCaption: spot ? 'rx→glass latency, last 12 s' : 'Latency, last 12 s',
-    phaseGroup: phaseGroup(phase, spot),
   };
 }
 
@@ -131,7 +130,8 @@ function lrecText(l) {
   return `${l.state} · ${size} · ${((l.rateBps || 0) * 8 / 1e6).toFixed(1)} Mb/s`;
 }
 
-export function debugGroups({ connected, mode, core, ausRate, hitches60, hitchesTotal, seg, lrec }) {
+// phase: PhaseController.snapshot(), or null.
+export function debugGroups({ connected, mode, core, ausRate, hitches60, hitchesTotal, seg, lrec, phase = null }) {
   const on = !!connected && !!core;
   const spot = mode === 'spotter';
   const isRelay = on && core.radio === 'relay';
@@ -211,6 +211,7 @@ export function debugGroups({ connected, mode, core, ausRate, hitches60, hitches
           ['settle', `${nk.settle_ms} ms`],
           ['drone rx / syms / refused', `${nk.drone_rx} / ${nk.drone_syms} / ${nk.drone_refused}`],
         ]) });
+  groups.push(phaseGroup(phase, spot));
   if (isRelay) {
     const SEC = ['HT20', 'HT40+', 'HT40-'];
     groups.push({ title: 'Relay', rows: rows([

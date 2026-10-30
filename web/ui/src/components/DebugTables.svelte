@@ -7,7 +7,7 @@
     <tbody>
       {#each grp.rows as row}
         <tr><td style="padding-left:0;color:var(--color-neutral-300)">{row.k}</td>
-          <td class="mono num" style="padding-right:0;text-align:right;font-size:12px;white-space:nowrap">{row.v}</td></tr>
+          <td class="mono num {row.tone || ''}" style="padding-right:0;text-align:right;font-size:12px;white-space:nowrap">{row.v}</td></tr>
       {/each}
     </tbody>
   </table>
@@ -16,3 +16,7 @@
   <button class="btn btn-secondary" type="button" onclick={onCopy}>Copy stats</button>
   <span class="dim5" style="font-size:12px" aria-live="polite">{copyMsg}</span>
 </div>
+<style>
+  /* Row tone (view.js): the phase lock's rate mismatch reads in caution text. */
+  .low { color: var(--color-status-caution); }
+</style>

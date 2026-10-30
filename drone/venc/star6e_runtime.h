@@ -57,6 +57,19 @@ int32_t star6e_runtime_sensor_offset(void);
 /** Tear the pipeline and the MI libraries down. Idempotent per field. */
 void star6e_runtime_teardown(Star6eRunnerContext *ctx);
 
+/** Stop and rebuild the pipeline with a new cfg while MI_SYS stays
+ *  initialized (no MI_SYS_Exit/MI_SYS_Init, no module re-open) — see
+ *  docs/findings/2026-09-07-boot-time.md for the per-module open cost this
+ *  avoids. Requires ctx->system_initialized (i.e. star6e_runtime_init has
+ *  already run and star6e_runtime_teardown has not); a pipeline left down
+ *  by an earlier failed call is started without a stop. Returns 0 on
+ *  success. On failure the session stays up: a further call may start a
+ *  pipeline again, and star6e_runtime_teardown() ends the session.
+ *  inject_fail != 0 stops the old pipeline and then fails without calling
+ *  into the SDK (the MABUR_VENC_FAIL_RESTARTS bench knob, venc_core.c). */
+int star6e_runtime_pipeline_restart(Star6eRunnerContext *ctx, const VencCfg *cfg,
+	int inject_fail);
+
 #ifdef __cplusplus
 }
 #endif

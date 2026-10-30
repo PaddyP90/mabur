@@ -371,3 +371,15 @@ test('construction never calls getModule, even one that throws', () => {
   const getModule = () => { throw new ReferenceError("Cannot access 'session' before initialization"); };
   assert.doesNotThrow(() => new PhaseController({ getModule }));
 });
+
+// The VTX tab's camera-mode dropdown reads the display rate off the grid
+// the rAF loop already feeds -- with the phase lock on or off.
+test('panelHz: null before the grid fits, then the fitted refresh', () => {
+  const c = new PhaseController({ getModule: () => null });
+  assert.equal(c.panelHz, null);
+  c.enabled = false;
+  for (let i = 0; i < 60; i++) c.onRaf(1000 + i * (1000 / 60));
+  assert.ok(Math.abs(c.panelHz - 60) < 0.01, `panelHz ${c.panelHz}`);
+  c.reset();
+  assert.equal(c.panelHz, null);
+});

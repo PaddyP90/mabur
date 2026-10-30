@@ -23,7 +23,9 @@
 // than hold_max_ms is released anyway so feedback never stalls on a
 // stalled/absent video stream. With no recent AU (no video) everything
 // passes through — that covers rendezvous, so DISC needs no bypass.
-// hold_max_ms 0 disables the slotter.
+// Frames offered while others are held queue behind them (grace, no-video
+// and pass-through included; only a bypass offer skips the queue), so every
+// slotted sender keeps its order. hold_max_ms 0 disables the slotter.
 //
 // Probe tail: the
 // probe-stream body is the LAST PPDU of every video AU's burst while a

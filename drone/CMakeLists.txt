@@ -9,7 +9,11 @@ add_library(mabur_drone_core STATIC
   src/telemetry.cpp
   src/vtx_recorder.cpp
   src/cal_apply.cpp
+  src/config_write.cpp
+  src/config_apply.cpp
   src/cal_sweep.cpp
+  src/mav_params.cpp
+  src/mav_component.cpp
   vendor/venc_frame_ring.c
   # venc_cfg.c is dependency-free C99 (string.h only), so it compiles on
   # host too — config.cpp's parse_venc() needs venc_cfg_defaults() at
@@ -73,9 +77,16 @@ if(CMAKE_CROSSCOMPILING)
   # (waybeam documentation/VIF_VPE_SYNC_ERROR_POSTMORTEM.md) as
   # binary-layout-dependent UB from MI struct handling, where "any binary
   # layout change -- new variables, different optimization -- can trigger the
-  # latent bug". The known instance is fixed (i6e_vpe_chn/i6e_vpe_para
-  # typedefs, which this build does use -- verified sizeof 196/100), but
-  # running the SDK-facing code at an optimisation level nobody has flown it
+  # latent bug". The MI structs the pipeline, the rate-control verbs and
+  # the 3A threads pass by pointer are pinned with a _Static_assert at the
+  # size the library copies, in star6e.h, star6e_cus3a.c, star6e_awb.c,
+  # pipeline_common.c and star6e_pipeline.c (MI_VENC_Stream_t is not:
+  # GetStream fills it field by field). Three were short and are fixed:
+  # i6_vif_dev (48 of 52; the stack word past it broke warm restarts
+  # whenever it was non-zero), MI_VENC_RcParam_t (52 of 56) and the CUS3A
+  # AE status (48 of 65, written past on the 3A thread's stack). A new
+  # failure of this class means checking a struct the asserts do not cover
+  # yet. But running the SDK-facing code at an optimisation level nobody has flown it
   # at buys nothing. The encoder path is I/O-bound; waybeam does 1080p60 at
   # -Os on this chip.
   target_compile_options(venc_core PRIVATE -Os)

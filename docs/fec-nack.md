@@ -175,7 +175,12 @@ slots = next pow2 ≥ bitrate_max_kbps × 1000/8 × 0.6 × ring_ms/1000 / symbol
 ```
 
 At the bundle's `bitrate_max_kbps` 24000, `ring_ms` 150 and symbol size 332
-that is 814 → **1024 slots × 346 B ≈ 354 kB**. The hot thread fills it from
+that is 814 → **1024 slots × 346 B ≈ 354 kB**. The ring is sized once at
+startup from the boot config's `bitrate_max_kbps` and never resized: an
+`ENC_BITRATE_MAX` MAVLink set (`docs/mavlink.md`) changes the live
+bitrate knob `RcAgent` runs against, but not this allocation, so raising
+the ceiling well past the boot value in flight narrows the ring's actual
+time coverage below `ring_ms`. The hot thread fills it from
 the UepEncoder source tap (base layer only). Seqlock-style: `put()` is one
 memcpy plus three atomic stores (state = 1, seq, state = 2), lock-free and
 allocation-free; `get()` rejects a slot that is mid-write or was

@@ -293,6 +293,21 @@ class RcAgent {
   // raises auth_reject. kOk fills *out. Any thread.
   enum class NackCheck { kOk, kMalformed, kRejected };
   NackCheck check_nack(const uint8_t* body, size_t len, rc::Nack* out);
+  // True while a link session is published (current_ is valid). Any thread.
+  bool has_published_session() const {
+    return published_session_.load(std::memory_order_acquire) != 0;
+  }
+  // T_MAV replay guard: accept_nack_counter's rule and CAS shape on its own
+  // state (mav_last_), so the GS's MAV and NACK counters never refuse each
+  // other. Any thread.
+  bool accept_mav_counter(uint32_t counter, uint64_t session);
+  // The MAV thread's whole T_MAV gate: parse_mav (tagged layout),
+  // verify_session_tagged with the counter as seq32, accept_mav_counter.
+  // kMalformed = the parse failed (radio corruption): auth_reject stays
+  // down. kRejected = parsed but the tag or the counter failed: raises
+  // auth_reject. kOk fills *out. Any thread.
+  enum class MavCheck { kOk, kMalformed, kRejected };
+  MavCheck check_mav(const uint8_t* body, size_t len, rc::Mav* out);
   static constexpr size_t kCalNonceRing = 8;
   // Replay harness only (maburd --dry-run): install a known pair so a file
   // of RCFs tagged under (vrx, vtx) verifies without a DISC exchange.
@@ -327,6 +342,33 @@ class RcAgent {
     link_established_ = false;
     return v;
   }
+
+  // Live config knobs: a MAVLink parameter set applies these without a
+  // daemon restart. Any thread (plain atomics); seeded from `cfg` in the
+  // constructor, so an RcAgent that never gets a set_live_knobs call behaves
+  // exactly as if it only ever read the matching Config field.
+  void set_live_knobs(int bitrate_max_kbps, double airtime_budget, bool low_power_enable,
+                       int venc_fps);
+
+  // The live low-power-enable knob (the MSP thread reads it to decide
+  // whether polling arm state still matters). Any thread.
+  bool low_power_enabled() const;
+
+  // The in-process encoder pipeline was just rebuilt (a fresh MI_VENC
+  // session under the same PID, e.g. after a venc.fps/size change): on the
+  // next tick, a known record wish carried by the next RCF re-issues
+  // set_record (the new pipeline has no memory of the old one's recorder
+  // state), and the fps/bitrate verbs are reasserted immediately instead of
+  // waiting for the periodic kReassertMs cadence. Any thread; a bare atomic
+  // flag, consumed on the agent thread.
+  void note_pipeline_rebuilt();
+
+  // The LDPC flag changed (radio.ldpc hot-reload): on the next tick the
+  // agent rebuilds the current operating point's ladder -- and its probe
+  // spec, if one is active -- for the SAME rung under the new flag and
+  // republishes it; every ladder built from then on uses it too. Any
+  // thread; a one-slot pending value, consumed on the agent thread.
+  void note_ldpc_changed(bool ldpc);
 
  private:
   const Config& cfg_;
@@ -388,6 +430,11 @@ class RcAgent {
   // accept_nack_counter's state: (vtx_nonce << 32) | last accepted counter.
   // A vtx other than the current pair's means "nothing accepted yet".
   std::atomic<uint64_t> nack_last_{0};
+  // accept_mav_counter's state, same encoding as nack_last_.
+  std::atomic<uint64_t> mav_last_{0};
+  // accept_nack_counter / accept_mav_counter: the CAS on one state word.
+  bool accept_session_counter_(std::atomic<uint64_t>& last_word, uint32_t counter,
+                               uint64_t session);
   bool session_promoted_ = false;
   uint8_t deferred_move_ch_ = 0;   // executed in tick() after main sent the promote Telem
   uint32_t fresh_vtx_nonce_();
@@ -455,6 +502,38 @@ class RcAgent {
   int rec_applied_ = -1;
   int16_t snr_off_sent_ = 0;  // last offset handed to the actuator
   void intake_arm_state_(uint64_t now_ms);
+
+  // Live config knobs (set_live_knobs): any thread may write, and the agent
+  // thread reads these, never the boot Config, for encoder.bitrate_max_kbps,
+  // encoder.airtime_budget, low_power.enable and venc.fps. int, not atomic<double>, for airtime_budget: std::atomic<double>
+  // is not guaranteed lock-free on armv7 (is_always_lock_free), and the
+  // policy's own 100 kbps rounding grid already swallows milli-scale error.
+  std::atomic<int> knob_bitrate_max_kbps_{0};
+  std::atomic<int> knob_airtime_budget_milli_{0};  // airtime_budget * 1000
+  std::atomic<bool> knob_low_power_enable_{false};
+  std::atomic<int> knob_venc_fps_{0};
+
+  // note_pipeline_rebuilt's handoff: consumed at the top of tick(), the
+  // same bare-flag shape as chain_break_pending_/arm_report_ above.
+  std::atomic<bool> rebuilt_pending_{false};
+  // note_ldpc_changed's handoff: -1 = none pending, else the new flag as
+  // 0/1 (an atomic<bool> can't also carry "nothing pending").
+  std::atomic<int> ldpc_pending_{-1};
+  // Agent-thread copy of the live LDPC flag every ladder build reads
+  // instead of cfg_.radio.ldpc; seeded from it in the constructor and
+  // updated only by tick()'s consumption of ldpc_pending_.
+  bool ldpc_live_ = true;
+
+  // Builds the 2-slot ladder for (mode, mcs, bw) under the live LDPC flag
+  // -- the one construction both the RCF path (on_rc_frame/apply_ladder_op)
+  // and note_ldpc_changed's rebuild share, so neither can forget it.
+  std::array<rc::LayerTxSpec, 2> ladder_live_(rc::PhyMode mode, uint8_t mcs, uint8_t bw) const;
+  // note_ldpc_changed's agent-thread half: rebuilds the current op's ladder
+  // (and probe spec, if one is active) for its own rung under the new flag
+  // and republishes. Not a new operating point -- the rung is unchanged --
+  // so generation is not bumped, the same rule reapply_with_shed follows
+  // for an unchanged rung.
+  void rebuild_current_op_ldpc_();
 
   // GS-requested IDR. The last RCF
   // idr_epoch seen this session (0 at every session edge) and whether a

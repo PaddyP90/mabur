@@ -56,8 +56,11 @@
 #include "mabur/nack_tracker.h"
 #include "mabur/node.h"
 #include "mabur/rc_proto.h"
+#include "mav_ring.h"
+#include "mav_tunnel.h"
 #include "msp_sink.h"
 #include "osd_screen.h"
+#include "param_client.h"
 #include "rcf_slot.h"
 #include "relay_stats.h"
 #include "rtt_estimator.h"
@@ -69,6 +72,8 @@
 namespace webgs {
 
 enum class Mode { Gs, Spotter };
+
+class WebGs;
 
 struct Au {
   std::vector<uint8_t> data;       // Annex-B, FrameHdr stripped
@@ -165,6 +170,13 @@ struct Stats {
 // "follow_state": str|null; "follows": int|null (spotter with a roster).
 std::string stats_json(const Stats& s);
 
+// The parameter table readout: the ParamClient's state, every row keyed by
+// its MAVLink id. "alive" is null until the drone's first HEARTBEAT on the
+// current link, then whether one arrived within the last 3 s. Spotter mode
+// has no ParamClient (no session to list over): static columns, every
+// value null, every row "idle".
+std::string params_json(const WebGs& g, uint64_t now_ms);
+
 // Validates the page's channel set/start/width with the shared rules: width
 // 20|40; the set 1-8 unique members in [1,177], at width 40 every member an
 // HT40 pair primary on one offset (mabur::channel_set_issue); start_ch a
@@ -245,10 +257,33 @@ class WebGs {
   // Its low byte is the RCF idr_epoch; the drone serves one IDR per change.
   // Spotter: kept for stats only (no VrxController, nothing sent).
   void set_idr_requests(uint32_t n);
+  // MAVLink tunnel (mav_tunnel.h): Gs only -- a spotter has no session to
+  // tag frames under, so there is no tunnel and these are no-ops.
+  // Outbound: bytes from the local MAVLink peer, cut at any boundary
+  // (forwarded to the tunnel's parser; unlinked outbound is dropped and
+  // counted, never queued forever).
+  void mav_push_outbound(const uint8_t* p, size_t n);
+  // Inbound: pops one whole packet (drone -> local peer) into `out` if it
+  // fits in `cap` bytes -- never a split one, and never more than one per
+  // call (loop until this returns 0 to drain everything queued). A packet
+  // that doesn't fit is left queued for the next call with a bigger
+  // buffer; MAVLINK_MAX_PACKET_LEN (~280 B) always fits. Returns the bytes
+  // copied, 0 if nothing was.
+  size_t mav_take_inbound(uint8_t* out, size_t cap);
+  // ParamClient (gs/src/param_client.h) over the same tunnel: Gs only --
+  // nullptr in Spotter, which has no session to list parameters over.
+  const maburgs::ParamClient* params() const { return params_.get(); }
+  // Sets row's value to text; false with *why on a refusal (ParamClient::set's
+  // reasons). Spotter always refuses "not linked" (no ParamClient exists).
+  bool param_set(size_t row, const std::string& text, std::string* why);
+  // Starts a new list round without clearing rows already held. No-op in
+  // Spotter, or while unlinked.
+  void param_refresh();
   Mode mode() const { return mode_; }
   // Test seams.
   const maburgs::VrxController* vrx() const { return vrx_.get(); }  // nullptr in Spotter
   maburgs::VrxController* vrx() { return vrx_.get(); }              // tests: on_video / test_set_move_edge
+  const maburgs::MavTunnel* mav() const { return mav_.get(); }      // nullptr in Spotter
   const maburgs::ChannelCore* channel_core() const { return chan_.get(); }   // nullptr without a core
   const maburgs::LinkHealthAssembler& health() const { return lha_; }
   uint64_t sends() const { return sends_; }
@@ -276,6 +311,20 @@ class WebGs {
   uint64_t msp_tick_ms_ = 0;
   std::unique_ptr<maburgs::VrxController> vrx_;   // Gs only
   std::unique_ptr<maburgs::RcfSlotter> slot_;     // Gs only
+  // MAVLink tunnel (mav_tunnel.h): Gs only, sent through the same slotter as
+  // RCFs. Inbound packets land here (DeliverFn, mav_ring.h) for the page
+  // to drain one at a time via mav_take_inbound.
+  std::unique_ptr<maburgs::MavTunnel> mav_;
+  MavRing mav_in_;
+  // ParamClient (gs/src/param_client.h): Gs only, listing the drone's
+  // config rows over the same tunnel's outbound queue. Re-listed whenever
+  // the session links up, drops, or its vtx_nonce changes while still
+  // linked -- param_linked_/param_vtx_seen_ are the values set_linked was
+  // last called with, so tick() can tell the session apart from the last
+  // one it listed.
+  std::unique_ptr<maburgs::ParamClient> params_;
+  bool param_linked_ = false;
+  uint32_t param_vtx_seen_ = 0;
   // Software NACK (fec-nack): Gs only, and only with [link.nack] enable --
   // null otherwise, so a spotter has no tracker at all. The same poll block
   // as maburgs main.cpp, sent directly (never the slotter) through send_().

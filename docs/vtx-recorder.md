@@ -132,6 +132,29 @@ idle and encodes on the JPEG device.
 Boot log line that proves the order:
 `[record] ch1 1920x1080 60 fps CBR 40000 kbps on VPE port0, bound before the link (idle)`.
 
+## Live parameter sets — `REC_*`, `VENC_MODE`
+
+A MAVLink set to any `[record]` key, or to `VENC_MODE`
+(`docs/mavlink.md` "Applying a set"), rebuilds the encoder pipeline
+in-process (`docs/link-adaptation.md` "Rebuilding the encoder pipeline
+in-process") rather than restarting `maburd`. Before the rebuild,
+`ConfigApplier` stops a recording in progress
+(`VtxRecorder::request(false)`, waited out with `settled()`) so the
+file closes on a whole fragment before the channel underneath it goes
+away, then hands the recorder the new `[record]` section and link size
+(`set_config` / `set_link_size`). The rebuild itself recreates ch1 in
+the same bind-before-the-link order as a boot (above) — a rebuild is
+not exempt from the invariant. If the GS's standing record wish (the
+last `Rcf.rec` it sent) was "on", the next RCF after the rebuild
+re-issues it (`RcAgent::note_pipeline_rebuilt`) and recording resumes,
+into a new file.
+
+A `VENC_MODE` set that changes the sensor mode's aspect, while the
+recorder is on with an explicit `record.size`, rewrites `record.size` to
+the new venc size in the same candidate (`mavparam::patch_row`,
+`drone/src/mav_params.cpp`), so the aspect-ratio rule above is never
+broken by the fps/size set alone; `record.fps` never follows.
+
 ## Power-loss contract
 
 After every fragment cut, the writer calls `DvrMux::sync()` (`fflush` +
