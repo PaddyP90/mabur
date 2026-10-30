@@ -40,22 +40,18 @@ import time
 # scope (`global mavutil`) before any other function needs it.
 mavutil = None
 
-# The four MAV_PARAM_ACK_* result codes, resolved once at import time so
-# wait_final_ack() and its test (which has no pymavlink installed) can use
-# them without going through the lazy `mavutil` global above. The common
-# dialect's numbering (ACCEPTED 0, VALUE_UNSUPPORTED 1, FAILED 2,
-# IN_PROGRESS 3) is the fallback when pymavlink isn't importable.
-try:
-    from pymavlink import mavutil as _mavutil_ack_codes
-    PARAM_ACK_ACCEPTED = _mavutil_ack_codes.mavlink.PARAM_ACK_ACCEPTED
-    PARAM_ACK_VALUE_UNSUPPORTED = _mavutil_ack_codes.mavlink.PARAM_ACK_VALUE_UNSUPPORTED
-    PARAM_ACK_FAILED = _mavutil_ack_codes.mavlink.PARAM_ACK_FAILED
-    PARAM_ACK_IN_PROGRESS = _mavutil_ack_codes.mavlink.PARAM_ACK_IN_PROGRESS
-except ImportError:
-    PARAM_ACK_ACCEPTED = 0
-    PARAM_ACK_VALUE_UNSUPPORTED = 1
-    PARAM_ACK_FAILED = 2
-    PARAM_ACK_IN_PROGRESS = 3
+# The four MAV_PARAM_ACK_* result codes (common.xml), mirroring
+# mavutil.mavlink.PARAM_ACK_*. Hardcoded rather than read off an imported
+# pymavlink: pymavlink picks its dialect (MAVLink 1.0 vs 2.0) at first
+# import and caches it, so importing it here -- before main() sets
+# MAVLINK20=1 below -- would permanently pin the process to MAVLink 1.0,
+# where the extended-parameter *_ext_*_send methods this file needs don't
+# exist. wait_final_ack() and its test (which has no pymavlink installed)
+# use these directly instead.
+PARAM_ACK_ACCEPTED = 0
+PARAM_ACK_VALUE_UNSUPPORTED = 1
+PARAM_ACK_FAILED = 2
+PARAM_ACK_IN_PROGRESS = 3
 
 RESULT_NAMES = {
     PARAM_ACK_ACCEPTED: "ACCEPTED",
