@@ -692,7 +692,9 @@ link…" before the session links; "The drone's parameter table differs
 from this page — redeploy." once a value arrives whose `param_count` is
 not this build's row count (the client's `table_mismatch`, which wins
 over the list states); "Reading the drone's settings…" while a list round
-is out; "Some settings did not answer." if it came back partial; and
+is out and some row has no value yet — the re-list `ParamClient` runs after
+an accepted rebuild set (a VENC_MODE set may move REC_SIZE) keeps every
+value on show and reads silently; "Some settings did not answer." if it came back partial; and
 nothing once it is complete. A dim "no heartbeat" tag sits beside it
 when the session is linked and the drone's component has sent a MAVLink
 `HEARTBEAT` on this link but none in the last 3 s (the JSON's `alive`
@@ -722,10 +724,10 @@ the drone runs reads as On). VENC_MODE and REC_SIZE are dropdowns that
 commit on a pick (below). The other Int, Real and Str rows are text boxes
 that commit on Enter or on blur, and only when the typed text differs
 from the drone's current value. Text that cannot hold the row's type (say
-`1.5` in an Int row) sends nothing: the row shows a local result line —
-"not a valid integer", "not a valid number", or for Str the allowed
-spelling — and keeps exactly what was typed, so the operator can fix it;
-the line clears on that row's next edit.
+`1.5` in an Int row) sends nothing: the row's status reads "Invalid" with
+a reason line — "not a valid integer", "not a valid number", or for Str
+the allowed spelling — and keeps exactly what was typed, so the operator
+can fix it; both clear on that row's next edit.
 
 **VENC_MODE** is one dropdown of "`<fps>` fps · `<W>`×`<H>`" choices: every
 size of the 60, 90, 100 and 120 fps sensor modes (`MODE_FPS`, sizes from
@@ -756,20 +758,27 @@ the drone's current recording size when either is off that list.
 Nothing above 1920x1080 is offered, since that needs the 30 fps 4K sensor
 mode.
 
-While a set is in flight, that row shows a small CSS spinner next to its
-busy state ("sending…" / "applying…") and every other row is disabled — the core applies one set at a
-time. Once the answer arrives (the row leaves sending/in_progress, or the
-client refuses the commit outright), the row's widget is rebuilt on the
-drone's value, so a refused toggle or edit never stays on screen beside
-its refusal. The result line that follows reads "accepted" (fading 3 s
-after the push that reported it); "failed: `<reason>`" for a refusal by
-the client (its own reason: "apply in progress", "not linked") or by the
-drone's loader or applier (the reason its `STATUSTEXT` carries, or
-"refused" if that never arrived); "unsupported:
-the drone refused this value's shape" for the drone's
-`PARAM_ACK_VALUE_UNSUPPORTED` — a type, shape or unknown-id refusal, which
-carries no reason text; or "no answer" on a set that timed out. The
-row's apply path (`docs/mavlink.md`) is not shown.
+A row's status sits at the right end of its label line (`rowStatus` in
+`vtxparams.js`), so it never moves the layout. While a set is in flight
+the control already shows the picked value, it pulses in the accent colour,
+a thin bar sweeps along its bottom edge, and the status reads "Sending…"
+then "Applying…". Every other row dims slightly and stops taking input
+(`inert`) without greying out, since the core applies one set at a time.
+Once the answer arrives (the row leaves sending/in_progress, or the client
+refuses the commit outright), the row's widget is rebuilt on the drone's
+value, so a refused toggle or edit never stays on screen beside its
+refusal. On success the bar fills, the status reads "✓ Saved", and both
+fade after about 1.5 s. On an error the control gives one small shake, the
+status turns red, and a reason line appears under the hint (the only time
+the layout moves): "Failed" with the client's reason ("apply in
+progress", "not linked"), the drone's loader or applier reason (its
+`STATUSTEXT`, or "refused" if that never arrived), or "the drone refused
+this value's shape" for `PARAM_ACK_VALUE_UNSUPPORTED` (a type, shape or
+unknown-id refusal, which carries no reason text); or "No answer" with
+"The drone did not answer; it may not have applied the change." on a
+timeout. With reduced motion there is no sweep, pulse, shake or fade: the
+bar is static while busy and the status text carries the state. The row's
+apply path (`docs/mavlink.md`) is not shown.
 
 The tab lives both on the windowed sidebar's **VTX** segment (see "Stats
 panel" below) and on the immersive layout's Config|VTX panel (see "Config

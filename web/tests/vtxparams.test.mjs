@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import {
   MODE_SIZES, modeSizes, modeText, parseMode, commitText, SECTION_KICKER, groupRows,
   HINTS, LABELS, HIDDEN, rowLabel, rowHint, headerText, rowView, invalidText, showNoHeartbeat, commitAnswered,
-  MODE_FPS, modeChoices, recSizeChoices, rowWidget, toggleValues, toggleState, SLICES_ON, SLICES_OFF, REC_SETTINGS, rowShown, DISPLAY_MATCH_HZ, modeDisplayNote,
+  MODE_FPS, modeChoices, recSizeChoices, rowWidget, toggleValues, toggleState, SLICES_ON, SLICES_OFF, REC_SETTINGS, rowShown, DISPLAY_MATCH_HZ, modeDisplayNote, rowStatus,
 } from '../ui/src/lib/vtxparams.js';
 
 test('modeSizes per sensor mode and at the boundaries', () => {
@@ -112,6 +112,38 @@ test('rowShown hides the recorder settings only while REC_ENABLE reads off', () 
   }
   assert.equal(rowShown({ id: 'REC_ENABLE' }, '0'), true);
   assert.equal(rowShown({ id: 'ENC_BITRATE_MAX' }, '0'), true);
+});
+
+// rowStatus reads the row's state through rowView, as the panel does.
+const statusOf = (row, localErr = null) => rowStatus(row, rowView(row, 0, -1, null), localErr);
+
+test('rowStatus: label-line text while a set is in flight', () => {
+  assert.deepEqual(statusOf({ state: 'sending', value: '1' }), { kind: 'busy', text: 'Sending…' });
+  assert.deepEqual(statusOf({ state: 'in_progress', value: '1' }), { kind: 'busy', text: 'Applying…' });
+});
+
+test('rowStatus: saved while the accepted result is fresh, nothing once idle', () => {
+  assert.deepEqual(statusOf({ state: 'accepted', value: '1', age_ms: 0 }), { kind: 'ok', text: '✓ Saved' });
+  assert.equal(statusOf({ state: 'accepted', value: '1', age_ms: 5000 }), null);
+  assert.equal(statusOf({ state: 'idle', value: '1' }), null);
+});
+
+test('rowStatus: a refusal says Failed and carries the reason without its prefix', () => {
+  assert.deepEqual(statusOf({ state: 'failed', value: '1', status: 'rec fps above camera fps' }),
+    { kind: 'err', text: 'Failed', reason: 'rec fps above camera fps' });
+  assert.deepEqual(statusOf({ state: 'failed', value: '1', status: '' }), { kind: 'err', text: 'Failed', reason: 'refused' });
+  assert.deepEqual(statusOf({ state: 'unsupported', value: '1', status: '' }),
+    { kind: 'err', text: 'Failed', reason: "the drone refused this value's shape" });
+});
+
+test('rowStatus: a timeout says No answer and that the change may not have applied', () => {
+  assert.deepEqual(statusOf({ state: 'timeout', value: '1' }),
+    { kind: 'err', text: 'No answer', reason: 'The drone did not answer; it may not have applied the change.' });
+});
+
+test('rowStatus: a local invalid edit wins over the row state', () => {
+  assert.deepEqual(statusOf({ state: 'accepted', value: '1', age_ms: 0 }, 'not a valid integer'),
+    { kind: 'err', text: 'Invalid', reason: 'not a valid integer' });
 });
 
 test('rowWidget per row', () => {
@@ -251,9 +283,17 @@ test('headerText by state', () => {
     "The drone's parameter table differs from this page — redeploy.");
   assert.equal(headerText({ linked: true, mismatch: false, list: 'pending' }, 'gs'),
     "Reading the drone's settings…");
+  assert.equal(headerText({ linked: true, mismatch: false, list: 'pending', rows: [{ value: '1' }, { value: null }] }, 'gs'),
+    "Reading the drone's settings…");
   assert.equal(headerText({ linked: true, mismatch: false, list: 'partial' }, 'gs'),
     'Some settings did not answer.');
   assert.equal(headerText({ linked: true, mismatch: false, list: 'complete' }, 'gs'), '');
+});
+
+// An accepted rebuild set makes the core re-list with every value still
+// held; that re-read is silent, unlike the first read after linking.
+test('headerText: a re-list over values already held says nothing', () => {
+  assert.equal(headerText({ linked: true, mismatch: false, list: 'pending', rows: [{ value: '1' }, { value: '60@1920x1080' }] }, 'gs'), '');
 });
 
 test('rowView shows typed text only while pending', () => {

@@ -269,7 +269,11 @@ export function headerText(params, mode) {
   if (mode === 'spotter') return 'VTX settings need GS mode.';
   if (!params.linked) return 'Waiting for the drone link…';
   if (params.mismatch) return "The drone's parameter table differs from this page — redeploy.";
-  if (params.list === 'pending') return "Reading the drone's settings…";
+  // Only the first read: the re-list after an accepted rebuild set keeps
+  // every value on show, so it reads silently.
+  if (params.list === 'pending' && !(params.rows?.length && params.rows.every((r) => r.value != null))) {
+    return "Reading the drone's settings…";
+  }
   if (params.list === 'partial') return 'Some settings did not answer.';
   return '';
 }
@@ -319,4 +323,19 @@ export function rowView(row, idx, pending, typed, sincePushMs = 0) {
       break;
   }
   return { shown, disabled, busy, result, resultKind };
+}
+
+// The status at the right end of a row's label line, from its rowView `v`:
+// { kind: 'busy' | 'ok' | 'err', text, reason? }, or null when there is
+// nothing to say. `reason` is the line shown under the hint, only on an
+// error. `localErr` (an edit the page could not send) wins over the state.
+export function rowStatus(row, v, localErr = null) {
+  if (localErr) return { kind: 'err', text: 'Invalid', reason: localErr };
+  if (v.resultKind === 'busy') return { kind: 'busy', text: row.state === 'sending' ? 'Sending…' : 'Applying…' };
+  if (v.resultKind === 'ok') return { kind: 'ok', text: '✓ Saved' };
+  if (v.resultKind !== 'err') return null;
+  if (row.state === 'timeout') {
+    return { kind: 'err', text: 'No answer', reason: 'The drone did not answer; it may not have applied the change.' };
+  }
+  return { kind: 'err', text: 'Failed', reason: v.result.replace(/^(failed|unsupported): /, '') };
 }
