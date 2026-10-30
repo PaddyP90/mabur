@@ -16,29 +16,29 @@ namespace mabur {
 
 namespace {
 
-constexpr ApplyPath kPaths[] = {
-    ApplyPath::Reprogram,  // RADIO_WALL_MARGN: the TX-power plan is recomputed in place
-    ApplyPath::Reprogram,  // RADIO_LDPC: the radiotap flag
-    ApplyPath::Rebuild,    // VENC_FPS
-    ApplyPath::Rebuild,    // VENC_SIZE
-    ApplyPath::Rebuild,    // VENC_SLICES
-    ApplyPath::Knob,       // ENC_BITRATE_MAX
-    ApplyPath::Knob,       // ENC_AIRTIME
-    ApplyPath::Rebuild,    // REC_ENABLE: the recorder's encode channel is part of the pipeline
-    ApplyPath::Rebuild,    // REC_BITRATE
-    ApplyPath::Rebuild,    // REC_FPS
-    ApplyPath::Rebuild,    // REC_SIZE
-    ApplyPath::Knob,       // LOWPWR_ENABLE
-    ApplyPath::Reprogram,  // MSP_ENABLE: the MSP thread starts or stops
+constexpr ConfigApplyPath kPaths[] = {
+    ConfigApplyPath::Reprogram,  // RADIO_WALL_MARGN: the TX-power plan is recomputed in place
+    ConfigApplyPath::Reprogram,  // RADIO_LDPC: the radiotap flag
+    ConfigApplyPath::Rebuild,    // VENC_FPS
+    ConfigApplyPath::Rebuild,    // VENC_SIZE
+    ConfigApplyPath::Rebuild,    // VENC_SLICES
+    ConfigApplyPath::Knob,       // ENC_BITRATE_MAX
+    ConfigApplyPath::Knob,       // ENC_AIRTIME
+    ConfigApplyPath::Rebuild,    // REC_ENABLE: the recorder's encode channel is part of the pipeline
+    ConfigApplyPath::Rebuild,    // REC_BITRATE
+    ConfigApplyPath::Rebuild,    // REC_FPS
+    ConfigApplyPath::Rebuild,    // REC_SIZE
+    ConfigApplyPath::Knob,       // LOWPWR_ENABLE
+    ConfigApplyPath::Reprogram,  // MSP_ENABLE: the MSP thread starts or stops
 };
 static_assert(sizeof(kPaths) / sizeof(kPaths[0]) == cfgparam::kCount,
               "every parameter row needs an apply path");
 
-const char* path_name(ApplyPath p) {
+const char* path_name(ConfigApplyPath p) {
   switch (p) {
-    case ApplyPath::Knob: return "knob";
-    case ApplyPath::Reprogram: return "reprogram";
-    case ApplyPath::Rebuild: return "rebuild";
+    case ConfigApplyPath::Knob: return "knob";
+    case ConfigApplyPath::Reprogram: return "reprogram";
+    case ConfigApplyPath::Rebuild: return "rebuild";
   }
   return "?";
 }
@@ -49,11 +49,11 @@ bool is(const cfgparam::Row& row, const char* section, const char* key) {
 
 }  // namespace
 
-ApplyPath apply_path_for(size_t row) {
-  return row < cfgparam::kCount ? kPaths[row] : ApplyPath::Rebuild;
+ConfigApplyPath apply_path_for(size_t row) {
+  return row < cfgparam::kCount ? kPaths[row] : ConfigApplyPath::Rebuild;
 }
 
-ConfigApplier::ConfigApplier(std::string cfg_path, Config live, ApplyHooks hooks,
+ConfigApplier::ConfigApplier(std::string cfg_path, Config live, ConfigApplyHooks hooks,
                              std::function<void(const std::string&)> log)
     : cfg_path_(std::move(cfg_path)),
       live_(std::move(live)),
@@ -99,7 +99,7 @@ bool ConfigApplier::submit(size_t row, const std::string& rendered_value, std::s
   return true;
 }
 
-bool ConfigApplier::take_result(ApplyResult* out) {
+bool ConfigApplier::take_result(ConfigApplyResult* out) {
   std::lock_guard<std::mutex> l(mu_);
   if (!has_result_) return false;
   *out = std::move(result_);
@@ -131,18 +131,18 @@ void ConfigApplier::run() {
     const Job job = std::move(job_);
     has_job_ = false;
     l.unlock();
-    ApplyResult r = apply(job);
+    ConfigApplyResult r = apply(job);
     l.lock();
     result_ = std::move(r);
     has_result_ = true;
   }
 }
 
-ApplyResult ConfigApplier::apply(const Job& job) {
+ConfigApplyResult ConfigApplier::apply(const Job& job) {
   const auto t0 = std::chrono::steady_clock::now();
   const cfgparam::Row& row = cfgparam::kTable[job.row];
   const std::string field = std::string(row.section) + "." + row.key;
-  ApplyResult r{false, "", apply_path_for(job.row), 0};
+  ConfigApplyResult r{false, "", apply_path_for(job.row), 0};
   try {
     // Held from the re-read through the publish: a calibration publish
     // between them would be overwritten by this one's stale text.
@@ -226,10 +226,10 @@ bool ConfigApplier::dispatch(size_t row_idx, const std::string& field, const Con
                              std::string* reason) {
   const cfgparam::Row& row = cfgparam::kTable[row_idx];
   switch (apply_path_for(row_idx)) {
-    case ApplyPath::Knob:
+    case ConfigApplyPath::Knob:
       hooks_.set_knobs(cand);
       return true;
-    case ApplyPath::Reprogram:
+    case ConfigApplyPath::Reprogram:
       if (is(row, "radio", "wall_margin_db")) {
         std::string err;
         if (hooks_.power_plan(cand, &err)) return true;
@@ -246,7 +246,7 @@ bool ConfigApplier::dispatch(size_t row_idx, const std::string& field, const Con
       }
       *reason = field + ": no reprogram for this key";
       return false;
-    case ApplyPath::Rebuild:
+    case ConfigApplyPath::Rebuild:
       return rebuild(field, cand, reason);
   }
   *reason = field + ": no apply path";

@@ -30,7 +30,7 @@
 //              cold restart of it, and as a last resort asks the daemon to
 //              exit so its wrapper respawns it from the unchanged file.
 //
-// Everything that touches the process goes through ApplyHooks, so the
+// Everything that touches the process goes through ConfigApplyHooks, so the
 // host tests drive the applier with fakes.
 #include <atomic>
 #include <condition_variable>
@@ -45,12 +45,12 @@
 
 namespace mabur {
 
-enum class ApplyPath : uint8_t { Knob, Reprogram, Rebuild };
+enum class ConfigApplyPath : uint8_t { Knob, Reprogram, Rebuild };
 
 // The path for cfgparam::kTable row `row`. Rebuild for a row past the table.
-ApplyPath apply_path_for(size_t row);
+ConfigApplyPath apply_path_for(size_t row);
 
-struct ApplyHooks {
+struct ConfigApplyHooks {
   std::function<void(const Config&)> set_knobs;                     // RcAgent's live knobs
   std::function<bool(const Config&, std::string* err)> power_plan;  // wall margin reprogram
   std::function<void(bool ldpc)> ldpc;                              // radiotaps + the agent
@@ -64,10 +64,10 @@ struct ApplyHooks {
   std::function<bool()> calibration_active;
 };
 
-struct ApplyResult {
+struct ConfigApplyResult {
   bool ok;
   std::string reason;  // empty on ok
-  ApplyPath path;
+  ConfigApplyPath path;
   uint64_t ms;         // apply thread time, lock wait through publish
 };
 
@@ -79,7 +79,7 @@ class ConfigApplier {
  public:
   // `live` is the config the process is running (the one it booted with).
   // `log`, when set, receives one line per apply and one per ladder rung.
-  ConfigApplier(std::string cfg_path, Config live, ApplyHooks hooks,
+  ConfigApplier(std::string cfg_path, Config live, ConfigApplyHooks hooks,
                 std::function<void(const std::string&)> log);
   ~ConfigApplier();  // waits for an apply in progress, then joins the thread
   ConfigApplier(const ConfigApplier&) = delete;
@@ -93,7 +93,7 @@ class ConfigApplier {
   // result over, so a result is never overwritten by the next submit.
   bool submit(size_t row, const std::string& rendered_value, std::string* why);
   // Non-blocking: the finished apply's result, once. The MAV loop polls it.
-  bool take_result(ApplyResult* out);
+  bool take_result(ConfigApplyResult* out);
   bool busy() const;
   // The config the process runs. Written only by the apply thread; read it
   // from that thread or after take_result returned true.
@@ -111,7 +111,7 @@ class ConfigApplier {
   };
 
   void run();
-  ApplyResult apply(const Job& job);
+  ConfigApplyResult apply(const Job& job);
   bool apply_locked(const Job& job, const std::string& field, std::string* reason);
   bool dispatch(size_t row, const std::string& field, const Config& cand, std::string* reason);
   bool rebuild(const std::string& field, const Config& cand, std::string* reason);
@@ -119,7 +119,7 @@ class ConfigApplier {
 
   const std::string cfg_path_;
   Config live_;
-  ApplyHooks hooks_;
+  ConfigApplyHooks hooks_;
   std::function<void(const std::string&)> log_;
 
   mutable std::mutex mu_;  // job_, has_job_, result_, has_result_, stop_, thread_
@@ -127,7 +127,7 @@ class ConfigApplier {
   std::thread thread_;
   Job job_;
   bool has_job_ = false;
-  ApplyResult result_{};
+  ConfigApplyResult result_{};
   bool has_result_ = false;
   bool stop_ = false;
 

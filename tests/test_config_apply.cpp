@@ -1,5 +1,5 @@
 // ConfigApplier: a parameter set applied to the running process through
-// fake ApplyHooks, against a real copy of the bundle config and the real
+// fake ConfigApplyHooks, against a real copy of the bundle config and the real
 // loader and publisher.
 #include <sys/stat.h>
 #include <unistd.h>
@@ -91,8 +91,8 @@ struct Fake {
     cv.notify_all();
   }
 
-  ApplyHooks hooks() {
-    ApplyHooks h;
+  ConfigApplyHooks hooks() {
+    ConfigApplyHooks h;
     h.set_knobs = [this](const Config& c) {
       order.push_back("set_knobs");
       set_knobs.push_back(c);
@@ -160,7 +160,7 @@ struct Rig {
 };
 
 // Polls take_result for up to 2 s.
-bool wait_result(ConfigApplier& a, ApplyResult* r) {
+bool wait_result(ConfigApplier& a, ConfigApplyResult* r) {
   for (int i = 0; i < 2000; ++i) {
     if (a.take_result(r)) return true;
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -168,10 +168,10 @@ bool wait_result(ConfigApplier& a, ApplyResult* r) {
   return false;
 }
 
-ApplyResult apply(ConfigApplier& a, size_t row, const std::string& value) {
+ConfigApplyResult apply(ConfigApplier& a, size_t row, const std::string& value) {
   std::string why;
   REQUIRE(a.submit(row, value, &why));
-  ApplyResult r{};
+  ConfigApplyResult r{};
   REQUIRE(wait_result(a, &r));
   return r;
 }
@@ -181,8 +181,8 @@ constexpr size_t kWallMargin = 0, kVencSize = 3, kVencSlices = 4, kBitrateMax = 
 }  // namespace
 
 TEST(every_row_has_the_path_from_the_table) {
-  using P = ApplyPath;
-  const ApplyPath want[13] = {P::Reprogram, P::Reprogram, P::Rebuild, P::Rebuild, P::Rebuild,
+  using P = ConfigApplyPath;
+  const ConfigApplyPath want[13] = {P::Reprogram, P::Reprogram, P::Rebuild, P::Rebuild, P::Rebuild,
                               P::Knob,      P::Knob,      P::Rebuild, P::Rebuild, P::Rebuild,
                               P::Rebuild,   P::Knob,      P::Reprogram};
   REQUIRE(cfgparam::kCount == 13);
@@ -191,8 +191,8 @@ TEST(every_row_has_the_path_from_the_table) {
 
 TEST(knob_set_calls_set_knobs_then_publishes) {
   Rig g;
-  const ApplyResult r = apply(g.a, kBitrateMax, "9000");
-  CHECK(r.ok && r.path == ApplyPath::Knob);
+  const ConfigApplyResult r = apply(g.a, kBitrateMax, "9000");
+  CHECK(r.ok && r.path == ConfigApplyPath::Knob);
   CHECK(g.f.set_knobs.size() == 1 && g.f.set_knobs[0].encoder.bitrate_max_kbps == 9000);
   CHECK(g.f.order == std::vector<std::string>{"set_knobs"});
   CHECK(slurp(g.path()).find("bitrate_max_kbps   = 9000") != npos);
@@ -207,8 +207,8 @@ TEST(knob_set_calls_set_knobs_then_publishes) {
 
 TEST(rebuild_set_runs_stop_configure_restart_after_in_order) {
   Rig g;
-  const ApplyResult r = apply(g.a, kVencSlices, "2");
-  CHECK(r.ok && r.path == ApplyPath::Rebuild);
+  const ConfigApplyResult r = apply(g.a, kVencSlices, "2");
+  CHECK(r.ok && r.path == ConfigApplyPath::Rebuild);
   CHECK((g.f.order == std::vector<std::string>{"recorder_stop", "record_configure",
                                                "pipeline_restart", "after_rebuild"}));
   REQUIRE(g.f.pipeline_restart.size() == 1);
@@ -223,7 +223,7 @@ TEST(rebuild_set_runs_stop_configure_restart_after_in_order) {
 TEST(rebuild_failure_restores_previous_and_publishes_nothing) {
   Rig g;
   g.f.restart_ok = {false, true};  // new fails, old succeeds
-  const ApplyResult r = apply(g.a, kVencSlices, "2");
+  const ConfigApplyResult r = apply(g.a, kVencSlices, "2");
   CHECK(!r.ok && r.reason.find("restored previous") != npos);
   CHECK(r.reason == "pipeline refused venc.slices: restored previous");
   REQUIRE(g.f.pipeline_restart.size() == 2);
@@ -244,7 +244,7 @@ TEST(ladder_runs_every_rung) {
   Rig g;
   g.f.restart_ok = {false, false};
   g.f.cold_ok = false;
-  const ApplyResult r = apply(g.a, kVencSlices, "2");
+  const ConfigApplyResult r = apply(g.a, kVencSlices, "2");
   CHECK(!r.ok && g.f.cold == 1 && g.f.exit == 1);
   CHECK(r.reason == "pipeline lost: exiting");
   CHECK(g.f.after_rebuild.empty());
@@ -252,7 +252,7 @@ TEST(ladder_runs_every_rung) {
 
   g.f.restart_ok = {false, false, false, false};
   g.f.cold_ok = true;
-  const ApplyResult r2 = apply(g.a, kVencSlices, "2");
+  const ConfigApplyResult r2 = apply(g.a, kVencSlices, "2");
   CHECK(!r2.ok && g.f.cold == 2 && g.f.exit == 1 && r2.reason.find("(cold)") != npos);
   CHECK(r2.reason == "pipeline refused venc.slices: restored previous (cold)");
   CHECK(g.f.after_rebuild.size() == 1 && g.f.after_rebuild[0].venc.core.slices == 4);
@@ -268,9 +268,9 @@ TEST(second_submit_during_apply_is_refused) {
   CHECK(g.a.busy());
   CHECK(!g.a.submit(kBitrateMax, "9000", &why) && why == "apply in progress");
   g.f.release();
-  ApplyResult r{};
+  ConfigApplyResult r{};
   REQUIRE(wait_result(g.a, &r));
-  CHECK(r.ok && r.path == ApplyPath::Rebuild);
+  CHECK(r.ok && r.path == ConfigApplyPath::Rebuild);
   CHECK(g.f.set_knobs.empty());
   CHECK(!g.a.busy());
 }
@@ -285,7 +285,7 @@ TEST(untaken_result_keeps_the_applier_busy) {
   std::this_thread::sleep_for(std::chrono::milliseconds(20));  // the result is posted
   CHECK(g.a.busy());
   CHECK(!g.a.submit(kBitrateMax, "8000", &why) && why == "apply in progress");
-  ApplyResult r{};
+  ConfigApplyResult r{};
   REQUIRE(g.a.take_result(&r));
   CHECK(r.ok && !g.a.busy());
   CHECK(!g.a.take_result(&r));
@@ -299,7 +299,7 @@ TEST(submit_during_calibration_is_refused) {
   CHECK(!g.a.submit(kWallMargin, "2.0", &why) && why == "calibration in progress");
   CHECK(!g.a.busy());
   std::this_thread::sleep_for(std::chrono::milliseconds(20));
-  ApplyResult r{};
+  ConfigApplyResult r{};
   CHECK(!g.a.take_result(&r));
   CHECK(g.f.power_plan.empty());
   CHECK(slurp(g.path()) == g.original);
@@ -330,7 +330,7 @@ TEST(publish_failure_after_apply_reverts) {
   {
     ConfigApplier a{path, load_config(path), f.hooks(),
                     [&](const std::string& l) { lines.push_back(l); }};
-    const ApplyResult r = apply(a, kBitrateMax, "9000");
+    const ConfigApplyResult r = apply(a, kBitrateMax, "9000");
     CHECK(!r.ok && r.reason.find("publish failed") != npos);
     CHECK(f.set_knobs.size() == 2 && f.set_knobs[1].encoder.bitrate_max_kbps == original_max);
     CHECK(f.set_knobs[0].encoder.bitrate_max_kbps == 9000);
@@ -347,7 +347,7 @@ TEST(publish_failure_after_apply_reverts) {
 
 TEST(loader_refusal_applies_nothing) {
   Rig g;
-  const ApplyResult r = apply(g.a, kVencSize, "\"1x\"");
+  const ConfigApplyResult r = apply(g.a, kVencSize, "\"1x\"");
   CHECK(!r.ok && g.f.pipeline_restart.empty() && r.reason.find("venc.size") != npos);
   CHECK(r.reason.find("config: ") == npos && r.reason.find(g.path()) == npos);
   CHECK(g.f.order.empty());
@@ -358,9 +358,9 @@ TEST(loader_refusal_applies_nothing) {
 TEST(wall_margin_reprogram_failure_is_reported_and_unpublished) {
   Rig g;
   g.f.power_ok = false;
-  const ApplyResult r = apply(g.a, kWallMargin, "2.0");
+  const ConfigApplyResult r = apply(g.a, kWallMargin, "2.0");
   CHECK(!r.ok && slurp(g.path()) == g.original);
-  CHECK(r.path == ApplyPath::Reprogram && r.reason.find("walls out of range") != npos);
+  CHECK(r.path == ConfigApplyPath::Reprogram && r.reason.find("walls out of range") != npos);
   CHECK(g.f.power_plan.size() == 1 && g.f.power_plan[0].radio.wall_margin_db == 2.0);
   CHECK(!exists(g.path() + ".pre-param"));
   CHECK(g.a.live().radio.wall_margin_db == 1.0);
@@ -368,8 +368,8 @@ TEST(wall_margin_reprogram_failure_is_reported_and_unpublished) {
 
 TEST(wall_margin_reprogram_publishes) {
   Rig g;
-  const ApplyResult r = apply(g.a, kWallMargin, "2.0");
-  CHECK(r.ok && r.path == ApplyPath::Reprogram);
+  const ConfigApplyResult r = apply(g.a, kWallMargin, "2.0");
+  CHECK(r.ok && r.path == ConfigApplyPath::Reprogram);
   CHECK(g.f.order == std::vector<std::string>{"power_plan"});
   CHECK(g.a.live().radio.wall_margin_db == 2.0);
   CHECK(load_config(g.path()).radio.wall_margin_db == 2.0);
@@ -377,8 +377,8 @@ TEST(wall_margin_reprogram_publishes) {
 
 TEST(ldpc_calls_ldpc_hook_with_candidate) {
   Rig g;
-  const ApplyResult r = apply(g.a, 1, "false");
-  CHECK(r.ok && r.path == ApplyPath::Reprogram);
+  const ConfigApplyResult r = apply(g.a, 1, "false");
+  CHECK(r.ok && r.path == ConfigApplyPath::Reprogram);
   CHECK(g.f.ldpc == std::vector<bool>{false});
   CHECK(g.f.order == std::vector<std::string>{"ldpc"});
 }
@@ -386,8 +386,8 @@ TEST(ldpc_calls_ldpc_hook_with_candidate) {
 TEST(msp_enable_calls_msp_hook_with_candidate) {
   Rig g;
   REQUIRE(!load_config(g.path()).low_power.enable);
-  const ApplyResult r = apply(g.a, kMsp, "false");
-  CHECK(r.ok && r.path == ApplyPath::Reprogram);
+  const ConfigApplyResult r = apply(g.a, kMsp, "false");
+  CHECK(r.ok && r.path == ConfigApplyPath::Reprogram);
   CHECK(g.f.msp.size() == 1 && g.f.msp[0].first == false);
   CHECK(!g.f.msp[0].second.msp.enable);
 }
@@ -401,12 +401,12 @@ TEST(apply_waits_for_the_config_write_lock) {
     std::string why;
     REQUIRE(g.a.submit(kBitrateMax, "9000", &why));
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    ApplyResult r{};
+    ConfigApplyResult r{};
     CHECK(!g.a.take_result(&r));
     CHECK(g.f.set_knobs.empty());
     CHECK(slurp(g.path()) == g.original);
   }
-  ApplyResult r{};
+  ConfigApplyResult r{};
   REQUIRE(wait_result(g.a, &r));
   CHECK(r.ok && g.f.set_knobs.size() == 1);
 }
@@ -424,7 +424,7 @@ TEST(external_rewrite_refreshes_live_before_next_apply) {
   g.f.power_ok = true;
   g.f.on_set_knobs = nullptr;
   g.f.restart_ok = {false, true};
-  const ApplyResult r = apply(g.a, kVencSlices, "2");
+  const ConfigApplyResult r = apply(g.a, kVencSlices, "2");
   CHECK(!r.ok);
   REQUIRE(g.f.pipeline_restart.size() == 2);
   CHECK(g.f.pipeline_restart[1].radio.wall_margin_db == 3.0);
