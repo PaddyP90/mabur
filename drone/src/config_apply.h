@@ -103,9 +103,9 @@ class ConfigApplier {
   // calibrated values rather than the ones this applier last saw.
   void note_file_rewritten_externally();
   ConfigApplierStats stats() const;
-  // Teardown: waits for an apply in progress (its result stays takeable),
-  // joins the thread, and from then on refuses every submit ("shutting
-  // down"). Idempotent; call it from one thread.
+  // Teardown: a job accepted before this call is still applied (its result
+  // stays takeable), then the thread is joined; from then on every submit
+  // is refused ("shutting down"). Idempotent; call it from one thread.
   void shutdown();
 
  private:

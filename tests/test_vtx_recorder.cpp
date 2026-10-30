@@ -370,4 +370,33 @@ TEST(settled_tracks_the_worker_acting_on_the_last_wish) {
   CHECK(r.settled());
 }
 
+// A parameter set can turn [record] on or off while the recorder lives on:
+// the next start probes the config set_config last handed it.
+TEST(set_config_enables_and_disables_the_next_start) {
+  Tree t;
+  FakeChannel ch;
+  RecordCfg off = t.cfg();
+  off.enable = false;
+  VtxRecorder r(off, ch, 1920, 1080, t.paths);
+  r.set_config(t.cfg());
+  r.request(true);
+  r.service(0);
+  CHECK(ch.starts == 1);
+  feed(r, key_au(), 1000, true);
+  for (uint32_t i = 1; i < 10; ++i) feed(r, p_au(), 1000 + i * 16667, false);
+  r.service(0);
+  CHECK(r.state() == RecState::Recording);
+  CHECK(r.files() == 1);
+  r.request(false);
+  r.service(0);
+  CHECK(r.state() == RecState::Off);
+
+  r.set_config(off);
+  r.request(true);
+  r.service(0);
+  CHECK(r.state() == RecState::Error);
+  CHECK(r.err() == RecErr::Disabled);
+  CHECK(ch.starts == 1);
+}
+
 MTEST_MAIN

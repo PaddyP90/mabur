@@ -131,7 +131,9 @@ void ConfigApplier::run() {
   std::unique_lock<std::mutex> l(mu_);
   for (;;) {
     cv_.wait(l, [this] { return stop_ || has_job_; });
-    if (stop_) return;
+    // A job accepted before shutdown() is applied first: its submit was
+    // answered IN_PROGRESS and is owed a result.
+    if (!has_job_) return;
     const Job job = std::move(job_);
     has_job_ = false;
     l.unlock();

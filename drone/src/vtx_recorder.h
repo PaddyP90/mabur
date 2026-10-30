@@ -77,6 +77,11 @@ class VtxRecorder {
   // pipeline rebuild can change it while the recorder lives on; the file
   // open in progress keeps the size it was opened with. Any thread.
   void set_link_size(int width, int height);
+  // The [record] section the next start probes and records with: a
+  // parameter set can turn recording on or off, or move it, while the
+  // recorder lives on. A recording in progress keeps the section it started
+  // with. Any thread.
+  void set_config(const RecordCfg& cfg);
   // prefixed: the AU is already in MP4 layout (4-byte length before each
   // NAL) and `key` came from the encoder's NAL table -- the drain builds that
   // while copying, so nothing here rescans it. Otherwise it is Annex-B and
@@ -116,7 +121,7 @@ class VtxRecorder {
     status_.store(pack_rec_status(s, e), std::memory_order_relaxed);
   }
 
-  RecordCfg cfg_;
+  RecordCfg cfg_;  // worker thread: the section the current start took
   RecordChannel& ch_;
   RecorderPaths paths_;
   RecorderLimits lim_;
@@ -133,6 +138,7 @@ class VtxRecorder {
   bool accepting_ = false;
   bool quit_ = false;
   int width_, height_;       // the link's size, read when a file opens
+  RecordCfg next_cfg_;       // set_config's, copied into cfg_ by do_start
 
   // Worker thread only:
   bool running_ = false;

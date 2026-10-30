@@ -1930,6 +1930,9 @@ int run_real_mode(const Config& cfg, uint8_t start_ch, const std::string& cfg_pa
 #ifdef MABUR_HAVE_VENC
     record_configure(c);
 #endif
+    // The recorder follows the rebuilt pipeline: its record channel exists
+    // only if [record] enables it, and its files carry the link's size.
+    vtx_rec.set_config(c.record);
     vtx_rec.set_link_size(c.venc.core.width, c.venc.core.height);
   };
   apply_hooks.pipeline_restart = [](const Config& c) {

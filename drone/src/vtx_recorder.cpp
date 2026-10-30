@@ -52,7 +52,13 @@ std::optional<uint64_t> free_mb(const std::string& dir) {
 
 VtxRecorder::VtxRecorder(const RecordCfg& cfg, RecordChannel& ch, int width, int height,
                          RecorderPaths paths, RecorderLimits lim)
-    : cfg_(cfg), ch_(ch), paths_(std::move(paths)), lim_(lim), width_(width), height_(height) {
+    : cfg_(cfg),
+      ch_(ch),
+      paths_(std::move(paths)),
+      lim_(lim),
+      width_(width),
+      height_(height),
+      next_cfg_(cfg) {
   mint = [this](const std::string& d) { return namer_.next(d); };
   set_status(RecState::Off, RecErr::None);
 }
@@ -103,6 +109,11 @@ void VtxRecorder::set_link_size(int width, int height) {
 bool VtxRecorder::settled() const {
   std::lock_guard<std::mutex> lk(mx_);
   return done_gen_.load() == gen_;
+}
+
+void VtxRecorder::set_config(const RecordCfg& cfg) {
+  std::lock_guard<std::mutex> lk(mx_);
+  next_cfg_ = cfg;
 }
 
 void VtxRecorder::on_au(const uint8_t* au, size_t n, uint32_t pts_us, bool key, bool prefixed) {
@@ -170,6 +181,12 @@ RecErr VtxRecorder::probe() const {
 
 void VtxRecorder::do_start() {
   if (running_) return;
+  {
+    // Once per start: the probe and the recording that follows read this
+    // copy, never the one set_config may be replacing.
+    std::lock_guard<std::mutex> lk(mx_);
+    cfg_ = next_cfg_;
+  }
   const RecErr e = probe();
   if (e != RecErr::None) {
     set_status(RecState::Error, e);
